@@ -17,7 +17,6 @@ import threading
 import time
 from typing import Any
 import urllib.parse
-from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 import requests
@@ -32,7 +31,6 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-_EASTERN = ZoneInfo("America/New_York")
 _METER_SERIES = re.compile(r"^\s*Meter #(\d+)")
 
 # Path fragments that mean "you were sent to sign in" (portal or Okta).
@@ -616,39 +614,6 @@ class PsegClient:
                 if isinstance(x, (int, float)) and x > active_x:
                     active_x, active_name = x, name
 
-        for series in series_list:
-            if not isinstance(series, dict) or series.get("name"):
-                continue
-            navigator: dict[str, float] = {}
-            for point in series.get("data") or []:
-                if not isinstance(point, (list, tuple)) or len(point) < 2:
-                    continue
-                ts, y = point[:2]
-                if (
-                    isinstance(ts, bool)
-                    or not isinstance(ts, (int, float))
-                    or isinstance(y, bool)
-                    or not isinstance(y, (int, float))
-                    or not math.isfinite(y)
-                ):
-                    continue
-                try:
-                    day = datetime.fromtimestamp(ts / 1000, tz=_EASTERN).strftime("%Y-%m-%d")
-                except (OverflowError, OSError, ValueError):
-                    continue
-                navigator[day] = float(y)
-            if navigator:
-                mismatches = sum(
-                    abs(total - navigator[day]) > 0.05
-                    for day, total in totals.items()
-                    if day in navigator
-                )
-                if mismatches:
-                    _LOGGER.warning(
-                        "PSE&G navigator differs from merged meter totals on %d days",
-                        mismatches,
-                    )
-                break
         records = []
         for date_iso in sorted(totals):
             kwh = round(totals[date_iso], 2)

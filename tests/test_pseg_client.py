@@ -1,7 +1,6 @@
 """Unit tests for PSE&G API client."""
 
 from datetime import UTC, datetime
-from zoneinfo import ZoneInfo
 
 import pytest
 import requests
@@ -654,37 +653,3 @@ def test_merge_skips_missing_usage_and_bad_date(caplog: pytest.LogCaptureFixture
         ("2026-10-20", 3.0)
     ]
     assert "Skipping" in caplog.text
-
-
-@pytest.mark.parametrize("navigator_total, warning_count", [(10.0, 0), (11.0, 1)])
-def test_navigator_cross_check_warns_once_per_parse(
-    navigator_total: float, warning_count: int, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Account totals validate meter sums without replacing them."""
-    eastern = ZoneInfo("America/New_York")
-    def timestamp(day: int) -> int:
-        return int(datetime(2026, 10, day, tzinfo=eastern).timestamp() * 1000)
-
-    chart = {"Data": {"series": [
-        {"data": [[timestamp(18), navigator_total], [timestamp(19), navigator_total]]},
-        _meter("Meter #111 (RS)", [("10/18/2026", 10.0), ("10/19/2026", 10.0)]),
-    ]}}
-    with caplog.at_level("WARNING"):
-        parsed = PsegClient()._parse_chart_data(chart)
-    assert [r["kwh"] for r in parsed["history_14d"]] == [10.0, 10.0]
-    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "navigator" in r.message.lower()]
-    assert len(warnings) == warning_count
-    if warning_count:
-        assert "2" in warnings[0].message
-
-
-def test_navigator_timestamp_uses_new_york_date(caplog: pytest.LogCaptureFixture) -> None:
-    """A UTC midnight navigator point belongs to the prior day in New York."""
-    utc_midnight = int(datetime(2026, 10, 19, tzinfo=UTC).timestamp() * 1000)
-    chart = {"Data": {"series": [
-        {"data": [[utc_midnight, 10.0]]},
-        _meter("Meter #111 (RS)", [("10/18/2026", 10.0), ("10/19/2026", 20.0)]),
-    ]}}
-    with caplog.at_level("WARNING"):
-        PsegClient()._parse_chart_data(chart)
-    assert not [r for r in caplog.records if r.levelname == "WARNING" and "navigator" in r.message.lower()]
