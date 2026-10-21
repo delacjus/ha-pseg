@@ -3,82 +3,92 @@
     "step": {
       "user": {
         "title": "Connect PSE&G Account",
-        "description": "{addon_status}Select how you would like to connect your PSE&G MySmartEnergy account:",
-        "menu_options": {
-          "automated": "Automated Sign-In (Requires Companion Add-on)",
-          "cookie": "Browser Session Cookie (No Add-on Required)"
-        }
-      },
-      "automated": {
-        "title": "Automated Sign-In",
-        "description": "Enter your PSE&G online credentials. If two-factor authentication is requested by Okta, you will be prompted for your one-time verification code on the next step.",
+        "description": "Authenticate using active session cookies from your web browser. Copy the Cookie header from a request to id.myaccount.pseg.com (required) and optionally from mysmartenergy.nj.pseg.com.",
         "data": {
-          "username": "Username or Email",
-          "password": "Password",
-          "mfa_method": "Two-Factor Method (SMS or Email)"
-        }
-      },
-      "reauth": {
-        "title": "Re-authenticate PSE&G",
-        "description": "{addon_status}Your PSE&G session has expired. Select how you would like to re-authenticate:",
-        "menu_options": {
-          "reauth_confirm": "Automated Sign-In (Credentials & MFA)",
-          "cookie": "Browser Session Cookie"
-        }
-      },
-      "reconfigure": {
-        "title": "Reconfigure PSE&G",
-        "description": "{addon_status}Select how you would like to update your PSE&G connection:",
-        "menu_options": {
-          "reauth_confirm": "Automated Sign-In (Credentials & MFA)",
-          "cookie": "Browser Session Cookie"
+          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com)",
+          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com, optional)"
         }
       },
       "reauth_confirm": {
         "title": "Re-authenticate PSE&G",
-        "description": "Please verify your credentials and MFA method to re-authenticate account {username}.",
+        "description": "Your PSE&G Okta session has expired. Please paste fresh session cookies below to re-authenticate.",
         "data": {
-          "username": "Username or Email",
-          "password": "Password",
-          "mfa_method": "Two-Factor Method (SMS or Email)"
+          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com)",
+          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com, optional)"
         }
       },
-      "mfa": {
-        "title": "Two-Factor Verification",
-        "description": "A 6-digit verification code has been sent to your selected phone or email. Enter the code below, or check 'Cancel and restart' to start over.",
+      "reconfigure": {
+        "title": "Reconfigure PSE&G Connection",
+        "description": "Update your PSE&G session cookies below.",
         "data": {
-          "mfa_code": "6-Digit Security Code",
-          "restart": "Cancel and restart sign-in"
-        }
-      },
-      "cookie": {
-        "title": "Browser Session Cookie",
-        "description": "Authenticate directly using an active session cookie from your web browser.\n\n**How to get your cookie:**\n1. In your browser, log in to the PSE&G portal (mysmartenergy.nj.pseg.com)\n2. Press **F12** (or right-click → **Inspect**) to open Developer Tools\n3. Click the **Network** tab, then refresh the page (F5)\n4. Click any request to mysmartenergy.nj.pseg.com (e.g. `Dashboard`)\n5. In **Request Headers**, copy the full value of the `Cookie:` header and paste it below.",
-        "data": {
-          "cookie": "Session Cookie"
+          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com)",
+          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com, optional)"
         }
       }
     },
     "error": {
-      "missing_credentials": "Please fill in all required fields.",
-      "invalid_auth": "Authentication failed. Please verify your username and password.",
-      "recaptcha_blocked": "Google reCAPTCHA has throttled automated audio challenge solving. Please choose 'Browser Session Cookie' from the re-authentication menu, or try again later.",
-      "auth_server_error": "The automated login helper encountered an error on port 8000. Please try again or use the session cookie option.",
-      "invalid_cookie": "The session cookie provided was rejected or has expired.",
-      "auth_server_unavailable": "The PSE&G Auth Companion Add-on is not running (port 8000 unreachable). Please install and start the companion add-on under Settings > Add-ons to use automated OTP login, or choose 'Browser Session Cookie' from the menu.",
-      "invalid_code": "The verification code entered is invalid or expired.",
+      "missing_credentials": "Please enter your Okta session cookies.",
+      "okta_session_invalid": "The Okta session cookies provided are expired or invalid.",
+      "cannot_connect": "Failed to connect to PSE&G. Please check your network connection.",
       "unknown": "An unexpected error occurred while communicating with PSE&G."
     },
     "abort": {
       "already_configured": "This PSE&G account is already configured.",
       "reauth_successful": "Re-authentication was successful.",
-      "reconfigure_successful": "Reconfiguration was successful."
+      "reconfigure_successful": "Reconfiguration was successful.",
+      "reauth_account_mismatch": "The provided credentials belong to a different account than the one configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "PSE&G Energy Options",
+        "description": "Configure settings for PSE&G Energy.",
+        "data": {
+          "price_per_kwh": "Estimated Electricity Rate ($/kWh)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "electricity_consumption": {
+        "name": "Electricity consumption"
+      },
+      "electricity_cost": {
+        "name": "Electricity cost (estimated)"
+      },
+      "meter_id": {
+        "name": "Meter ID"
+      },
+      "latest_reading_date": {
+        "name": "Latest reading date"
+      },
+      "outdoor_temperature": {
+        "name": "Outdoor temperature"
+      },
+      "next_update": {
+        "name": "Next update"
+      },
+      "connection_status": {
+        "name": "Connection status",
+        "state": {
+          "connected": "Connected",
+          "auth_required": "Authentication required",
+          "error": "Error"
+        }
+      }
+    },
+    "button": {
+      "refresh_data": {
+        "name": "Refresh data"
+      }
     }
   },
   "issues": {
     "reauth_required": {
       "title": "PSE&G Authentication Required",
-      "description": "Your PSE&G session has expired and requires two-factor verification. Please re-authenticate your account under Settings > Devices & Services."
+      "description": "Your PSE&G session has expired. Please re-authenticate under Settings > Devices & Services > PSE&G."
     }
   },
   "services": {
