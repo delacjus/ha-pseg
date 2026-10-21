@@ -118,6 +118,62 @@ async def test_user_flow_success_creates_entry(hass: HomeAssistant) -> None:
         assert result["data"][CONF_KNOWN_METER_IDS] == ["88776655", "11223344"]
 
 
+
+async def test_user_flow_remember_me_portal_only(hass: HomeAssistant) -> None:
+    """Portal cookies with MM_RememberMe and no Okta cookies set up via Remember Me."""
+
+    def renew(client: PsegClient) -> bool:
+        client.sso_renewals = 1
+        return True
+
+    with (
+        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch("custom_components.pseg.pseg_client.PsegClient.renew_remember_me", new=renew),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": "Meter 55443322"},
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+            data={CONF_OKTA_COOKIES: "", CONF_PORTAL_COOKIES: "MM_SID=a; MM_RememberMe=b"},
+        )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert any(c["name"] == "MM_RememberMe" for c in result["data"]["cookies"])
+
+
+async def test_user_flow_remember_me_rejected(hass: HomeAssistant) -> None:
+    with (
+        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.renew_remember_me",
+            side_effect=PsegOktaSessionExpired("rejected"),
+        ),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": "Meter 55443322"},
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+            data={CONF_OKTA_COOKIES: "", CONF_PORTAL_COOKIES: "MM_SID=a; MM_RememberMe=b"},
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "remember_me_failed"}
+
+
+async def test_user_flow_requires_some_cookies(hass: HomeAssistant) -> None:
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN,
+        context={"source": SOURCE_USER},
+        data={CONF_OKTA_COOKIES: "", CONF_PORTAL_COOKIES: ""},
+    )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "missing_credentials"}
+
 async def test_user_flow_proves_okta_only_renewal(hass: HomeAssistant) -> None:
     """Setup needs a second client that renews without the pasted portal session."""
     sessions: list[PsegClient] = []

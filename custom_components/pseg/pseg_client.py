@@ -28,6 +28,7 @@ from .const import (
     OKTA_HOST,
     PORTAL_BASE_URL,
     PORTAL_HOST,
+    REMEMBER_ME_COOKIE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -247,15 +248,71 @@ class PsegClient:
             raise PsegTransientError(f"PSE&G portal returned HTTP {resp.status_code}")
         return resp
 
+    def _has_cookie(self, name: str, host: str) -> bool:
+        return any(
+            c.name == name and (c.domain or "").lstrip(".") == host for c in self.session.cookies
+        )
+
+    @property
+    def has_remember_me(self) -> bool:
+        """MyMeter local-login 'Remember Me' cookie present (lives ~1 year)."""
+        return self._has_cookie(REMEMBER_ME_COOKIE, PORTAL_HOST)
+
+    @property
+    def has_okta_session(self) -> bool:
+        """An Okta session cookie is present (SAML SSO renewal is possible)."""
+        return any(self._has_cookie(name, OKTA_HOST) for name in ("idx", "sid"))
+
     @_locked
     def ensure_session(self) -> bool:
-        """Validate whether portal session is active, attempting SSO renewal if expired."""
+        """Validate the portal session; renew via Remember Me or Okta SSO if expired."""
         resp = self._get_dashboard()
         if self._is_login_page(resp):
-            return self.renew_sso()
+            return self._renew()
         if resp.status_code != 200:
             raise PsegTransientError(f"Unexpected HTTP {resp.status_code} from /Dashboard")
         self._mark_session_ok()
+        return True
+
+    def _renew(self) -> bool:
+        """Renew a lapsed portal session: Remember Me first, then Okta SSO."""
+        if self.has_remember_me:
+            try:
+                return self.renew_remember_me()
+            except PsegOktaSessionExpired:
+                if not self.has_okta_session:
+                    raise
+        return self.renew_sso()
+
+    @_locked
+    def renew_remember_me(self) -> bool:
+        """Let MyMeter re-issue MM_SID from its 'Remember Me' cookie.
+
+        Accounts that use MyMeter's own email/password login with Remember Me get
+        MM_RememberMe (expires ~1 year; seen live 2026-10-21) next to the
+        session-only MM_SID. PSE&G's Okta sign-in has no 'keep me signed in' and
+        dies ~1 h after login, so this is the only long-lived renewal path. The dead
+        MM_SID is dropped first so the portal falls back to the remember cookie.
+        """
+        for cookie in [c for c in self.session.cookies if c.name == "MM_SID"]:
+            self.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
+        resp = self._get_dashboard()
+        if self._is_login_page(resp):
+            # Some sites only honour the remember cookie on the landing page.
+            try:
+                self.session.get(f"{PORTAL_BASE_URL}/", allow_redirects=True, timeout=20)
+            except requests.RequestException as err:
+                raise PsegTransientError(f"Network error during Remember Me sign-in: {err}") from err
+            resp = self._get_dashboard()
+        if self._is_login_page(resp):
+            self._mark_okta_expired()
+            raise PsegOktaSessionExpired("MyMeter Remember Me sign-in expired or was rejected")
+        if resp.status_code != 200:
+            raise PsegTransientError(f"Unexpected HTTP {resp.status_code} after Remember Me sign-in")
+        self.last_sso_renewal = datetime.now(UTC).isoformat()
+        self.sso_renewals += 1
+        self._mark_session_ok()
+        _LOGGER.info("MyMeter Remember Me renewal successful")
         return True
 
     @_locked
@@ -352,6 +409,10 @@ class PsegClient:
         """
         self.last_keepalive = datetime.now(UTC).isoformat()
         try:
+            if not self.has_okta_session:
+                # Remember Me accounts: no Okta idle timer to feed; just keep the
+                # portal session warm (ensure_session renews from MM_RememberMe).
+                return self.ensure_session()
             return self.renew_sso()
         except PsegTransientError as err:
             _LOGGER.debug("Keepalive network check encountered transient error: %s", err)

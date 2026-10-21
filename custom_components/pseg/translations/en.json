@@ -3,35 +3,36 @@
     "step": {
       "user": {
         "title": "Connect PSE&G Account",
-        "description": "Authenticate using active session cookies from your web browser. Copy the Cookie header from a request to id.myaccount.pseg.com (required) and optionally from mysmartenergy.nj.pseg.com.",
+        "description": "Paste session cookies from your browser (Developer Tools). Best: sign in on mysmartenergy.nj.pseg.com with the Email/Password boxes and Remember Me ON, then paste the Cookie header from a Dashboard request into Portal Cookies (it must contain MM_RememberMe; the Okta box can stay empty). Alternative: Okta cookies from the id.myaccount.pseg.com /sso/saml request (expire about 1 hour after you sign in).",
         "data": {
-          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com)",
-          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com, optional)"
+          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com, optional)",
+          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com)"
         }
       },
       "reauth_confirm": {
         "title": "Re-authenticate PSE&G",
-        "description": "Your PSE&G Okta session has expired. Please paste fresh session cookies below to re-authenticate.",
+        "description": "Your PSE&G Okta session has expired. Please paste fresh session cookies below to re-authenticate. Paste session cookies from your browser (Developer Tools). Best: sign in on mysmartenergy.nj.pseg.com with the Email/Password boxes and Remember Me ON, then paste the Cookie header from a Dashboard request into Portal Cookies (it must contain MM_RememberMe; the Okta box can stay empty). Alternative: Okta cookies from the id.myaccount.pseg.com /sso/saml request (expire about 1 hour after you sign in).",
         "data": {
-          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com)",
-          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com, optional)"
+          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com, optional)",
+          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com)"
         }
       },
       "reconfigure": {
         "title": "Reconfigure PSE&G Connection",
-        "description": "Update your PSE&G session cookies below.",
+        "description": "Update your PSE&G session cookies below. Paste session cookies from your browser (Developer Tools). Best: sign in on mysmartenergy.nj.pseg.com with the Email/Password boxes and Remember Me ON, then paste the Cookie header from a Dashboard request into Portal Cookies (it must contain MM_RememberMe; the Okta box can stay empty). Alternative: Okta cookies from the id.myaccount.pseg.com /sso/saml request (expire about 1 hour after you sign in).",
         "data": {
-          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com)",
-          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com, optional)"
+          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com, optional)",
+          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com)"
         }
       }
     },
     "error": {
-      "missing_credentials": "Please enter your Okta session cookies.",
+      "missing_credentials": "Paste the Portal Cookies (with MM_RememberMe) or the Okta Cookies.",
       "okta_session_invalid": "The Okta session cookies provided are expired or invalid.",
       "okta_no_session": "These Okta cookies cannot sign in on their own. On mysmartenergy.nj.pseg.com, use the 'Sign in Via My Account' link (not the email/password boxes), then copy the Cookie header from the id.myaccount.pseg.com /sso/saml request. It should contain idx=.",
       "cannot_connect": "Failed to connect to PSE&G. Please check your network connection.",
-      "unknown": "An unexpected error occurred while communicating with PSE&G."
+      "unknown": "An unexpected error occurred while communicating with PSE&G.",
+      "remember_me_failed": "The Portal Cookies contain MM_RememberMe, but MyMeter did not sign in with it on its own. Sign out, sign in again with the Email/Password boxes and Remember Me ON, then copy the Cookie header from a Dashboard request."
     },
     "abort": {
       "already_configured": "This PSE&G account is already configured.",

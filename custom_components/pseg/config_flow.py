@@ -100,13 +100,24 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         meter_ids = list(data.get("meter_ids") or []) if "meter_ids" in data else [meter_id]
 
-        # A live portal cookie can mask unusable Okta cookies. Prove the Okta
-        # header can renew a fresh client without borrowing the portal session.
-        renewal_client = PsegClient(okta_cookies=okta_cookies)
+        # A live MM_SID can mask cookies that cannot renew. Prove renewal on a fresh
+        # throwaway client: via MyMeter Remember Me when the portal header carries
+        # it (PSE&G's Okta session dies ~1 h after login), else via Okta SSO.
+        if client.has_remember_me:
+            # Run on the client whose jar gets saved: renew_remember_me drops MM_SID
+            # first (so nothing is masked), and a remember token rotated by this use
+            # must not be left behind in a throwaway jar.
+            renewal_client = client
+            renew = renewal_client.renew_remember_me
+            no_session_error = "remember_me_failed"
+        else:
+            renewal_client = PsegClient(okta_cookies=okta_cookies)
+            renew = renewal_client.ensure_session
+            no_session_error = "okta_no_session"
         try:
-            renewed = await self.hass.async_add_executor_job(renewal_client.ensure_session)
+            renewed = await self.hass.async_add_executor_job(renew)
         except PsegOktaSessionExpired:
-            errors["base"] = "okta_no_session"
+            errors["base"] = no_session_error
             return errors, None, None, []
         except (PsegTransientError, requests.RequestException):
             errors["base"] = "cannot_connect"
@@ -117,7 +128,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return errors, None, None, []
 
         if not renewed or renewal_client.sso_renewals < 1:
-            errors["base"] = "okta_no_session"
+            errors["base"] = no_session_error
             return errors, None, None, []
 
         return errors, client, meter_id, meter_ids
@@ -132,7 +143,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
             portal_cookies = user_input.get(CONF_PORTAL_COOKIES, "").strip()
 
-            if not okta_cookies:
+            if not okta_cookies and not portal_cookies:
                 errors["base"] = "missing_credentials"
             else:
                 errors, client, meter_id, meter_ids = await self._async_validate_and_extract_meter(
@@ -160,7 +171,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_OKTA_COOKIES): str,
+                vol.Optional(CONF_OKTA_COOKIES, default=""): str,
                 vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
             }
         )
@@ -190,7 +201,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
             portal_cookies = user_input.get(CONF_PORTAL_COOKIES, "").strip()
 
-            if not okta_cookies:
+            if not okta_cookies and not portal_cookies:
                 errors["base"] = "missing_credentials"
             else:
                 errors, client, meter_id, meter_ids = await self._async_validate_and_extract_meter(
@@ -214,7 +225,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_OKTA_COOKIES): str,
+                vol.Optional(CONF_OKTA_COOKIES, default=""): str,
                 vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
             }
         )
@@ -238,7 +249,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
             portal_cookies = user_input.get(CONF_PORTAL_COOKIES, "").strip()
 
-            if not okta_cookies:
+            if not okta_cookies and not portal_cookies:
                 errors["base"] = "missing_credentials"
             else:
                 errors, client, meter_id, meter_ids = await self._async_validate_and_extract_meter(
@@ -262,7 +273,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_OKTA_COOKIES): str,
+                vol.Optional(CONF_OKTA_COOKIES, default=""): str,
                 vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
             }
         )

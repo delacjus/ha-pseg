@@ -13,6 +13,8 @@ CONF_COOKIE = "cookie"
 CONF_PRICE_PER_KWH = "price_per_kwh"
 CONF_METER_ID = "meter_id"
 CONF_KNOWN_METER_IDS = "known_meter_ids"
+# MyMeter local login 'Remember Me' cookie (~1 year), the long-lived renewal path.
+REMEMBER_ME_COOKIE = "MM_RememberMe"
 
 DEFAULT_PRICE_PER_KWH = 0.247
 # Placeholder the client reports when the chart has no meter series.

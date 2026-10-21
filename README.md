@@ -38,15 +38,34 @@ This fork (`delacjus/ha-pseg`, forked from `sidprax/ha-pseg`) hardens the integr
 
 ## How to Get Your Session Cookies ("Log In Once")
 
-Sign in through PSE&G's Okta link, then copy the cookies used by that sign-in. The integration checks that these cookies can renew a portal session.
+There are two sign-in types. Prefer the first: it lasts about a year.
 
-### Chrome / Edge:
-1. Open `https://mysmartenergy.nj.pseg.com`. Press **F12** (or right-click and choose **Inspect**) and select the **Network** tab.
-2. Enable **Preserve log** and **Disable cache**, then select the **Doc** filter.
-3. Click **Sign in Via My Account** and complete sign-in. Do not use the email/password boxes on the MyMeter page; that local form does not establish the Okta session needed for renewal.
-4. In Network, find the request to `id.myaccount.pseg.com` ending in `/app/psegnjb2c_mymeter_1/exktrfl7ruOTPxcyv357/sso/saml`.
-5. In **Headers** > **Request Headers**, right-click the `Cookie:` value and select **Copy value**. It should contain `idx=`. Paste it into Home Assistant's **Okta Cookies** field.
-6. *(Optional)* Find the request to `mysmartenergy.nj.pseg.com/Dashboard`, copy its `Cookie:` header value the same way, and paste it into **Portal Cookies**.
+### Recommended: MyMeter login with Remember Me (~1 year)
+
+PSE&G's Okta sign-in has no "keep me signed in" and ends about one hour after you
+log in, so it cannot stay connected on its own. MyMeter's own email/password
+login with **Remember Me** sets an `MM_RememberMe` cookie that lasts about a year;
+the integration uses it to sign back in whenever the short `MM_SID` session ends.
+
+1. Open `https://mysmartenergy.nj.pseg.com` and sign in with the **Email/Password
+   boxes** on that page with **Remember Me** switched on (this needs a MyMeter
+   login, which is separate from your PSE&G account).
+2. Press **F12** > **Network**, tick **Disable cache**, select the **Doc** filter
+   and press **F5**.
+3. Click the `Dashboard` request > **Headers** > **Request Headers**, right-click
+   the `Cookie:` value > **Copy value**. It must contain `MM_RememberMe=`.
+4. Paste it into **Portal Cookies** and leave **Okta Cookies** empty. Setup checks
+   that MyMeter signs back in from `MM_RememberMe` alone before saving.
+
+### Alternative: PSE&G (Okta) sign-in (~1 hour)
+
+1. Open `https://mysmartenergy.nj.pseg.com`, press **F12** > **Network**, enable
+   **Preserve log** and **Disable cache**, and select **Doc**.
+2. Click **Sign in Via My Account** and complete sign-in.
+3. Copy the `Cookie:` value of the request ending in
+   `/app/psegnjb2c_mymeter_1/exktrfl7ruOTPxcyv357/sso/saml` (contains `idx=`) into
+   **Okta Cookies**, and optionally the `Dashboard` request's cookies into
+   **Portal Cookies**. Expect to re-paste after about an hour.
 
 ## Installation
 
@@ -70,7 +89,7 @@ Sign in through PSE&G's Okta link, then copy the cookies used by that sign-in. T
 
 1. In Home Assistant, go to **Settings** > **Devices & Services** > **Add Integration**.
 2. Search for **PSE&G Energy (New Jersey)**.
-3. Paste your **Okta Cookies** and optional **Portal Cookies**.
+3. Paste your **Portal Cookies** (with `MM_RememberMe`) or your **Okta Cookies**.
 4. Click **Submit**.
 
 ## Home Assistant Energy Dashboard

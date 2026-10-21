@@ -179,7 +179,7 @@ def test_network_transient_error() -> None:
 
 def test_keepalive() -> None:
     """Test keepalive behavior."""
-    client = PsegClient()
+    client = PsegClient(okta_cookies="idx=x")
 
     with requests_mock.Mocker(session=client.session) as m:
         m.get(f"{PORTAL_BASE_URL}/Dashboard", text="<h1>Dashboard</h1>", status_code=200)
@@ -670,3 +670,62 @@ def test_keepalive_reports_okta_expiry() -> None:
         with pytest.raises(PsegOktaSessionExpired):
             client.keepalive()
     assert client.okta_session_expired_at is not None
+
+
+# --- Live 2026-10-21: MyMeter local login 'Remember Me' (MM_RememberMe ~1 year) ---
+
+REMEMBER_PORTAL = "MM_SID=dead; MM_RememberMe=remember_token"
+
+
+def test_remember_me_renews_without_okta() -> None:
+    """A lapsed MM_SID is re-issued from MM_RememberMe; Okta is never contacted."""
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL)
+    assert client.has_remember_me and not client.has_okta_session
+    with requests_mock.Mocker(session=client.session) as m:
+        dash = m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            [LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}],
+        )
+        m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+        sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_OKTA_WIDGET)
+        assert client.ensure_session() is True
+    assert sso.called is False
+    assert client.sso_renewals == 1
+    # The dead MM_SID was dropped before the renewal request.
+    retry = [r for r in dash.request_history][-1]
+    assert "MM_SID=dead" not in (retry.headers.get("Cookie") or "")
+    assert "MM_RememberMe=remember_token" in (retry.headers.get("Cookie") or "")
+
+
+def test_remember_me_rejected_without_okta_is_auth_expiry() -> None:
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+        with pytest.raises(PsegOktaSessionExpired, match="Remember Me"):
+            client.ensure_session()
+    assert client.okta_session_expired_at is not None
+
+
+def test_remember_me_rejected_falls_back_to_okta_sso() -> None:
+    client = PsegClient(okta_cookies="idx=abc", portal_cookies=REMEMBER_PORTAL)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            [LOGGED_OUT_REDIRECT, LOGGED_OUT_REDIRECT, LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}],
+        )
+        m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+        sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_AUTOPOST_FORM)
+        m.post(f"https://{PORTAL_HOST}/Saml/okta-prod/Acs", text="ok")
+        assert client.ensure_session() is True
+    assert sso.called is True
+
+
+def test_keepalive_remember_me_only_stays_on_portal() -> None:
+    """Without an Okta session the keepalive only touches the portal."""
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_AUTOPOST_FORM)
+        assert client.keepalive() is True
+    assert sso.called is False
