@@ -24,7 +24,7 @@ from homeassistant.components.recorder.statistics import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.recorder import DATA_INSTANCE
@@ -46,6 +46,10 @@ from .pseg_client import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class PsegStatisticsError(HomeAssistantError):
+    """Recorder query failed; the import is aborted to keep the sum chain intact."""
 
 
 # Earliest start considered when looking for the baseline row (before any AMI data).
@@ -73,6 +77,9 @@ async def _async_get_last_stat_before(
     end_time=before_dt. A "day" period would aggregate in HA's configured time zone,
     and for any zone other than America/New_York the bucket ending before before_dt
     contains the row AT before_dt, so re-imports added that day twice.
+
+    Raises PsegStatisticsError if the query fails: treating a failure as "no prior
+    data" would restart the chain at 0 and write a negative step.
     """
     try:
         stats = await get_instance(hass).async_add_executor_job(
@@ -86,8 +93,9 @@ async def _async_get_last_stat_before(
             {"sum"},
         )
     except Exception as err:
-        _LOGGER.debug("Error querying statistics_during_period for %s: %s", statistic_id, err)
-        return None
+        raise PsegStatisticsError(
+            f"Could not read prior statistics for {statistic_id}: {err}"
+        ) from err
 
     best_start: datetime | None = None
     best_sum: float | None = None
@@ -99,6 +107,53 @@ async def _async_get_last_stat_before(
         if best_start is None or start > best_start:
             best_start, best_sum = start, float(val)
     return best_sum
+
+
+async def _async_get_stats_after(
+    hass: HomeAssistant,
+    statistic_id: str,
+    after_dt: datetime,
+) -> list[tuple[datetime, float | None]]:
+    """Return (start, state) of existing rows strictly after after_dt, oldest first."""
+    try:
+        stats = await get_instance(hass).async_add_executor_job(
+            statistics_during_period,
+            hass,
+            after_dt + timedelta(seconds=1),
+            None,
+            {statistic_id},
+            "hour",
+            None,
+            {"state"},
+        )
+    except Exception as err:
+        raise PsegStatisticsError(
+            f"Could not read newer statistics for {statistic_id}: {err}"
+        ) from err
+
+    rows: list[tuple[datetime, float | None]] = []
+    for stat in stats.get(statistic_id, []):
+        start = _row_start(stat)
+        if start is not None and start > after_dt:
+            state = stat.get("state")
+            rows.append((start, None if state is None else float(state)))
+    rows.sort(key=lambda row: row[0])
+    return rows
+
+
+def _rechain(
+    rows: list[tuple[datetime, float | None]], running: float
+) -> list[StatisticData]:
+    """Recompute cumulative sums for existing rows after a newly imported window.
+
+    Each row's state is its own daily value, so the chain continues from the last
+    imported sum instead of keeping sums based on the old (pre-backfill) baseline.
+    """
+    out: list[StatisticData] = []
+    for start, state in rows:
+        running += state or 0.0
+        out.append(StatisticData(start=start, state=state, sum=round(running, 2)))
+    return out
 
 
 async def _async_wait_for_recorder_commit(hass: HomeAssistant) -> None:
@@ -413,6 +468,18 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             prior_cost_sum=prior_cost,
             price_per_kwh=self.client.price_per_kwh,
         )
+
+        # Rows newer than this window (e.g. a backfill ending before the newest poll)
+        # were chained off the old baseline; re-chain them so the sum never steps back.
+        last_start_utc = consumption_stats[-1]["start"]
+        later_consumption = await _async_get_stats_after(
+            self.hass, consumption_statistic_id, last_start_utc
+        )
+        later_cost = await _async_get_stats_after(self.hass, cost_statistic_id, last_start_utc)
+        consumption_stats.extend(
+            _rechain(later_consumption, consumption_stats[-1]["sum"])
+        )
+        cost_stats.extend(_rechain(later_cost, cost_stats[-1]["sum"]))
 
         async_add_external_statistics(self.hass, consumption_metadata, consumption_stats)
         async_add_external_statistics(self.hass, cost_metadata, cost_stats)

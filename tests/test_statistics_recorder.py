@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock, patch
 
 from homeassistant.components.recorder.statistics import statistics_during_period
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 from pytest_homeassistant_custom_component.components.recorder.common import (
     async_wait_recording_done,
 )
 
+from custom_components.pseg import coordinator as coord_mod
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
 
 CONSUMPTION_ID = "pseg:m1_energy_consumption"
@@ -113,3 +116,78 @@ async def test_same_window_repoll_idempotent_in_any_ha_time_zone(
     assert sums[-1] == ("2026-10-14", 140.0)
     cost = await _sums(hass, COST_ID)
     assert cost[-1] == ("2026-10-14", 35.0)
+
+
+async def test_baseline_query_failure_aborts_import(coord, hass) -> None:
+    """A failed recorder query must abort the import, not rebase the chain at 0."""
+    await coord.async_record_statistics(_recs("2026-10-01", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    with (
+        patch.object(coord_mod, "statistics_during_period", boom),
+        pytest.raises(HomeAssistantError, match="database is locked"),
+    ):
+        await coord.async_record_statistics(_recs("2026-10-02", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    assert [v for _, v in await _sums(hass)] == [10.0 * (i + 1) for i in range(14)]
+
+
+async def test_poll_survives_statistics_failure(hass) -> None:
+    """The poll still returns sensor data when the statistics import aborts."""
+    client = MagicMock()
+    client.price_per_kwh = 0.25
+    client.fetch_energy_data.return_value = {
+        "meter": "Meter 1",
+        "history_14d": _recs("2026-10-01", 2),
+        "latest_kwh": 10.0,
+    }
+    client.export_cookies.return_value = []
+    coord = PsegDataUpdateCoordinator(hass, client, {})
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("database is locked")
+
+    with patch.object(coord_mod, "statistics_during_period", boom):
+        data = await coord._async_update_data()
+    assert data["latest_kwh"] == 10.0
+
+
+async def test_partial_backfill_rechains_newer_rows(coord, hass) -> None:
+    """Backfill ending before existing data must re-chain the newer rows (no negative step)."""
+    await coord.async_record_statistics(_recs("2026-10-01", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    await coord.async_record_statistics(_recs("2026-09-01", 30), meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    sums = dict(await _sums(hass))
+    assert sums["2026-09-30"] == 300.0
+    assert sums["2026-10-01"] == 310.0
+    assert sums["2026-10-14"] == 440.0
+    cost = dict(await _sums(hass, COST_ID))
+    assert cost["2026-10-14"] == 110.0
+
+
+async def test_backfill_with_gap_rechains_newer_rows(coord, hass) -> None:
+    """A gap between the backfill end and newer rows still yields a monotonic chain."""
+    await coord.async_record_statistics(_recs("2026-10-01", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    await coord.async_record_statistics(_recs("2026-09-01", 20), meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    sums = await _sums(hass)
+    values = [v for _, v in sums]
+    assert values == sorted(values)
+    assert dict(sums)["2026-09-20"] == 200.0
+    assert dict(sums)["2026-10-01"] == 210.0
+    assert dict(sums)["2026-10-14"] == 340.0
+
+    # A later rolling poll continues from the re-chained sums.
+    await coord.async_record_statistics(_recs("2026-10-02", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+    assert dict(await _sums(hass))["2026-10-15"] == 350.0
