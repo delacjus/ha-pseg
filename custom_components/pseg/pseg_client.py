@@ -6,9 +6,12 @@ and Okta SAML SSO endpoints.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+import functools
 import json
 import logging
+import threading
 import time
 from typing import Any
 import urllib.parse
@@ -59,6 +62,25 @@ class AllowlistedSession(requests.Session):
         return super().send(request, **kwargs)
 
 
+def _locked[**P, R](func: Callable[P, R]) -> Callable[P, R]:
+    """Serialize a PsegClient method on the client's re-entrant portal lock.
+
+    MyMeter keeps the selected chart range in the server-side session (POST
+    /Dashboard/Chart, then GET /Dashboard/ChartData), and every request shares one
+    cookie jar. Poll, keepalive, backfill and the refresh button run in different
+    executor threads, so each portal operation must run to completion before
+    another starts or one caller reads the other's chart range.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        self = args[0]
+        with self._lock:  # type: ignore[attr-defined]
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
 class PsegClient:
     """Client for PSE&G MySmartEnergy portal."""
 
@@ -70,6 +92,7 @@ class PsegClient:
         price_per_kwh: float = DEFAULT_PRICE_PER_KWH,
     ) -> None:
         """Initialize the client with domain-scoped cookies."""
+        self._lock = threading.RLock()
         self.session = AllowlistedSession()
         self.session.headers.update({
             "User-Agent": (
@@ -95,6 +118,7 @@ class PsegClient:
         if portal_cookies:
             self.set_cookies_from_header(portal_cookies, PORTAL_HOST)
 
+    @_locked
     def set_cookies_from_header(self, cookie_header: str, domain: str) -> None:
         """Parse a Cookie header string (name=val; name2=val2) into the domain-scoped jar."""
         if not cookie_header:
@@ -110,6 +134,7 @@ class PsegClient:
             if name:
                 self.session.cookies.set(name, val, domain=domain, path="/")
 
+    @_locked
     def export_cookies(self) -> list[dict[str, Any]]:
         """Export cookies as a list of dicts for persistence."""
         cookie_data = []
@@ -123,6 +148,7 @@ class PsegClient:
             })
         return cookie_data
 
+    @_locked
     def import_cookies(self, cookie_list: list[dict[str, Any]]) -> None:
         """Restore cookies from persistence."""
         for c in cookie_list:
@@ -146,6 +172,7 @@ class PsegClient:
             return True
         return False
 
+    @_locked
     def ensure_session(self) -> bool:
         """Validate whether portal session is active, attempting SSO renewal if expired."""
         try:
@@ -160,6 +187,7 @@ class PsegClient:
 
         return self.renew_sso()
 
+    @_locked
     def renew_sso(self) -> bool:
         """Perform SSO renewal using Okta session and SAML auto-post form."""
         _LOGGER.debug("Attempting SSO renewal via Okta...")
@@ -230,6 +258,7 @@ class PsegClient:
         self.okta_session_expired_at = datetime.now(UTC).isoformat()
         raise PsegOktaSessionExpired("Failed to establish portal session after SAML post")
 
+    @_locked
     def keepalive(self) -> bool:
         """Cheap keepalive check run every 30 minutes in the executor."""
         self.last_keepalive = datetime.now(UTC).isoformat()
@@ -242,10 +271,12 @@ class PsegClient:
             _LOGGER.debug("Keepalive network check encountered transient error: %s", err)
             return False
 
+    @_locked
     def test_connection(self) -> bool:
         """Validate session during setup or re-auth."""
         return self.ensure_session()
 
+    @_locked
     def _get_verification_token(self) -> str:
         """Extract __RequestVerificationToken from /Dashboard, renewing session if needed."""
         try:
@@ -268,6 +299,7 @@ class PsegClient:
             raise PsegOktaSessionExpired("Session invalid: __RequestVerificationToken not found on /Dashboard")
         return str(tag["value"])
 
+    @_locked
     def fetch_history_range(
         self,
         start_date_str: str,
@@ -395,6 +427,7 @@ class PsegClient:
         )
         return sorted_records
 
+    @_locked
     def fetch_energy_data(self, days_back: int = 14) -> dict[str, Any]:
         """Fetch usage and temperature data using the 3-step MyMeter chart sequence."""
         token = self._get_verification_token()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 import logging
@@ -27,6 +28,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.recorder import DATA_INSTANCE
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 import requests
@@ -102,6 +104,18 @@ async def _async_get_last_stat_before(
         _LOGGER.debug("Error querying statistics_during_period for %s: %s", statistic_id, err)
 
     return None
+
+
+async def _async_wait_for_recorder_commit(hass: HomeAssistant) -> None:
+    """Wait until queued statistics imports are committed to the database.
+
+    async_add_external_statistics only queues an import task on the recorder thread;
+    the next baseline query runs on a different executor and would otherwise read the
+    pre-import sums.
+    """
+    instance = hass.data.get(DATA_INSTANCE)
+    if instance is not None:
+        await instance.async_block_till_done()
 
 
 def build_external_statistics(
@@ -202,6 +216,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.status: str = "connected"
         self.last_successful_update: str | None = None
         self._unsub_keepalive: Callable[[], None] | None = None
+        # Serializes portal fetch + statistics import for poll, refresh and backfill.
+        self._update_lock = asyncio.Lock()
+        # Serializes baseline read -> import -> commit so concurrent imports chain.
+        self._stats_lock = asyncio.Lock()
 
         super().__init__(
             hass,
@@ -245,7 +263,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Persist rotated session cookies to entry.data without logging values."""
         if not self.config_entry:
             return
-        exported = self.client.export_cookies()
+        # Executor: export takes the client's portal lock, which a long backfill may hold.
+        exported = await self.hass.async_add_executor_job(self.client.export_cookies)
         if not exported:
             return
         current_cookies = self.config_entry.data.get("cookies")
@@ -314,17 +333,20 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
         try:
-            data = await self.hass.async_add_executor_job(
-                self.client.fetch_energy_data, 14
-            )
-            await self._async_persist_cookies()
+            async with self._update_lock:
+                data = await self.hass.async_add_executor_job(
+                    self.client.fetch_energy_data, 14
+                )
+                await self._async_persist_cookies()
 
-            if "history_14d" in data and data["history_14d"]:
-                meter_id = self._get_meter_id(data)
-                try:
-                    await self.async_record_statistics(data["history_14d"], meter_id=meter_id)
-                except Exception as stat_err:
-                    _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
+                if "history_14d" in data and data["history_14d"]:
+                    meter_id = self._get_meter_id(data)
+                    try:
+                        await self.async_record_statistics(
+                            data["history_14d"], meter_id=meter_id
+                        )
+                    except Exception as stat_err:
+                        _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
 
             self.next_update_time = dt_util.utcnow() + self.update_interval
             data["next_update"] = self.next_update_time.isoformat()
@@ -355,6 +377,13 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not records:
             return
 
+        async with self._stats_lock:
+            await self._async_record_statistics_locked(records, meter_id)
+
+    async def _async_record_statistics_locked(
+        self, records: list[dict[str, Any]], meter_id: str | None
+    ) -> None:
+        """Import statistics; caller holds _stats_lock."""
         meter_id = meter_id or self._get_meter_id()
         clean_meter = (
             re.sub(r"[^a-z0-9_]+", "_", str(meter_id).lower()).strip("_") or "meter"
@@ -392,6 +421,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         async_add_external_statistics(self.hass, consumption_metadata, consumption_stats)
         async_add_external_statistics(self.hass, cost_metadata, cost_stats)
+        await _async_wait_for_recorder_commit(self.hass)
         _LOGGER.info(
             "Imported %d daily external statistics (range: %s to %s, id: %s)",
             len(sorted_records),
@@ -428,19 +458,24 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             end_date_str,
         )
 
-        records = await self.hass.async_add_executor_job(
-            self.client.fetch_history_range,
-            start_date_str,
-            end_date_str,
-            90,
-        )
+        async with self._update_lock:
+            records = await self.hass.async_add_executor_job(
+                self.client.fetch_history_range,
+                start_date_str,
+                end_date_str,
+                90,
+            )
 
-        if not records:
-            _LOGGER.warning("No historical records returned from PSE&G for %s to %s", start_date_str, end_date_str)
-            return 0
+            if not records:
+                _LOGGER.warning(
+                    "No historical records returned from PSE&G for %s to %s",
+                    start_date_str,
+                    end_date_str,
+                )
+                return 0
 
-        meter_id = self._get_meter_id()
-        await self.async_record_statistics(records, meter_id=meter_id)
+            meter_id = self._get_meter_id()
+            await self.async_record_statistics(records, meter_id=meter_id)
 
         latest_record = records[-1]
         if self._last_valid_data is not None:
