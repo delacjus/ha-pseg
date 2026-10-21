@@ -261,25 +261,26 @@ class PsegClient:
         except requests.RequestException as err:
             raise PsegTransientError(f"Network error during SSO sign-in: {err}") from err
 
-        parsed_final = urllib.parse.urlparse(resp.url)
-        on_okta_signin = parsed_final.hostname == OKTA_HOST and any(
-            marker in parsed_final.path.lower() for marker in _SIGNIN_PATH_MARKERS
-        )
-        if self._is_okta_widget(resp) or on_okta_signin:
-            self._mark_okta_expired()
-            raise PsegOktaSessionExpired("Okta session expired: sign-in widget returned")
-
-        if resp.status_code != 200:
-            raise PsegTransientError(f"SSO sign-in returned HTTP {resp.status_code}")
-
-        html = resp.text
-        soup = BeautifulSoup(html, "html.parser")
-        # Post the form that actually carries the assertion, not the first form on the
-        # page (Okta pages can include other forms, e.g. sign-out).
-        saml_input = soup.find("input", attrs={"name": "SAMLResponse"})
-        form = saml_input.find_parent("form") if saml_input else None
+        # A SAML auto-post form is a successful Okta response; check it FIRST so that
+        # marker text elsewhere on that page (e.g. "stateToken" in a script) is not
+        # mistaken for the sign-in widget. Post the form that carries the assertion,
+        # not the first form on the page (Okta pages can include e.g. sign-out).
+        form = None
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            saml_input = soup.find("input", attrs={"name": "SAMLResponse"})
+            form = saml_input.find_parent("form") if saml_input else None
 
         if not form:
+            parsed_final = urllib.parse.urlparse(resp.url)
+            on_okta_signin = parsed_final.hostname == OKTA_HOST and any(
+                marker in parsed_final.path.lower() for marker in _SIGNIN_PATH_MARKERS
+            )
+            if self._is_okta_widget(resp) or on_okta_signin:
+                self._mark_okta_expired()
+                raise PsegOktaSessionExpired("Okta session expired: sign-in widget returned")
+            if resp.status_code != 200:
+                raise PsegTransientError(f"SSO sign-in returned HTTP {resp.status_code}")
             raise PsegTransientError("SAML response form not found in SSO response")
 
         action = form.get("action")

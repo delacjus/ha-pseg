@@ -432,3 +432,83 @@ def test_saml_action_must_be_portal_host() -> None:
         with pytest.raises(PsegSecurityError, match="untrusted host"):
             client.ensure_session()
     assert okta_post.called is False
+
+
+# --- Review r2 N4/N5: SAML success page and post-SAML bounce classification ---
+
+SAML_FORM_TO_ACS = (
+    f'<form method="post" action="https://{PORTAL_HOST}/Saml/okta-prod/Acs">'
+    '<input name="SAMLResponse" value="x"/></form>'
+)
+
+
+def test_saml_success_page_mentioning_state_token_is_not_expired() -> None:
+    """A SAML auto-post page wins over widget-marker text elsewhere on the page."""
+    client = PsegClient(okta_cookies="idx=ok")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            [LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}],
+        )
+        _sso_to_okta(m, f"<script>var stateToken=null;</script>{SAML_FORM_TO_ACS}")
+        acs = m.post(f"https://{PORTAL_HOST}/Saml/okta-prod/Acs", text="ok")
+        assert client.ensure_session() is True
+    assert acs.call_count == 1
+    assert client.okta_session_expired_at is None
+
+
+R2_WIDGET = (
+    '<html><script src="/okta-sign-in.min.js"></script><script>'
+    'var config = {stateToken: "02abc"}; new OktaSignIn(config);</script></html>'
+)
+
+
+@pytest.mark.parametrize("path", ["ensure_session", "fetch"])
+def test_okta_sso_saml_widget_page_is_expired(path: str) -> None:
+    """Okta rendering the sign-in widget at /sso/saml (live shape) means the session is gone."""
+    client = PsegClient(okta_cookies="idx=old")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        _sso_to_okta(m, R2_WIDGET)
+        with pytest.raises(PsegOktaSessionExpired):
+            if path == "ensure_session":
+                client.ensure_session()
+            else:
+                client.fetch_energy_data(14)
+    assert client.okta_session_expired_at is not None
+
+
+@pytest.mark.parametrize(
+    "variant", ["dash_503", "dash_to_maintenance", "okta_503", "okta_plain_200", "acs_500"]
+)
+def test_portal_and_okta_outages_are_transient(variant: str) -> None:
+    """Outage shapes from review r2 never classify as an expired session."""
+    client = PsegClient(okta_cookies="idx=old")
+    with requests_mock.Mocker(session=client.session) as m:
+        if variant == "dash_503":
+            m.get(f"{PORTAL_BASE_URL}/Dashboard", status_code=503, text="down")
+        elif variant == "dash_to_maintenance":
+            m.get(
+                f"{PORTAL_BASE_URL}/Dashboard",
+                status_code=302,
+                headers={"Location": f"{PORTAL_BASE_URL}/Maintenance"},
+            )
+            m.get(f"{PORTAL_BASE_URL}/Maintenance", text="<html>Scheduled maintenance</html>")
+        else:
+            m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+            m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+            m.get(
+                f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn",
+                status_code=302,
+                headers={"Location": OKTA_SAML_URL},
+            )
+            if variant == "okta_503":
+                m.get(OKTA_SAML_URL, status_code=503, text="Service Unavailable")
+            elif variant == "okta_plain_200":
+                m.get(OKTA_SAML_URL, text="<html>Something went wrong</html>")
+            else:
+                m.get(OKTA_SAML_URL, text=SAML_FORM_TO_ACS)
+                m.post(f"https://{PORTAL_HOST}/Saml/okta-prod/Acs", status_code=500)
+        with pytest.raises(PsegTransientError):
+            client.fetch_energy_data(14)
+    assert client.okta_session_expired_at is None
