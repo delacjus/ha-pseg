@@ -707,3 +707,19 @@ async def test_reauth_meter_lookup_failure_is_not_account_mismatch(hass: HomeAss
     assert result2["type"] == FlowResultType.FORM
     assert result2["errors"] == {"base": "cannot_connect"}
     assert entry.data[CONF_OKTA_COOKIES] == "idx=old"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("abc123TOKEN", "MM_RememberMe=abc123TOKEN"),
+        ("  abc123TOKEN \n", "MM_RememberMe=abc123TOKEN"),
+        ("cookie: MM_SID=a; MM_RememberMe=b", "MM_SID=a; MM_RememberMe=b"),
+        ("MM_SID=a; MM_RememberMe=b", "MM_SID=a; MM_RememberMe=b"),
+        ("", ""),
+    ],
+)
+def test_normalize_portal_cookies(raw: str, expected: str) -> None:
+    from custom_components.pseg.config_flow import _normalize_portal_cookies
+
+    assert _normalize_portal_cookies(raw) == expected

@@ -89,7 +89,11 @@ class AllowlistedSession(requests.Session):
         # Diagnostics only: host/path/status of each hop, never queries or cookies.
         # First path segment only: deeper segments could carry ids or tokens.
         route = "/" + parsed.path.strip("/").split("/", 1)[0]
-        self.trace.append(f"{request.method} {parsed.hostname}{route} -> {resp.status_code}")
+        set_names = sorted({h.split("=", 1)[0].strip() for h in resp.raw.headers.getlist("Set-Cookie")}) if hasattr(getattr(resp, "raw", None), "headers") and hasattr(resp.raw.headers, "getlist") else []
+        self.trace.append(
+            f"{request.method} {parsed.hostname}{route} -> {resp.status_code}"
+            + (f" sets={set_names}" if set_names else "")
+        )
         del self.trace[:-20]
         return resp
 
@@ -133,7 +137,7 @@ class PsegClient:
         self.session.headers.update({
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Referer": f"{PORTAL_BASE_URL}/Dashboard",

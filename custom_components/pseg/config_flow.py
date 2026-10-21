@@ -26,6 +26,7 @@ from .const import (
     DEFAULT_METER_NAME,
     DEFAULT_PRICE_PER_KWH,
     DOMAIN,
+    REMEMBER_ME_COOKIE,
 )
 from .pseg_client import (
     PsegClient,
@@ -34,6 +35,22 @@ from .pseg_client import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _normalize_portal_cookies(raw: str) -> str:
+    """Accept a full Cookie header, a 'cookie: ...' line, or a bare MM_RememberMe value.
+
+    Live 2026-10-21: the Cookie header of a refreshed Dashboard request carries the
+    values the browser SENT, which MyMeter may have just rotated, so the Remember Me
+    value is best copied from DevTools > Application > Cookies, where it is a bare
+    value without 'name='.
+    """
+    text = raw.strip()
+    if text.lower().startswith("cookie:"):
+        text = text[len("cookie:"):].strip()
+    if text and "=" not in text and ";" not in text:
+        return f"{REMEMBER_ME_COOKIE}={text}"
+    return text
 
 
 def _known_meter_ids(entry: ConfigEntry) -> set[str]:
@@ -144,7 +161,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
-            portal_cookies = user_input.get(CONF_PORTAL_COOKIES, "").strip()
+            portal_cookies = _normalize_portal_cookies(user_input.get(CONF_PORTAL_COOKIES, ""))
 
             if not okta_cookies and not portal_cookies:
                 errors["base"] = "missing_credentials"
@@ -202,7 +219,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None and self._reauth_entry:
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
-            portal_cookies = user_input.get(CONF_PORTAL_COOKIES, "").strip()
+            portal_cookies = _normalize_portal_cookies(user_input.get(CONF_PORTAL_COOKIES, ""))
 
             if not okta_cookies and not portal_cookies:
                 errors["base"] = "missing_credentials"
@@ -250,7 +267,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if user_input is not None and reconfigure_entry:
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
-            portal_cookies = user_input.get(CONF_PORTAL_COOKIES, "").strip()
+            portal_cookies = _normalize_portal_cookies(user_input.get(CONF_PORTAL_COOKIES, ""))
 
             if not okta_cookies and not portal_cookies:
                 errors["base"] = "missing_credentials"
