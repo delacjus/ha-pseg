@@ -99,7 +99,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         price_per_kwh=price_per_kwh,
     )
     coordinator = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
-    hass.data[DOMAIN][entry.entry_id] = coordinator
 
     try:
         await coordinator.async_config_entry_first_refresh()
@@ -108,7 +107,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator.status = "auth_required"
         raise
 
+    # Register only once the entry is usable: a not-ready entry must not leave a
+    # stale coordinator behind for the backfill service or diagnostics.
+    hass.data[DOMAIN][entry.entry_id] = coordinator
     coordinator.start_keepalive()
+    entry.async_on_unload(coordinator.stop_keepalive)
 
     # No update listener: cookie persistence updates entry.data on every rotation and
     # must not reload. Options reload via OptionsFlowWithReload; reauth/reconfigure via
@@ -119,11 +122,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a PSE&G config entry and stop background keepalive."""
-    coordinator: PsegDataUpdateCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if coordinator:
-        coordinator.stop_keepalive()
-
+    """Unload a PSE&G config entry (keepalive is cancelled via async_on_unload)."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)

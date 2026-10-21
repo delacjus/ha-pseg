@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -14,6 +15,7 @@ from custom_components.pseg.const import (
     CONF_PORTAL_COOKIES,
     DOMAIN,
 )
+from custom_components.pseg.pseg_client import PsegTransientError
 
 
 async def test_migration_v1_to_v2_strips_credentials(hass: HomeAssistant) -> None:
@@ -127,3 +129,50 @@ async def test_setup_and_unload_entry(hass: HomeAssistant) -> None:
         await hass.async_block_till_done()
         assert mock_stop_keepalive.call_count == 1
         assert entry.entry_id not in hass.data[DOMAIN]
+
+
+async def test_failed_first_refresh_registers_nothing(hass: HomeAssistant) -> None:
+    """A not-ready entry must not leave a coordinator for services/diagnostics or a timer."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345678", data={CONF_OKTA_COOKIES: "idx=a"}
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            side_effect=PsegTransientError("portal 503"),
+        ),
+        patch(
+            "custom_components.pseg.coordinator.PsegDataUpdateCoordinator.start_keepalive"
+        ) as mock_start_keepalive,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id) is False
+        await hass.async_block_till_done()
+
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert entry.entry_id not in hass.data.get(DOMAIN, {})
+    assert mock_start_keepalive.call_count == 0
+
+
+async def test_unload_cancels_keepalive_timer(hass: HomeAssistant) -> None:
+    """The keepalive timer is tied to the entry lifecycle via async_on_unload."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345678", data={CONF_OKTA_COOKIES: "idx=a"}
+    )
+    entry.add_to_hass(hass)
+    with patch(
+        "custom_components.pseg.coordinator.PsegDataUpdateCoordinator.async_config_entry_first_refresh",
+        new_callable=AsyncMock,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    coord = hass.data[DOMAIN][entry.entry_id]
+    assert coord._unsub_keepalive is not None
+
+    with patch(
+        "custom_components.pseg.async_unload_entry", AsyncMock(return_value=True)
+    ):
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.async_block_till_done()
+    assert coord._unsub_keepalive is None
