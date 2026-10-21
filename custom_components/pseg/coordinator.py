@@ -52,6 +52,9 @@ class PsegStatisticsError(HomeAssistantError):
     """Recorder query failed; the import is aborted to keep the sum chain intact."""
 
 
+# Upper bound on waiting for the recorder to commit an import (seconds).
+RECORDER_COMMIT_TIMEOUT = 120.0
+
 # Earliest start considered when looking for the baseline row (before any AMI data).
 _STATS_EPOCH = datetime(2000, 1, 1, tzinfo=UTC)
 
@@ -172,10 +175,20 @@ async def _async_wait_for_recorder_commit(hass: HomeAssistant) -> None:
     async_add_external_statistics only queues an import task on the recorder thread;
     the next baseline query runs on a different executor and would otherwise read the
     pre-import sums.
+
+    Bounded: this runs while the update/stats locks are held, and a broken recorder
+    never runs the synchronize task, which would freeze polls and backfills forever.
     """
     instance = hass.data.get(DATA_INSTANCE)
-    if instance is not None:
-        await instance.async_block_till_done()
+    if instance is None:
+        return
+    try:
+        async with asyncio.timeout(RECORDER_COMMIT_TIMEOUT):
+            await instance.async_block_till_done()
+    except TimeoutError as err:
+        raise PsegStatisticsError(
+            f"Recorder did not commit the statistics import within {RECORDER_COMMIT_TIMEOUT}s"
+        ) from err
 
 
 def build_external_statistics(

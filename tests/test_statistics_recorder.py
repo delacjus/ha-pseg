@@ -8,10 +8,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+import time
 from unittest.mock import MagicMock, patch
 import urllib.parse
 
+from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.statistics import statistics_during_period
+from homeassistant.components.recorder.tasks import RecorderTask
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 import pytest
@@ -317,3 +320,49 @@ async def test_backfill_with_different_daily_values_numeric_trace(coord, hass) -
     await coord.async_record_statistics(_recs("2026-10-02", 14), meter_id="m1")
     await async_wait_recording_done(hass)
     assert dict(await _sums(hass))["2026-10-15"] == 300.0
+
+
+class _SlowRecorderTask(RecorderTask):
+    """Occupies the recorder thread so queued imports commit late (busy/slow database)."""
+
+    commit_before = False
+
+    def run(self, instance) -> None:
+        time.sleep(0.3)
+
+
+async def test_import_waits_for_recorder_commit_before_next_baseline(coord, hass) -> None:
+    """With a busy recorder, the next import must not read the previous import's baseline early."""
+    await coord.async_record_statistics(_recs("2026-10-01", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    get_instance(hass).queue_task(_SlowRecorderTask())
+    await asyncio.gather(
+        coord.async_record_statistics(_recs("2026-09-01", 44), meter_id="m1"),
+        coord.async_record_statistics(_recs("2026-10-02", 14), meter_id="m1"),
+    )
+    await async_wait_recording_done(hass)
+
+    sums = await _sums(hass)
+    assert [v for _, v in sums] == [10.0 * (i + 1) for i in range(45)]
+
+
+async def test_recorder_commit_wait_times_out_and_releases_locks(coord, hass) -> None:
+    """A recorder that never commits must not hang polls/backfills with the locks held."""
+    never: asyncio.Future = hass.loop.create_future()
+
+    async def hang() -> None:
+        await never
+
+    instance = get_instance(hass)
+    with (
+        patch.object(coord_mod, "RECORDER_COMMIT_TIMEOUT", 0.2),
+        patch.object(instance, "async_block_till_done", hang),
+        pytest.raises(coord_mod.PsegStatisticsError, match="did not commit"),
+    ):
+        await asyncio.wait_for(
+            coord.async_record_statistics(_recs("2026-10-01", 3), meter_id="m1"), 5
+        )
+    assert not coord._stats_lock.locked()
+    assert not coord._update_lock.locked()
+    never.cancel()
