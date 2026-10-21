@@ -156,6 +156,9 @@ class PsegClient:
                 self.set_cookies_from_header(okta_cookies, OKTA_HOST)
             if portal_cookies:
                 self.set_cookies_from_header(portal_cookies, PORTAL_HOST)
+        # Values present at construction (pasted or restored). Only a host-only
+        # copy still holding its seeded value can be stale; see _dedupe_domain_variants.
+        self._seeded = {(c.name, c.domain, c.path): c.value for c in self.session.cookies}
 
     @_locked
     def set_cookies_from_header(self, cookie_header: str, domain: str) -> None:
@@ -174,16 +177,31 @@ class PsegClient:
                 self.session.cookies.set(name, val, domain=domain, path="/", secure=True)
 
     def _dedupe_domain_variants(self) -> None:
-        """Drop host-only copies shadowed by a server-set '.host' cookie of the same name.
+        """Drop a host-only cookie superseded by a newer server-set '.host' copy.
 
         Pasted cookies are stored host-only. If the portal re-issues one (e.g. a
         rotated MM_RememberMe) with Domain=.host, both would be sent and persisted,
-        old value first. The dotted copy can only come from the server, so it wins.
+        old value first. A host-only copy is dropped only when it still holds the
+        value it was seeded with AND its dotted twin arrived after seeding (absent
+        from the seed, or changed since). A host-only cookie the server set or
+        updated later is never dropped, whatever older dotted copy exists.
         """
         jar = self.session.cookies
-        dotted = {(c.name, c.domain.lstrip("."), c.path) for c in jar if (c.domain or "").startswith(".")}
+        seeded = getattr(self, "_seeded", {})
+        fresh_dotted = {
+            (c.name, c.domain.lstrip("."), c.path)
+            for c in jar
+            if (c.domain or "").startswith(".")
+            and seeded.get((c.name, c.domain, c.path)) != c.value
+        }
         for c in list(jar):
-            if not (c.domain or "").startswith(".") and (c.name, c.domain, c.path) in dotted:
+            key = (c.name, c.domain, c.path)
+            if (
+                not (c.domain or "").startswith(".")
+                and key in fresh_dotted
+                and key in seeded
+                and seeded[key] == c.value
+            ):
                 jar.clear(c.domain, c.path, c.name)
 
     @_locked
@@ -226,7 +244,9 @@ class PsegClient:
         path = parsed.path.lower()
         if parsed.hostname == OKTA_HOST:
             return True
-        if path.strip("/") == "":
+        # MyMeter's anonymous landing pages (a bounce here means signed out); other
+        # off-dashboard pages such as /Maintenance stay transient.
+        if path.strip("/") in ("", "home", "home/index"):
             return True
         if any(marker in path for marker in _LOGIN_PATH_MARKERS):
             return True
@@ -285,6 +305,10 @@ class PsegClient:
             names.setdefault(c.domain, []).append(c.name)
         return f"hops={self.session.trace} cookie_names={names}"
 
+    @staticmethod
+    def _on_dashboard(resp: requests.Response) -> bool:
+        return urllib.parse.urlparse(resp.url).path.lower().rstrip("/").endswith("/dashboard")
+
     def _has_cookie(self, name: str, host: str) -> bool:
         return any(
             c.name == name and (c.domain or "").lstrip(".") == host for c in self.session.cookies
@@ -341,11 +365,12 @@ class PsegClient:
             except requests.RequestException as err:
                 raise PsegTransientError(f"Network error during Remember Me sign-in: {err}") from err
             resp = self._get_dashboard()
-        on_dashboard = urllib.parse.urlparse(resp.url).path.lower().rstrip("/").endswith("/dashboard")
-        if self._is_login_page(resp) or (resp.status_code == 200 and not on_dashboard):
-            # Anything but the dashboard (e.g. a bounce to /Home/Index) is not a login.
+        if self._is_login_page(resp):
             self._mark_okta_expired()
             raise PsegOktaSessionExpired("MyMeter Remember Me sign-in expired or was rejected")
+        if resp.status_code == 200 and not self._on_dashboard(resp):
+            # Neither signed in nor signed out (e.g. a maintenance page): retry later.
+            raise PsegTransientError("Remember Me sign-in did not reach /Dashboard")
         if resp.status_code != 200:
             raise PsegTransientError(f"Unexpected HTTP {resp.status_code} after Remember Me sign-in")
         self._dedupe_domain_variants()

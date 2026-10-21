@@ -791,3 +791,40 @@ def test_rotated_dotted_cookie_replaces_pasted_host_cookie() -> None:
     assert [c["value"] for c in exported] == ["new"]
     restored = PsegClient(cookie_list=client.export_cookies())
     assert [c.value for c in restored.session.cookies if c.name == "MM_RememberMe"] == ["new"]
+
+
+# --- Review b786a886 (Remember Me r2) ---
+
+
+def test_bounce_to_anonymous_home_index_renews() -> None:
+    """/Dashboard → /Home/Index without form markers is signed out, so Remember Me renews."""
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            [{"status_code": 302, "headers": {"Location": "/Home/Index"}}, {"text": DASHBOARD_WITH_TOKEN}],
+        )
+        m.get(f"{PORTAL_BASE_URL}/Home/Index", text="<html>Welcome</html>")
+        assert client.ensure_session() is True
+    assert client.sso_renewals == 1
+
+
+def test_remember_me_landing_on_maintenance_is_transient() -> None:
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", status_code=302, headers={"Location": "/Maintenance"})
+        m.get(f"{PORTAL_BASE_URL}/Maintenance", text="<html>Scheduled maintenance</html>")
+        with pytest.raises(PsegTransientError):
+            client.renew_remember_me()
+    assert client.okta_session_expired_at is None
+
+
+def test_dedupe_keeps_newer_host_only_cookie_over_older_dotted() -> None:
+    """A host-only cookie the server updated is never dropped for an older dotted copy."""
+    client = PsegClient(cookie_list=[
+        {"name": "idx", "value": "old", "domain": f".{OKTA_HOST}", "path": "/"},
+        {"name": "idx", "value": "seed", "domain": OKTA_HOST, "path": "/"},
+    ])
+    client.session.cookies.set("idx", "fresh", domain=OKTA_HOST, path="/")
+    values = sorted(c["value"] for c in client.export_cookies() if c["name"] == "idx")
+    assert values == ["fresh", "old"]
