@@ -81,3 +81,21 @@ async def test_diagnostics_redacts_sensitive_data(hass: HomeAssistant) -> None:
     assert telemetry["sso_renewals"] == 2
     assert telemetry["last_keepalive"] == "2026-10-20T13:00:00Z"
     assert telemetry["okta_session_expired_at"] is None
+
+
+async def test_diagnostics_for_entry_that_is_not_loaded(hass: HomeAssistant) -> None:
+    """A SETUP_RETRY entry has no coordinator; diagnostics still return redacted entry data."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="12345",
+        data={CONF_OKTA_COOKIES: "idx=secret_okta_token_123"},
+    )
+    entry.add_to_hass(hass)
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert diag["entry"]["data"][CONF_OKTA_COOKIES] == REDACTED
+    assert diag["coordinator"] is None
+    assert diag["session_telemetry"] is None
+    assert "secret_okta_token_123" not in str(diag)

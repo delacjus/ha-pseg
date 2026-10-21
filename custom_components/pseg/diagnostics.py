@@ -27,17 +27,24 @@ async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
-    coordinator: PsegDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
+    entry_info = {
+        "entry_id": entry.entry_id,
+        "version": entry.version,
+        "unique_id": entry.unique_id,
+        "state": entry.state.value,
+        "data": async_redact_data(dict(entry.data), TO_REDACT),
+        "options": dict(entry.options),
+    }
+    # The coordinator is only registered after a successful first refresh.
+    coordinator: PsegDataUpdateCoordinator | None = hass.data.get(DOMAIN, {}).get(
+        entry.entry_id
+    )
+    if coordinator is None:
+        return {"entry": entry_info, "session_telemetry": None, "coordinator": None}
     client = coordinator.client
 
     return {
-        "entry": {
-            "entry_id": entry.entry_id,
-            "version": entry.version,
-            "unique_id": entry.unique_id,
-            "data": async_redact_data(dict(entry.data), TO_REDACT),
-            "options": dict(entry.options),
-        },
+        "entry": entry_info,
         "session_telemetry": {
             "session_established_at": client.session_established_at,
             "last_sso_renewal": client.last_sso_renewal,
