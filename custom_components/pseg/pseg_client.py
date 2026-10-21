@@ -111,12 +111,17 @@ class PsegClient:
         self.last_keepalive: str | None = None
         self.okta_session_expired_at: str | None = None
 
+        # The persisted jar (server-rotated cookies) is authoritative. The pasted header
+        # strings stay in entry.data unchanged, so applying them on top would restore
+        # stale idx/MM_SID values on every restart. They only seed a jar that has never
+        # been persisted; reauth/reconfigure replace the persisted jar outright.
         if cookie_list:
             self.import_cookies(cookie_list)
-        if okta_cookies:
-            self.set_cookies_from_header(okta_cookies, OKTA_HOST)
-        if portal_cookies:
-            self.set_cookies_from_header(portal_cookies, PORTAL_HOST)
+        else:
+            if okta_cookies:
+                self.set_cookies_from_header(okta_cookies, OKTA_HOST)
+            if portal_cookies:
+                self.set_cookies_from_header(portal_cookies, PORTAL_HOST)
 
     @_locked
     def set_cookies_from_header(self, cookie_header: str, domain: str) -> None:
