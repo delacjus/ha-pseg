@@ -177,3 +177,32 @@ async def test_keepalive_detects_expired_okta_session(hass: HomeAssistant) -> No
 
     assert coord.auth_required is True
     assert coord.status == "auth_required"
+
+
+async def test_keepalive_expiry_starts_reauth_once(hass: HomeAssistant) -> None:
+    """Okta expiry seen by the keepalive starts one reauth flow and a non-fixable issue."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345", data={CONF_OKTA_COOKIES: "idx=test"}
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+
+    with patch.object(client, "keepalive", side_effect=PsegOktaSessionExpired("widget")):
+        await coord._async_keepalive(datetime.now(UTC))
+        await hass.async_block_till_done()
+        await coord._async_keepalive(datetime.now(UTC))
+        await hass.async_block_till_done()
+
+    assert coord.status == "auth_required"
+    flows = [
+        f
+        for f in hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+        if f["context"]["source"] == "reauth"
+    ]
+    assert len(flows) == 1
+    assert flows[0]["context"]["entry_id"] == entry.entry_id
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, f"reauth_required_{entry.entry_id}")
+    assert issue is not None
+    assert issue.is_fixable is False

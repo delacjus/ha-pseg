@@ -297,17 +297,26 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_keepalive(self, _now: datetime) -> None:
         """Run keepalive check and persist rotated cookies."""
         _LOGGER.debug("Running 30-minute PSE&G keepalive")
+        expired = False
         try:
             await self.hass.async_add_executor_job(self.client.keepalive)
+        except PsegOktaSessionExpired:
+            expired = True
         except Exception as err:
             _LOGGER.debug("Error during keepalive check: %s", err)
 
         await self._async_persist_cookies()
 
-        if self.client.okta_session_expired_at and not self.auth_required:
+        if (expired or self.client.okta_session_expired_at) and not self.auth_required:
             self.auth_required = True
             self.status = "auth_required"
             self._raise_auth_issues("Okta session expired during background keepalive")
+            # Same outcome as a poll raising ConfigEntryAuthFailed: ask the user now
+            # instead of waiting up to a full poll interval. Guarded by auth_required so
+            # it fires once per expiry; HA also refuses a second concurrent reauth flow.
+            if self.config_entry:
+                self.config_entry.async_start_reauth(self.hass)
+            self.async_update_listeners()
 
     async def _async_persist_cookies(self) -> None:
         """Persist rotated session cookies to entry.data without logging values."""
@@ -356,7 +365,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.hass,
                 DOMAIN,
                 f"reauth_required_{entry_id}",
-                is_fixable=True,
+                # No repairs.py flow: the fix is the reauth flow HA already offers.
+                is_fixable=False,
                 is_persistent=False,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key="reauth_required",
