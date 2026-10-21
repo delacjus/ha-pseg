@@ -19,7 +19,6 @@ from homeassistant.components.recorder.models import (
 )
 from homeassistant.components.recorder.statistics import (
     async_add_external_statistics,
-    get_last_statistics,
     statistics_during_period,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -49,61 +48,57 @@ from .pseg_client import (
 _LOGGER = logging.getLogger(__name__)
 
 
+# Earliest start considered when looking for the baseline row (before any AMI data).
+_STATS_EPOCH = datetime(2000, 1, 1, tzinfo=UTC)
+
+
+def _row_start(stat: Any) -> datetime | None:
+    """Return a statistics row start as an aware UTC datetime."""
+    stat_start = stat.get("start")
+    if isinstance(stat_start, (int, float)):
+        return datetime.fromtimestamp(stat_start, tz=UTC)
+    if isinstance(stat_start, datetime):
+        return dt_util.as_utc(stat_start)
+    return None
+
+
 async def _async_get_last_stat_before(
     hass: HomeAssistant,
     statistic_id: str,
     before_dt: datetime,
 ) -> float | None:
-    """Get the cumulative sum of the last statistic strictly before before_dt."""
-    # 1. First try get_last_statistics with up to 50 entries
-    try:
-        last_stats = await get_instance(hass).async_add_executor_job(
-            get_last_statistics,
-            hass,
-            50,
-            statistic_id,
-            True,
-            {"sum", "start"},
-        )
-        if statistic_id in last_stats and last_stats[statistic_id]:
-            for stat in last_stats[statistic_id]:
-                stat_start = stat.get("start")
-                if isinstance(stat_start, (int, float)):
-                    stat_start_dt = datetime.fromtimestamp(stat_start, tz=UTC)
-                elif isinstance(stat_start, datetime):
-                    stat_start_dt = dt_util.as_utc(stat_start)
-                else:
-                    continue
-                if stat_start_dt < before_dt:
-                    val = stat.get("sum")
-                    if val is not None:
-                        return float(val)
-    except Exception as err:
-        _LOGGER.debug("Error querying get_last_statistics for %s: %s", statistic_id, err)
+    """Get the cumulative sum of the last statistic strictly before before_dt.
 
-    # 2. Check bounded window before before_dt if not found above
+    Reads the hourly statistics table (where the daily rows live) with
+    end_time=before_dt. A "day" period would aggregate in HA's configured time zone,
+    and for any zone other than America/New_York the bucket ending before before_dt
+    contains the row AT before_dt, so re-imports added that day twice.
+    """
     try:
-        window_start = before_dt - timedelta(days=365)
-        window_end = before_dt - timedelta(seconds=1)
         stats = await get_instance(hass).async_add_executor_job(
             statistics_during_period,
             hass,
-            window_start,
-            window_end,
+            _STATS_EPOCH,
+            before_dt,
             {statistic_id},
-            "day",
+            "hour",
             None,
             {"sum"},
         )
-        if stats and statistic_id in stats and stats[statistic_id]:
-            for stat in reversed(stats[statistic_id]):
-                val = stat.get("sum")
-                if val is not None:
-                    return float(val)
     except Exception as err:
         _LOGGER.debug("Error querying statistics_during_period for %s: %s", statistic_id, err)
+        return None
 
-    return None
+    best_start: datetime | None = None
+    best_sum: float | None = None
+    for stat in stats.get(statistic_id, []):
+        start = _row_start(stat)
+        val = stat.get("sum")
+        if start is None or val is None or start >= before_dt:
+            continue
+        if best_start is None or start > best_start:
+            best_start, best_sum = start, float(val)
+    return best_sum
 
 
 async def _async_wait_for_recorder_commit(hass: HomeAssistant) -> None:

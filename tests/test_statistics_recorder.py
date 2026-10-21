@@ -81,3 +81,35 @@ async def test_concurrent_imports_chain_sums(coord, hass) -> None:
     values = [v for _, v in sums]
     assert values == sorted(values), f"sum goes backwards: {sums}"
     assert dict(sums)["2026-10-15"] == 450.0
+
+
+async def test_rolling_polls_are_cumulative(coord, hass) -> None:
+    """Same-window re-poll then a shifted window keep a strictly cumulative chain."""
+    await coord.async_record_statistics(_recs("2026-10-01", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+    await coord.async_record_statistics(_recs("2026-10-01", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+    await coord.async_record_statistics(_recs("2026-10-02", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    assert [v for _, v in await _sums(hass)] == [10.0 * (i + 1) for i in range(15)]
+
+
+@pytest.mark.parametrize(
+    "time_zone", ["America/New_York", "UTC", "US/Pacific", "Europe/Berlin"]
+)
+async def test_same_window_repoll_idempotent_in_any_ha_time_zone(
+    coord, hass, time_zone
+) -> None:
+    """Rows start at America/New_York midnight; HA's own zone must not shift the baseline."""
+    await hass.config.async_set_time_zone(time_zone)
+    await coord.async_record_statistics(_recs("2026-10-01", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+    await coord.async_record_statistics(_recs("2026-10-01", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    sums = await _sums(hass)
+    assert sums[0] == ("2026-10-01", 10.0)
+    assert sums[-1] == ("2026-10-14", 140.0)
+    cost = await _sums(hass, COST_ID)
+    assert cost[-1] == ("2026-10-14", 35.0)
