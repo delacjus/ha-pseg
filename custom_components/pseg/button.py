@@ -11,7 +11,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DEVICE_NAME, DOMAIN
 from .coordinator import PsegDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,9 +40,12 @@ class PsegRefreshButton(CoordinatorEntity[PsegDataUpdateCoordinator], ButtonEnti
         self._attr_unique_id = f"{entry.entry_id}_refresh_data"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
-            name=f"PSE&G ({entry.title or 'Energy'})",
+            # "PSEG" + has_entity_name gives sensor.pseg_<key>, the ids the card and
+            # README use. The meter id goes in serial_number, not the name.
+            name=DEVICE_NAME,
             manufacturer="Public Service Enterprise Group",
             model="Smart AMI Meter",
+            serial_number=entry.unique_id,
         )
 
     async def async_press(self) -> None:

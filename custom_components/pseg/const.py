@@ -4,6 +4,9 @@ from __future__ import annotations
 
 DOMAIN = "pseg"
 
+# Device name; with has_entity_name entities become sensor.pseg_<translation name>.
+DEVICE_NAME = "PSEG"
+
 CONF_OKTA_COOKIES = "okta_cookies"
 CONF_PORTAL_COOKIES = "portal_cookies"
 CONF_COOKIE = "cookie"

@@ -56,7 +56,7 @@
         "name": "Electricity consumption"
       },
       "electricity_cost": {
-        "name": "Electricity cost (estimated)"
+        "name": "Electricity cost"
       },
       "meter_id": {
         "name": "Meter ID"

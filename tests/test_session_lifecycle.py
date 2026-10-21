@@ -9,6 +9,7 @@ from unittest.mock import patch
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 import requests_mock
@@ -245,3 +246,51 @@ async def test_reauth_replaces_persisted_jar(hass: HomeAssistant, portal) -> Non
     client = hass.data[DOMAIN][entry.entry_id].client
     assert _jar(client, "idx") == ["FRESH"]
     assert _jar(client, "MM_SID") == []
+
+
+async def test_entity_ids_match_card_and_readme(hass: HomeAssistant, portal) -> None:
+    """The first entry's entity ids are the stable ones the card and README use."""
+    entry = _entry(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    ids = sorted(
+        e.entity_id
+        for e in er.async_entries_for_config_entry(er.async_get(hass), entry.entry_id)
+    )
+    assert ids == [
+        "button.pseg_refresh_data",
+        "sensor.pseg_connection_status",
+        "sensor.pseg_electricity_consumption",
+        "sensor.pseg_electricity_cost",
+        "sensor.pseg_latest_reading_date",
+        "sensor.pseg_meter_id",
+        "sensor.pseg_next_update",
+        "sensor.pseg_outdoor_temperature",
+    ]
+    assert hass.states.get("sensor.pseg_connection_status").state == "connected"
+    assert hass.states.get("sensor.pseg_electricity_consumption").state == "5.0"
+
+
+async def test_second_account_gets_suffixed_entity_ids(hass: HomeAssistant, portal) -> None:
+    """A second account must not collide with the first account's ids (README claim)."""
+    first = _entry(hass)
+    second = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="87654321",
+        title="PSE&G (87654321)",
+        data={CONF_OKTA_COOKIES: "idx=b", CONF_PORTAL_COOKIES: "", CONF_METER_ID: "87654321"},
+    )
+    second.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(first.entry_id)
+    await hass.async_block_till_done()
+    if second.state is not ConfigEntryState.LOADED:
+        assert await hass.config_entries.async_setup(second.entry_id)
+        await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    second_ids = {e.entity_id for e in er.async_entries_for_config_entry(registry, second.entry_id)}
+    assert "sensor.pseg_connection_status_2" in second_ids
+    assert "sensor.pseg_electricity_consumption_2" in second_ids
+    assert registry.async_get("sensor.pseg_connection_status").config_entry_id == first.entry_id

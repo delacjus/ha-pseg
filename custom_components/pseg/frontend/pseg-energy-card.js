@@ -51,6 +51,7 @@ class PsegEnergyCard extends HTMLElement {
       toggle_entity: "input_boolean.pseg_display_dollars",
       range_toggle_entity: "input_boolean.pseg_chart_14d",
       next_update_entity: "sensor.pseg_next_update",
+      connection_status_entity: "sensor.pseg_connection_status",
       show_next_update: false,
       popup_hash: null,
       ...config
@@ -73,7 +74,7 @@ class PsegEnergyCard extends HTMLElement {
       const e2 = this.config.toggle_entity;
       const e3 = this.config.range_toggle_entity;
       const e4 = this.config.next_update_entity;
-      const e5 = "sensor.pseg_connection_status";
+      const e5 = this.config.connection_status_entity;
 
       const sameE1 = !e1 || oldHass.states[e1] === hass.states[e1];
       const sameE2 = !e2 || oldHass.states[e2] === hass.states[e2];
@@ -211,7 +212,8 @@ class PsegEnergyCard extends HTMLElement {
         return;
       }
 
-      const connectionStatus = this._hass.states["sensor.pseg_connection_status"]?.state;
+      const connectionStatusEnt = this.config.connection_status_entity || "sensor.pseg_connection_status";
+      const connectionStatus = this._hass.states[connectionStatusEnt]?.state;
       const isAuthRequired = isUnavailable ||
                             entity.attributes.auth_required === true ||
                             connectionStatus === "auth_required";

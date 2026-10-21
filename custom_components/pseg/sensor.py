@@ -32,6 +32,7 @@ from .const import (
     ATTR_PREVIOUS_KWH,
     ATTR_SESSION_ESTABLISHED_AT,
     ATTR_SSO_RENEWALS,
+    DEVICE_NAME,
     DOMAIN,
 )
 from .coordinator import PsegDataUpdateCoordinator
@@ -79,9 +80,12 @@ class PsegBaseSensor(CoordinatorEntity[PsegDataUpdateCoordinator], RestoreEntity
         self._attr_translation_key = key
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
-            name=f"PSE&G ({entry.title or 'Energy'})",
+            # "PSEG" + has_entity_name gives sensor.pseg_<key>, the ids the card and
+            # README use. The meter id goes in serial_number, not the name.
+            name=DEVICE_NAME,
             manufacturer="Public Service Enterprise Group",
             model="Smart AMI Meter",
+            serial_number=entry.unique_id,
         )
         self._restored_state = None
 

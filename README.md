@@ -26,7 +26,7 @@ This fork (`delacjus/ha-pseg`, forked from `sidprax/ha-pseg`) hardens the integr
 ## Features
 
 - **Daily Smart Meter Readings**: Captures daily electricity usage (`sensor.pseg_electricity_consumption`).
-- **Cost Estimation**: Estimates daily electricity costs in USD (`sensor.pseg_electricity_cost_estimated`).
+- **Cost Estimation**: Estimates daily electricity costs in USD (`sensor.pseg_electricity_cost`).
 - **Home Assistant Energy Dashboard**: External Long-Term Statistics (LTS) support for both consumption and cost.
 - **Historical Backfill**: Built-in action (`pseg.backfill_history`) to backfill up to 2 years of historical daily usage and cost directly into Home Assistant Energy statistics.
 - **Configurable Rate**: Set your estimated electricity rate ($/kWh) in integration Options.
@@ -122,10 +122,16 @@ entity: sensor.pseg_electricity_consumption
 | `toggle_entity` | string | `input_boolean.pseg_display_dollars` | Optional helper entity to switch between kWh and dollar view |
 | `range_toggle_entity` | string | `input_boolean.pseg_chart_14d` | Optional helper entity to switch between 7-day and 14-day chart view |
 | `cost_per_kwh` | number | `0.247` | Override effective rate in card calculations |
+| `next_update_entity` | string | `sensor.pseg_next_update` | Entity holding the next scheduled fetch timestamp |
+| `connection_status_entity` | string | `sensor.pseg_connection_status` | Connection status entity; the card shows the re-authenticate banner when it reads `auth_required` |
 | `show_next_update` | boolean | `false` | Display the next scheduled fetch timestamp beside the meter label |
 | `popup_hash` | string | `null` | URL hash to open a custom popup card on tap. When omitted, tapping opens standard entity dialog. |
 
 ## Entities Provided
+
+Entity ids below are for the first configured account (device name `PSEG`). A second account
+gets the same ids with a `_2` suffix; point the card's `entity`, `next_update_entity` and
+`connection_status_entity` options at those.
 
 - `sensor.pseg_electricity_consumption`: Latest daily electric usage in kWh (contains `history_14d` and daily stats)
 - `sensor.pseg_electricity_cost`: Latest daily estimated cost in USD
