@@ -11,11 +11,13 @@ from datetime import UTC, datetime, timedelta
 import functools
 import json
 import logging
+import math
 import re
 import threading
 import time
 from typing import Any
 import urllib.parse
+from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup
 import requests
@@ -30,6 +32,8 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+_EASTERN = ZoneInfo("America/New_York")
+_METER_SERIES = re.compile(r"^\s*Meter #(\d+)")
 
 # Path fragments that mean "you were sent to sign in" (portal or Okta).
 _SIGNIN_PATH_MARKERS = ("/signin", "/sign-in", "/login")
@@ -580,26 +584,71 @@ class PsegClient:
         active_x = -1
         meter_ids: list[str] = []
         for s in series_list:
-            if not isinstance(s, dict) or "Meter" not in str(s.get("name") or ""):
+            if not isinstance(s, dict):
                 continue
-            name = str(s["name"])
-            match = re.search(r"\d+", name)
-            if match and match.group(0) not in meter_ids:
-                meter_ids.append(match.group(0))
+            name = str(s.get("name") or "")
+            match = _METER_SERIES.match(name)
+            if not match:
+                continue
+            meter_id = match.group(1)
+            if meter_id in meter_ids:
+                _LOGGER.debug("Skipping duplicate meter series for meter %s", meter_id)
+                continue
+            meter_ids.append(meter_id)
             if active_name is None:
                 active_name = name
             for pt in s.get("data") or []:
                 if not isinstance(pt, dict):
                     continue
-                start_str = (pt.get("hs") or {}).get("start", "")
+                hs = pt.get("hs")
+                start_str = hs.get("start") if isinstance(hs, dict) else None
                 try:
                     date_iso = datetime.strptime(start_str, "%m/%d/%Y").strftime("%Y-%m-%d")
                 except (TypeError, ValueError):
-                    date_iso = start_str
-                totals[date_iso] = totals.get(date_iso, 0.0) + float(pt.get("y") or 0.0)
+                    _LOGGER.debug("Skipping meter %s point with invalid date", meter_id)
+                    continue
+                y = pt.get("y")
+                if isinstance(y, bool) or not isinstance(y, (int, float)) or not math.isfinite(y):
+                    _LOGGER.debug("Skipping meter %s point with non-numeric usage", meter_id)
+                    continue
+                totals[date_iso] = totals.get(date_iso, 0.0) + float(y)
                 x = pt.get("x")
                 if isinstance(x, (int, float)) and x > active_x:
                     active_x, active_name = x, name
+
+        for series in series_list:
+            if not isinstance(series, dict) or series.get("name"):
+                continue
+            navigator: dict[str, float] = {}
+            for point in series.get("data") or []:
+                if not isinstance(point, (list, tuple)) or len(point) < 2:
+                    continue
+                ts, y = point[:2]
+                if (
+                    isinstance(ts, bool)
+                    or not isinstance(ts, (int, float))
+                    or isinstance(y, bool)
+                    or not isinstance(y, (int, float))
+                    or not math.isfinite(y)
+                ):
+                    continue
+                try:
+                    day = datetime.fromtimestamp(ts / 1000, tz=_EASTERN).strftime("%Y-%m-%d")
+                except (OverflowError, OSError, ValueError):
+                    continue
+                navigator[day] = float(y)
+            if navigator:
+                mismatches = sum(
+                    abs(total - navigator[day]) > 0.05
+                    for day, total in totals.items()
+                    if day in navigator
+                )
+                if mismatches:
+                    _LOGGER.warning(
+                        "PSE&G navigator differs from merged meter totals on %d days",
+                        mismatches,
+                    )
+                break
         records = []
         for date_iso in sorted(totals):
             kwh = round(totals[date_iso], 2)

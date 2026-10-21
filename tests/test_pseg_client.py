@@ -1,6 +1,7 @@
 """Unit tests for PSE&G API client."""
 
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 import requests
@@ -197,7 +198,7 @@ def test_custom_price_per_kwh() -> None:
     data = {
         "Data": {
             "series": [
-                {"name": "Electric Meter", "data": [{"y": 10.0, "hs": {"start": "10/15/2026"}}]}
+                {"name": "Meter #1", "data": [{"y": 10.0, "hs": {"start": "10/15/2026"}}]}
             ]
         }
     }
@@ -213,7 +214,7 @@ DASHBOARD_WITH_TOKEN = (
     '<a href="/Account/LogOff">Log out</a><script>var loginUrl="/";</script>'
     "<p>Sign in to see more</p></html>"
 )
-CHART_JSON = {"Data": {"series": [{"name": "Electric Meter 1", "data": [{"y": 1.0, "hs": {"start": "10/20/2026"}}]}]}}
+CHART_JSON = {"Data": {"series": [{"name": "Meter #1", "data": [{"y": 1.0, "hs": {"start": "10/20/2026"}}]}]}}
 
 
 def test_sso_signin_5xx_is_transient() -> None:
@@ -621,3 +622,69 @@ def test_history_range_reads_every_meter_series() -> None:
         m.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart)
         records = client.fetch_history_range("2026-10-18", "2026-10-18")
     assert records == [{"date": "2026-10-18", "kwh": 17.59, "cost": round(17.59 * client.price_per_kwh, 2)}]
+
+
+def test_merge_deduplicates_meter_and_ignores_non_meter_series(caplog: pytest.LogCaptureFixture) -> None:
+    """Only the first anchored series for each meter contributes usage."""
+    chart = {"Data": {"series": [
+        _meter("Meter #111 (RS)", [("10/18/2026", 10.0)]),
+        _meter("Meter #111 (RS) - Previous Year", [("10/18/2026", 99.0)]),
+        _meter("Previous Year Meter #222", [("10/18/2026", 50.0)]),
+        _meter("  Meter #222 (RS)", [("10/18/2026", 3.0)]),
+    ]}}
+    with caplog.at_level("DEBUG"):
+        parsed = PsegClient()._parse_chart_data(chart)
+    assert parsed["history_14d"][0]["kwh"] == 13.0
+    assert parsed["meter_ids"] == ["111", "222"]
+    assert "duplicate" in caplog.text.lower()
+
+
+def test_merge_skips_missing_usage_and_bad_date(caplog: pytest.LogCaptureFixture) -> None:
+    """Invalid points must not create zero-kWh or empty-date statistics rows."""
+    chart = {"Data": {"series": [{"name": "Meter #111 (RS)", "data": [
+        {"y": None, "hs": {"start": "10/18/2026"}},
+        {"y": "bad", "hs": {"start": "10/19/2026"}},
+        {"y": 2.0, "hs": {"start": "bad date"}},
+        {"y": 1.0, "hs": "bad"},
+        {"y": 3.0, "hs": {"start": "10/20/2026"}},
+    ]}]}}
+    with caplog.at_level("DEBUG"):
+        parsed = PsegClient()._parse_chart_data(chart)
+    assert [(r["date"], r["kwh"]) for r in parsed["history_14d"]] == [
+        ("2026-10-20", 3.0)
+    ]
+    assert "Skipping" in caplog.text
+
+
+@pytest.mark.parametrize("navigator_total, warning_count", [(10.0, 0), (11.0, 1)])
+def test_navigator_cross_check_warns_once_per_parse(
+    navigator_total: float, warning_count: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Account totals validate meter sums without replacing them."""
+    eastern = ZoneInfo("America/New_York")
+    def timestamp(day: int) -> int:
+        return int(datetime(2026, 10, day, tzinfo=eastern).timestamp() * 1000)
+
+    chart = {"Data": {"series": [
+        {"data": [[timestamp(18), navigator_total], [timestamp(19), navigator_total]]},
+        _meter("Meter #111 (RS)", [("10/18/2026", 10.0), ("10/19/2026", 10.0)]),
+    ]}}
+    with caplog.at_level("WARNING"):
+        parsed = PsegClient()._parse_chart_data(chart)
+    assert [r["kwh"] for r in parsed["history_14d"]] == [10.0, 10.0]
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "navigator" in r.message.lower()]
+    assert len(warnings) == warning_count
+    if warning_count:
+        assert "2" in warnings[0].message
+
+
+def test_navigator_timestamp_uses_new_york_date(caplog: pytest.LogCaptureFixture) -> None:
+    """A UTC midnight navigator point belongs to the prior day in New York."""
+    utc_midnight = int(datetime(2026, 10, 19, tzinfo=UTC).timestamp() * 1000)
+    chart = {"Data": {"series": [
+        {"data": [[utc_midnight, 10.0]]},
+        _meter("Meter #111 (RS)", [("10/18/2026", 10.0), ("10/19/2026", 20.0)]),
+    ]}}
+    with caplog.at_level("WARNING"):
+        PsegClient()._parse_chart_data(chart)
+    assert not [r for r in caplog.records if r.levelname == "WARNING" and "navigator" in r.message.lower()]

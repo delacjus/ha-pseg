@@ -39,7 +39,7 @@ def test_concurrent_chart_requests_do_not_interleave() -> None:
             pts.append({"y": 1.0, "hs": {"start": d.strftime("%m/%d/%Y")}})
             d += timedelta(days=1)
         time.sleep(0.05)
-        return {"Data": {"series": [{"name": "Electric Meter 1", "data": pts}]}}
+        return {"Data": {"series": [{"name": "Meter #1", "data": pts}]}}
 
     out: dict = {}
     with requests_mock.Mocker() as m:

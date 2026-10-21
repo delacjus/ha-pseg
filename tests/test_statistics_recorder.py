@@ -238,7 +238,7 @@ def _chart_mocker(m, empty_chunk_start: str | None) -> None:
         while d <= d1:
             pts.append({"y": 20.0, "hs": {"start": d.strftime("%m/%d/%Y")}})
             d += timedelta(days=1)
-        return {"Data": {"series": [{"name": "Electric Meter 1", "data": pts}]}}
+        return {"Data": {"series": [{"name": "Meter #1", "data": pts}]}}
 
     m.get(f"{PORTAL_BASE_URL}/Dashboard", text='<input name="__RequestVerificationToken" value="t"/>')
     m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
