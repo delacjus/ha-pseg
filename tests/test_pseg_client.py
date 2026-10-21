@@ -312,3 +312,62 @@ def test_expired_flag_cleared_after_successful_fetch() -> None:
         m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
         assert client.keepalive() is True
     assert client.okta_session_expired_at is None
+
+
+# --- Review r1 L10: allowlist must also pin https and port 443 ---
+
+
+def test_http_downgrade_redirect_blocked_before_cookies_sent() -> None:
+    """A redirect to http:// on an allowlisted host must be refused before sending cookies."""
+    client = PsegClient(okta_cookies="idx=SECRETOKTA", portal_cookies="MM_SID=SECRETPORTAL")
+    seen: dict = {}
+    with requests_mock.Mocker() as m:
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            status_code=302,
+            headers={"Location": f"http://{PORTAL_HOST}:8080/x"},
+        )
+
+        def capture(req, ctx):
+            seen["cookie"] = req.headers.get("Cookie")
+            return "<html>Dashboard</html>"
+
+        m.get(f"http://{PORTAL_HOST}:8080/x", text=capture)
+        with pytest.raises(PsegSecurityError):
+            client.ensure_session()
+    assert "cookie" not in seen
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"http://{PORTAL_HOST}/Dashboard",
+        f"https://{PORTAL_HOST}:8443/Dashboard",
+        f"http://{OKTA_HOST}/signin",
+    ],
+)
+def test_allowlist_requires_https_default_port(url: str) -> None:
+    """Allowlisted hosts are only reachable over https on the default port."""
+    client = PsegClient()
+    with requests_mock.Mocker() as m:
+        m.get(url, text="x")
+        with pytest.raises(PsegSecurityError):
+            client.session.get(url)
+        assert m.called is False
+
+
+def test_allowlist_permits_https_with_explicit_443() -> None:
+    client = PsegClient()
+    with requests_mock.Mocker() as m:
+        m.get(f"https://{PORTAL_HOST}:443/Dashboard", text="ok")
+        assert client.session.get(f"https://{PORTAL_HOST}:443/Dashboard").text == "ok"
+
+
+def test_pasted_and_restored_cookies_are_secure() -> None:
+    """Cookies from the paste (and from a persisted jar without the flag) are https-only."""
+    client = PsegClient(okta_cookies="idx=a", portal_cookies="MM_SID=b")
+    assert all(c.secure for c in client.session.cookies)
+    restored = PsegClient(
+        cookie_list=[{"name": "MM_SID", "value": "b", "domain": PORTAL_HOST, "path": "/"}]
+    )
+    assert all(c.secure for c in restored.session.cookies)

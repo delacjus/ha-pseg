@@ -62,11 +62,23 @@ class AllowlistedSession(requests.Session):
     """Requests session that strictly enforces host allowlist on all requests and redirects."""
 
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
+        # Runs for the first request and every redirect hop (resolve_redirects calls
+        # send), before the cookie-bearing request leaves the process.
         parsed = urllib.parse.urlparse(request.url)
         if parsed.hostname not in ALLOWED_HOSTS:
             raise PsegSecurityError(
                 f"Request to unauthorized host blocked: {parsed.hostname or request.url}"
             )
+        if parsed.scheme != "https":
+            raise PsegSecurityError(
+                f"Request to {parsed.hostname} blocked: scheme {parsed.scheme!r} is not https"
+            )
+        try:
+            port = parsed.port
+        except ValueError as err:
+            raise PsegSecurityError(f"Request to {parsed.hostname} blocked: bad port") from err
+        if port not in (None, 443):
+            raise PsegSecurityError(f"Request to {parsed.hostname} blocked: port {port}")
         return super().send(request, **kwargs)
 
 
@@ -145,7 +157,7 @@ class PsegClient:
             name = name.strip()
             val = val.strip()
             if name:
-                self.session.cookies.set(name, val, domain=domain, path="/")
+                self.session.cookies.set(name, val, domain=domain, path="/", secure=True)
 
     @_locked
     def export_cookies(self) -> list[dict[str, Any]]:
@@ -170,7 +182,9 @@ class PsegClient:
             domain = c.get("domain", PORTAL_HOST)
             path = c.get("path", "/")
             if name and val:
-                self.session.cookies.set(name, val, domain=domain, path=path)
+                self.session.cookies.set(
+                    name, val, domain=domain, path=path, secure=bool(c.get("secure", True))
+                )
 
     def _is_login_page(self, resp: requests.Response) -> bool:
         """Return True only on a real logged-out signal.
