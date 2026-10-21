@@ -31,7 +31,7 @@ class PsegRefreshButton(CoordinatorEntity[PsegDataUpdateCoordinator], ButtonEnti
     """Button to manually trigger an immediate refresh of PSE&G data."""
 
     _attr_has_entity_name = True
-    _attr_name = "Refresh Data"
+    _attr_translation_key = "refresh_data"
     _attr_icon = "mdi:refresh"
 
     def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
@@ -40,13 +40,12 @@ class PsegRefreshButton(CoordinatorEntity[PsegDataUpdateCoordinator], ButtonEnti
         self._attr_unique_id = f"{entry.entry_id}_refresh_data"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
-            name="PSE&G",
+            name=f"PSE&G ({entry.title or 'Energy'})",
             manufacturer="Public Service Enterprise Group",
             model="Smart AMI Meter",
         )
-        self.entity_id = "button.pseg_refresh_data"
 
     async def async_press(self) -> None:
         """Handle manual refresh press."""
-        _LOGGER.info("Manual refresh triggered via button.pseg_refresh_data")
+        _LOGGER.info("Manual refresh triggered via PSE&G Refresh button")
         await self.coordinator.async_request_refresh()

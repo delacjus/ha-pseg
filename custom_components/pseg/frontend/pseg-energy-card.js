@@ -1,3 +1,13 @@
+function escapeHtml(str) {
+  if (str == null) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
 /**
  * PSEG Energy Card - Ultra-Minimal Galleria Edition
  *
@@ -362,14 +372,14 @@ class PsegEnergyCard extends HTMLElement {
       const fitsInside = heightPct >= 32;
 
       return `
-        <div class="bar-col ${isLatest ? 'is-latest' : ''} ${item.isMissing ? 'is-missing' : ''}" title="${item.date}: ${item.isMissing ? 'No Data' : kwh + ' kWh'}">
+        <div class="bar-col ${isLatest ? 'is-latest' : ''} ${item.isMissing ? 'is-missing' : ''}" title="${escapeHtml(item.date)}: ${item.isMissing ? 'No Data' : escapeHtml(kwh) + ' kWh'}">
           <div class="bar-track">
             <div class="bar-fill" style="height: ${heightPct}%; background: ${barBg};">
-              ${!item.isMissing && fitsInside ? `<span class="val-inside">${barValText}</span>` : ""}
+              ${!item.isMissing && fitsInside ? `<span class="val-inside">${escapeHtml(barValText)}</span>` : ""}
             </div>
-            ${!item.isMissing && !fitsInside ? `<span class="val-above" style="bottom: ${heightPct + 2}%;">${barValText}</span>` : ""}
+            ${!item.isMissing && !fitsInside ? `<span class="val-above" style="bottom: ${heightPct + 2}%;">${escapeHtml(barValText)}</span>` : ""}
           </div>
-          <span class="bar-date">${dateText}</span>
+          <span class="bar-date">${escapeHtml(dateText)}</span>
         </div>
       `;
     }).join("");
@@ -617,8 +627,8 @@ class PsegEnergyCard extends HTMLElement {
         <!-- Row 1: Left Meta + Right Single-Line Mini Stats -->
         <div class="top-row">
           <div class="meta-col">
-            <span class="meta-date" title="${nextUpdateTooltip || `As of ${asOfDateStr}`}">As of ${asOfDateStr}</span>
-            <span class="meta-meter">${meterText}${nextUpdateInline}</span>
+            <span class="meta-date" title="${nextUpdateTooltip || `As of ${escapeHtml(asOfDateStr)}`}">As of ${escapeHtml(asOfDateStr)}</span>
+            <span class="meta-meter">${escapeHtml(meterText)}${escapeHtml(nextUpdateInline)}</span>
           </div>
 
           <div class="metrics-inline">
@@ -684,7 +694,7 @@ class PsegEnergyCard extends HTMLElement {
       console.error("PSEG Energy Card render error:", err);
       this.shadowRoot.innerHTML = `
         <ha-card style="background: rgba(25, 25, 25, 0.4); backdrop-filter: blur(10px); padding: 14px 18px; border-radius: 18px; color: #ff6b6b; border: 1px solid rgba(255,255,255,0.08); font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', Roboto, sans-serif; font-size: 13px;">
-          PSE&amp;G Card Error: ${err.message || err}
+          PSE&amp;G Card Error: ${escapeHtml(err.message || err)}
         </ha-card>
       `;
     }

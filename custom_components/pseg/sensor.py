@@ -4,17 +4,15 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
-    SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy, UnitOfTemperature
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -23,15 +21,17 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     ATTR_HISTORY_14D,
+    ATTR_LAST_KEEPALIVE,
+    ATTR_LAST_SSO_RENEWAL,
     ATTR_LATEST_COST,
     ATTR_LATEST_DATE,
     ATTR_METER,
+    ATTR_OKTA_SESSION_EXPIRED_AT,
     ATTR_PREVIOUS_COST,
     ATTR_PREVIOUS_DATE,
     ATTR_PREVIOUS_KWH,
-    ATTR_TEMPERATURE_AVG,
-    ATTR_TEMPERATURE_HIGH,
-    ATTR_TEMPERATURE_LOW,
+    ATTR_SESSION_ESTABLISHED_AT,
+    ATTR_SSO_RENEWALS,
     DOMAIN,
 )
 from .coordinator import PsegDataUpdateCoordinator
@@ -46,36 +46,6 @@ async def async_setup_entry(
 ) -> None:
     """Set up PSE&G sensor entries."""
     coordinator: PsegDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
-
-    # Automated migration for entity unique IDs and entity IDs from legacy naming
-    try:
-        ent_reg = er.async_get(hass)
-        migrations = [
-            ("electricity_yesterday", "electricity_consumption", "sensor.pseg_electricity_consumption"),
-            ("electricity_cost_yesterday", "electricity_cost", "sensor.pseg_electricity_cost"),
-            ("outdoor_temperature_yesterday", "outdoor_temperature", "sensor.pseg_outdoor_temperature"),
-            ("electricity_meter_id", "meter_id", "sensor.pseg_meter_id"),
-            ("electricity_latest_date", "latest_reading_date", "sensor.pseg_latest_reading_date"),
-        ]
-        for old_suffix, new_suffix, target_entity_id in migrations:
-            old_uid = f"{entry.entry_id}_{old_suffix}"
-            new_uid = f"{entry.entry_id}_{new_suffix}"
-            old_ent_id = ent_reg.async_get_entity_id("sensor", DOMAIN, old_uid)
-            if old_ent_id:
-                _LOGGER.info(
-                    "Migrating entity %s (UID: %s) -> (UID: %s, Entity ID: %s)",
-                    old_ent_id,
-                    old_uid,
-                    new_uid,
-                    target_entity_id,
-                )
-                ent_reg.async_update_entity(
-                    old_ent_id,
-                    new_unique_id=new_uid,
-                    new_entity_id=target_entity_id,
-                )
-    except Exception as err:
-        _LOGGER.warning("Could not run entity registry migration: %s", err)
 
     entities = [
         PsegElectricityConsumptionSensor(coordinator, entry),
@@ -106,13 +76,13 @@ class PsegBaseSensor(CoordinatorEntity[PsegDataUpdateCoordinator], RestoreEntity
         self.entry = entry
         self._key = key
         self._attr_unique_id = f"{entry.entry_id}_{key}"
+        self._attr_translation_key = key
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
-            name="PSE&G",
+            name=f"PSE&G ({entry.title or 'Energy'})",
             manufacturer="Public Service Enterprise Group",
             model="Smart AMI Meter",
         )
-        self.entity_id = f"sensor.pseg_{key}"
         self._restored_state = None
 
     async def async_added_to_hass(self) -> None:
@@ -124,21 +94,17 @@ class PsegBaseSensor(CoordinatorEntity[PsegDataUpdateCoordinator], RestoreEntity
 
     @property
     def available(self) -> bool:
-        """Return True if data exists or has previously been loaded.
-        Prevents full entity blackout across Home Assistant during session expiration or reauth.
-        """
+        """Return True if data exists or has previously been loaded."""
         return self._data is not None or self._restored_state is not None
 
     @property
-    def _data(self) -> Optional[Dict[str, Any]]:
+    def _data(self) -> dict[str, Any] | None:
         """Return coordinator data, falling back to cached last valid data."""
         return self.coordinator.data or getattr(self.coordinator, "_last_valid_data", None)
 
 
 class PsegConnectionStatusSensor(PsegBaseSensor):
     """Sensor for integration connection and authentication status."""
-
-    _attr_name = "Connection Status"
 
     def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "connection_status")
@@ -162,17 +128,23 @@ class PsegConnectionStatusSensor(PsegBaseSensor):
         return "mdi:alert-octagon"
 
     @property
-    def extra_state_attributes(self) -> Dict[str, Any]:
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return connection and session telemetry attributes."""
+        client = self.coordinator.client
         return {
             "auth_required": self.coordinator.auth_required,
             "last_successful_update": self.coordinator.last_successful_update,
+            ATTR_SESSION_ESTABLISHED_AT: client.session_established_at,
+            ATTR_LAST_SSO_RENEWAL: client.last_sso_renewal,
+            ATTR_SSO_RENEWALS: client.sso_renewals,
+            ATTR_LAST_KEEPALIVE: client.last_keepalive,
+            ATTR_OKTA_SESSION_EXPIRED_AT: client.okta_session_expired_at,
         }
 
 
 class PsegElectricityConsumptionSensor(PsegBaseSensor):
     """Sensor for electricity consumption in kWh."""
 
-    _attr_name = "Electricity Consumption"
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
     _attr_icon = "mdi:lightning-bolt"
@@ -181,7 +153,7 @@ class PsegElectricityConsumptionSensor(PsegBaseSensor):
         super().__init__(coordinator, entry, "electricity_consumption")
 
     @property
-    def native_value(self) -> Optional[float]:
+    def native_value(self) -> float | None:
         """Return the consumption in kWh."""
         if self._data and "latest_kwh" in self._data:
             return self._data.get("latest_kwh")
@@ -193,7 +165,7 @@ class PsegElectricityConsumptionSensor(PsegBaseSensor):
         return None
 
     @property
-    def extra_state_attributes(self) -> Dict[str, Any]:
+    def extra_state_attributes(self) -> dict[str, Any]:
         """Return full history and context attributes for the custom card."""
         attrs = {}
         if self._restored_state and self._restored_state.attributes:
@@ -217,9 +189,8 @@ class PsegElectricityConsumptionSensor(PsegBaseSensor):
 
 
 class PsegElectricityCostSensor(PsegBaseSensor):
-    """Sensor for electricity cost in USD."""
+    """Sensor for electricity cost in USD (estimated)."""
 
-    _attr_name = "Electricity Cost"
     _attr_device_class = SensorDeviceClass.MONETARY
     _attr_native_unit_of_measurement = "USD"
     _attr_icon = "mdi:currency-usd"
@@ -228,8 +199,8 @@ class PsegElectricityCostSensor(PsegBaseSensor):
         super().__init__(coordinator, entry, "electricity_cost")
 
     @property
-    def native_value(self) -> Optional[float]:
-        """Return the cost in dollars."""
+    def native_value(self) -> float | None:
+        """Return the estimated cost in dollars."""
         if self._data and "latest_cost" in self._data:
             return self._data.get("latest_cost")
         if self._restored_state:
@@ -243,14 +214,13 @@ class PsegElectricityCostSensor(PsegBaseSensor):
 class PsegElectricityMeterSensor(PsegBaseSensor):
     """Sensor for the meter ID/description."""
 
-    _attr_name = "Meter ID"
     _attr_icon = "mdi:meter-electric"
 
     def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "meter_id")
 
     @property
-    def native_value(self) -> Optional[str]:
+    def native_value(self) -> str | None:
         if self._data and "meter" in self._data:
             return self._data.get("meter")
         if self._restored_state:
@@ -261,14 +231,13 @@ class PsegElectricityMeterSensor(PsegBaseSensor):
 class PsegElectricityLatestDateSensor(PsegBaseSensor):
     """Sensor for the latest reading date."""
 
-    _attr_name = "Latest Reading Date"
     _attr_icon = "mdi:calendar-clock"
 
     def __init__(self, coordinator: PsegDataUpdateCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator, entry, "latest_reading_date")
 
     @property
-    def native_value(self) -> Optional[str]:
+    def native_value(self) -> str | None:
         if self._data and "latest_date" in self._data:
             return self._data.get("latest_date")
         if self._restored_state:
@@ -279,7 +248,6 @@ class PsegElectricityLatestDateSensor(PsegBaseSensor):
 class PsegTemperatureSensor(PsegBaseSensor):
     """Sensor for the outdoor average temperature."""
 
-    _attr_name = "Outdoor Temperature"
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.FAHRENHEIT
     _attr_icon = "mdi:thermometer"
@@ -288,7 +256,7 @@ class PsegTemperatureSensor(PsegBaseSensor):
         super().__init__(coordinator, entry, "outdoor_temperature")
 
     @property
-    def native_value(self) -> Optional[float]:
+    def native_value(self) -> float | None:
         if self._data and "temperature_avg" in self._data:
             return self._data.get("temperature_avg")
         if self._restored_state:
@@ -302,7 +270,6 @@ class PsegTemperatureSensor(PsegBaseSensor):
 class PsegNextUpdateSensor(PsegBaseSensor):
     """Sensor for the next scheduled data update timestamp."""
 
-    _attr_name = "Next Update"
     _attr_device_class = SensorDeviceClass.TIMESTAMP
     _attr_icon = "mdi:clock-outline"
 
@@ -310,7 +277,7 @@ class PsegNextUpdateSensor(PsegBaseSensor):
         super().__init__(coordinator, entry, "next_update")
 
     @property
-    def native_value(self) -> Optional[datetime]:
+    def native_value(self) -> datetime | None:
         """Return the next scheduled update time as a timezone-aware datetime."""
         if self.coordinator.next_update_time:
             return self.coordinator.next_update_time
