@@ -371,3 +371,64 @@ def test_pasted_and_restored_cookies_are_secure() -> None:
         cookie_list=[{"name": "MM_SID", "value": "b", "domain": PORTAL_HOST, "path": "/"}]
     )
     assert all(c.secure for c in restored.session.cookies)
+
+
+# --- Review r1 L13: SAML form selection and action host ---
+
+OKTA_SAML_URL = f"https://{OKTA_HOST}/app/pseg/exk1/sso/saml"
+
+
+def _sso_to_okta(m, html: str) -> None:
+    m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+    m.get(
+        f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn",
+        status_code=302,
+        headers={"Location": OKTA_SAML_URL},
+    )
+    m.get(OKTA_SAML_URL, text=html)
+
+
+def test_saml_post_uses_form_containing_saml_response() -> None:
+    """A decoy form before the SAML form must not be posted."""
+    client = PsegClient(okta_cookies="idx=ok")
+    html = f"""
+    <html><body>
+      <form id="signout" method="POST" action="/login/signout"><input name="x" value="1"/></form>
+      <form id="appForm" method="POST" action="https://{PORTAL_HOST}/Saml/okta-prod/Acs">
+        <input type="hidden" name="SAMLResponse" value="assertion"/>
+        <input type="hidden" name="RelayState" value="relay"/>
+      </form>
+    </body></html>
+    """
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            [LOGGED_OUT_REDIRECT, {"text": "<html>Dashboard</html>"}],
+        )
+        _sso_to_okta(m, html)
+        signout = m.post(f"https://{OKTA_HOST}/login/signout", text="bye")
+        acs = m.post(f"https://{PORTAL_HOST}/Saml/okta-prod/Acs", text="ok")
+        assert client.ensure_session() is True
+    assert signout.called is False
+    assert acs.call_count == 1
+    assert "SAMLResponse=assertion" in acs.last_request.text
+    assert "RelayState=relay" in acs.last_request.text
+
+
+def test_saml_action_must_be_portal_host() -> None:
+    """The SAML assertion may only be posted to the portal, not to another allowlisted host."""
+    client = PsegClient(okta_cookies="idx=ok")
+    html = """
+    <html><body>
+      <form method="POST" action="/api/v1/sessions/me/lifecycle/refresh">
+        <input type="hidden" name="SAMLResponse" value="assertion"/>
+      </form>
+    </body></html>
+    """
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        _sso_to_okta(m, html)
+        okta_post = m.post(f"https://{OKTA_HOST}/api/v1/sessions/me/lifecycle/refresh", text="x")
+        with pytest.raises(PsegSecurityError, match="untrusted host"):
+            client.ensure_session()
+    assert okta_post.called is False

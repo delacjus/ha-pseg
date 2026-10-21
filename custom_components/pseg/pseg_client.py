@@ -274,10 +274,12 @@ class PsegClient:
 
         html = resp.text
         soup = BeautifulSoup(html, "html.parser")
-        form = soup.find("form")
+        # Post the form that actually carries the assertion, not the first form on the
+        # page (Okta pages can include other forms, e.g. sign-out).
         saml_input = soup.find("input", attrs={"name": "SAMLResponse"})
+        form = saml_input.find_parent("form") if saml_input else None
 
-        if not form or not saml_input:
+        if not form:
             raise PsegTransientError("SAML response form not found in SSO response")
 
         action = form.get("action")
@@ -286,7 +288,9 @@ class PsegClient:
 
         action_url = urllib.parse.urljoin(resp.url, action)
         parsed_action = urllib.parse.urlparse(action_url)
-        if parsed_action.hostname not in ALLOWED_HOSTS:
+        # The assertion is for the portal's ACS endpoint; posting it anywhere else
+        # (even the allowlisted Okta host) would hand the SAML assertion to the wrong party.
+        if parsed_action.hostname != PORTAL_HOST:
             raise PsegSecurityError(
                 f"SAML form action points to untrusted host: {parsed_action.hostname}"
             )
