@@ -1,0 +1,129 @@
+"""Tests for PSE&G integration setup, unload, migration, and services."""
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from homeassistant.core import HomeAssistant
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.pseg import (
+    async_migrate_entry,
+    async_setup,
+)
+from custom_components.pseg.const import (
+    CONF_OKTA_COOKIES,
+    CONF_PORTAL_COOKIES,
+    DOMAIN,
+)
+
+
+async def test_migration_v1_to_v2_strips_credentials(hass: HomeAssistant) -> None:
+    """Test migration from version 1 to 2 strips passwords and companion add-on URLs."""
+    legacy_data = {
+        "username": "test_user@example.com",
+        "password": "super_secret_password_123",
+        "mfa_method": "sms",
+        "mfa_code": "123456",
+        "auth_server_url": "http://10.0.1.51:8000",
+        "cookie": "MM_SID=old_portal_cookie_999",
+    }
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=1,
+        unique_id="12345678",
+        data=legacy_data,
+    )
+    entry.add_to_hass(hass)
+
+    assert await async_migrate_entry(hass, entry) is True
+
+    # Version bumped to 2
+    assert entry.version == 2
+
+    # Insecure keys completely stripped
+    assert "username" not in entry.data
+    assert "password" not in entry.data
+    assert "mfa_method" not in entry.data
+    assert "mfa_code" not in entry.data
+    assert "auth_server_url" not in entry.data
+
+    # Legacy cookie migrated to portal_cookies
+    assert entry.data.get(CONF_PORTAL_COOKIES) == "MM_SID=old_portal_cookie_999"
+
+
+async def test_backfill_service_registered_once(hass: HomeAssistant) -> None:
+    """Test pseg.backfill_history is registered once in async_setup and handles no active entries."""
+    assert await async_setup(hass, {}) is True
+    assert hass.services.has_service(DOMAIN, "backfill_history")
+
+    # Calling with zero active entries logs warning, does not crash
+    await hass.services.async_call(
+        DOMAIN,
+        "backfill_history",
+        {"start_date": "2026-01-01", "end_date": "2026-01-10"},
+        blocking=True,
+    )
+
+
+async def test_backfill_service_multiple_entries(hass: HomeAssistant) -> None:
+    """Test pseg.backfill_history executes across all active entries."""
+    assert await async_setup(hass, {}) is True
+
+    coord1 = MagicMock()
+    coord1.async_backfill_history = AsyncMock(return_value=10)
+    coord2 = MagicMock()
+    coord2.async_backfill_history = AsyncMock(return_value=15)
+
+    hass.data[DOMAIN] = {
+        "entry_1": coord1,
+        "entry_2": coord2,
+    }
+
+    await hass.services.async_call(
+        DOMAIN,
+        "backfill_history",
+        {"start_date": "2026-01-01", "end_date": "2026-01-10"},
+        blocking=True,
+    )
+
+    coord1.async_backfill_history.assert_awaited_once_with(
+        start_date="2026-01-01", end_date="2026-01-10"
+    )
+    coord2.async_backfill_history.assert_awaited_once_with(
+        start_date="2026-01-01", end_date="2026-01-10"
+    )
+
+
+async def test_setup_and_unload_entry(hass: HomeAssistant) -> None:
+    """Test setup and unload of config entry starts and cancels keepalive."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="12345678",
+        data={
+            CONF_OKTA_COOKIES: "idx=test_token",
+            CONF_PORTAL_COOKIES: "MM_SID=test_portal",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    with (
+        patch(
+            "custom_components.pseg.coordinator.PsegDataUpdateCoordinator.async_config_entry_first_refresh",
+            new_callable=AsyncMock,
+        ),
+        patch(
+            "custom_components.pseg.coordinator.PsegDataUpdateCoordinator.start_keepalive"
+        ) as mock_start_keepalive,
+        patch(
+            "custom_components.pseg.coordinator.PsegDataUpdateCoordinator.stop_keepalive"
+        ) as mock_stop_keepalive,
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id) is True
+        await hass.async_block_till_done()
+        assert mock_start_keepalive.call_count == 1
+        assert entry.entry_id in hass.data[DOMAIN]
+
+        assert await hass.config_entries.async_unload(entry.entry_id) is True
+        await hass.async_block_till_done()
+        assert mock_stop_keepalive.call_count == 1
+        assert entry.entry_id not in hass.data[DOMAIN]

@@ -7,12 +7,19 @@ from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import ConfigEntryAuthFailed
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from .const import CONF_COOKIE, DOMAIN
+from .const import (
+    CONF_COOKIE,
+    CONF_OKTA_COOKIES,
+    CONF_PORTAL_COOKIES,
+    CONF_PRICE_PER_KWH,
+    DEFAULT_PRICE_PER_KWH,
+    DOMAIN,
+)
 from .coordinator import PsegDataUpdateCoordinator
 from .pseg_client import PsegClient
 
@@ -51,14 +58,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         except Exception as err:
             _LOGGER.debug("Could not register static paths: %s", err)
 
-    async def async_backfill_service(call):
-        """Handle backfill history service call."""
+    async def async_backfill_service(call: ServiceCall) -> None:
+        """Handle backfill history service call once across all active entries."""
         start_date = call.data.get("start_date")
         end_date = call.data.get("end_date")
 
         coordinators = list(hass.data.get(DOMAIN, {}).values())
         if not coordinators:
-            _LOGGER.error("No active PSE&G integration entry found for backfill")
+            _LOGGER.warning("No active PSE&G integration entry found for backfill")
             return
 
         for coord in coordinators:
@@ -68,7 +75,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             except Exception as err:
                 _LOGGER.error("Error running PSE&G backfill service: %s", err)
 
-    hass.services.async_register(DOMAIN, "backfill_history", async_backfill_service)
+    if not hass.services.has_service(DOMAIN, "backfill_history"):
+        hass.services.async_register(DOMAIN, "backfill_history", async_backfill_service)
 
     return True
 
@@ -77,12 +85,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PSE&G from a config entry."""
     hass.data.setdefault(DOMAIN, {})
 
-    cookie = entry.data.get(CONF_COOKIE, "")
-    client = PsegClient(cookie)
+    okta_cookies = entry.data.get(CONF_OKTA_COOKIES, "")
+    portal_cookies = entry.data.get(CONF_PORTAL_COOKIES, "")
+    if not portal_cookies and CONF_COOKIE in entry.data:
+        portal_cookies = entry.data[CONF_COOKIE]
+    cookie_list = entry.data.get("cookies")
+    price_per_kwh = entry.options.get(CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH)
+
+    client = PsegClient(
+        okta_cookies=okta_cookies,
+        portal_cookies=portal_cookies,
+        cookie_list=cookie_list,
+        price_per_kwh=price_per_kwh,
+    )
     coordinator = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    # Initial data refresh
     try:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryAuthFailed:
@@ -90,37 +108,50 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         coordinator.status = "auth_required"
         raise
 
-    if not hass.services.has_service(DOMAIN, "backfill_history"):
-        async def async_backfill_service(call):
-            """Handle backfill history service call."""
-            start_date = call.data.get("start_date")
-            end_date = call.data.get("end_date")
-
-            coordinators = list(hass.data.get(DOMAIN, {}).values())
-            if not coordinators:
-                _LOGGER.error("No active PSE&G integration entry found for backfill")
-                return
-
-            for coord in coordinators:
-                try:
-                    count = await coord.async_backfill_history(start_date=start_date, end_date=end_date)
-                    _LOGGER.info("PSE&G backfill service completed: %d records imported", count)
-                except Exception as err:
-                    _LOGGER.error("Error running PSE&G backfill service: %s", err)
-
-        hass.services.async_register(DOMAIN, "backfill_history", async_backfill_service)
+    coordinator.start_keepalive()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload a PSE&G config entry."""
+    """Unload a PSE&G config entry and stop background keepalive."""
+    coordinator: PsegDataUpdateCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if coordinator:
+        coordinator.stop_keepalive()
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
-        if not hass.data[DOMAIN]:
-            hass.services.async_remove(DOMAIN, "backfill_history")
 
     return unload_ok
+
+
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Migrate config entry data to current schema."""
+    _LOGGER.debug("Migrating PSE&G config entry from version %s", config_entry.version)
+
+    if config_entry.version == 1:
+        new_data = dict(config_entry.data)
+        # Strip legacy credentials and author add-on urls
+        for legacy_key in ("username", "password", "mfa_method", "mfa_code", "auth_server_url"):
+            new_data.pop(legacy_key, None)
+
+        if "cookie" in new_data and CONF_PORTAL_COOKIES not in new_data:
+            new_data[CONF_PORTAL_COOKIES] = new_data["cookie"]
+
+        hass.config_entries.async_update_entry(
+            config_entry,
+            data=new_data,
+            version=2,
+        )
+        _LOGGER.info("Migrated PSE&G entry to version 2 (stripped stored credentials and add-on URLs)")
+
+    return True
+
+
+async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload config entry after options update."""
+    await hass.config_entries.async_reload(entry.entry_id)

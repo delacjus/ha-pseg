@@ -2,254 +2,165 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 import logging
-from typing import Any, Dict, Optional
-
-import aiohttp
-import voluptuous as vol
+import re
+from typing import Any
 
 from homeassistant import config_entries
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.config_entries import ConfigEntry, ConfigFlowResult, OptionsFlow
+from homeassistant.core import callback
+import requests
+import voluptuous as vol
 
 from .const import (
-    CONF_AUTH_SERVER_URL,
-    CONF_COOKIE,
-    CONF_MFA_CODE,
-    CONF_MFA_METHOD,
-    CONF_PASSWORD,
-    CONF_USERNAME,
-    DEFAULT_AUTH_SERVER_URL,
-    DEFAULT_MFA_METHOD,
+    CONF_METER_ID,
+    CONF_OKTA_COOKIES,
+    CONF_PORTAL_COOKIES,
+    CONF_PRICE_PER_KWH,
+    DEFAULT_PRICE_PER_KWH,
     DOMAIN,
-    MFA_METHOD_EMAIL,
-    MFA_METHOD_SMS,
 )
-from .pseg_client import PsegAuthError, PsegClient
+from .pseg_client import (
+    PsegClient,
+    PsegOktaSessionExpired,
+    PsegTransientError,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a multi-step guided config flow for PSE&G Energy."""
+    """Handle a config flow for PSE&G Energy."""
 
-    VERSION = 1
+    VERSION = 2
 
     def __init__(self) -> None:
         """Initialize the flow."""
-        self._user_input: Dict[str, Any] = {}
-        self._reauth_entry: Optional[config_entries.ConfigEntry] = None
+        self._reauth_entry: ConfigEntry | None = None
 
-    async def _async_detect_auth_server(self) -> Optional[str]:
-        """Probe candidate URLs to detect if the companion auth add-on is running."""
-        cached = self.context.get("auth_url")
-        if self._reauth_entry:
-            cached = cached or self._reauth_entry.data.get(CONF_AUTH_SERVER_URL)
+    async def _async_validate_and_extract_meter(
+        self, okta_cookies: str, portal_cookies: str
+    ) -> tuple[dict[str, str], PsegClient | None, str | None]:
+        """Validate credentials and extract the meter ID."""
+        errors: dict[str, str] = {}
+        client = PsegClient(okta_cookies=okta_cookies, portal_cookies=portal_cookies)
+        meter_id = None
 
-        candidate_urls = []
-        if cached:
-            candidate_urls.append(cached)
-        for url in [DEFAULT_AUTH_SERVER_URL, "http://127.0.0.1:8000", "http://10.0.1.51:8000", "http://10.0.2.52:8000", "http://localhost:8000"]:
-            if url not in candidate_urls:
-                candidate_urls.append(url)
+        try:
+            await self.hass.async_add_executor_job(client.ensure_session)
+        except PsegOktaSessionExpired:
+            errors["base"] = "okta_session_invalid"
+            return errors, None, None
+        except (PsegTransientError, requests.RequestException):
+            errors["base"] = "cannot_connect"
+            return errors, None, None
+        except Exception as err:
+            _LOGGER.exception("Unexpected error validating session: %s", err)
+            errors["base"] = "unknown"
+            return errors, None, None
 
-        session = async_get_clientsession(self.hass)
-        for base_url in candidate_urls:
-            try:
-                async with session.get(
-                    f"{base_url}/health",
-                    timeout=aiohttp.ClientTimeout(total=1.5),
-                ) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if data.get("status") == "healthy":
-                            self.context["auth_url"] = base_url
-                            return base_url
-            except Exception:
-                continue
+        try:
+            data = await self.hass.async_add_executor_job(client.fetch_energy_data, 1)
+            meter_str = str(data.get("meter") or "")
+            match = re.search(r"\d+", meter_str)
+            if match:
+                meter_id = match.group(0)
+            else:
+                meter_id = re.sub(r"[^a-z0-9_]+", "_", meter_str.lower()).strip("_")
+        except Exception as err:
+            _LOGGER.debug("Could not determine meter id during config flow: %s", err)
 
-        return None
+        if not meter_id:
+            meter_id = "electric_meter"
+
+        return errors, client, meter_id
 
     async def async_step_user(
-        self, user_input: Optional[Dict[str, Any]] = None
-    ) -> FlowResult:
-        """Step 1: Choose connection method."""
-        working_url = await self._async_detect_auth_server()
-        if working_url:
-            menu_options = ["automated", "cookie"]
-            addon_status = ""
-        else:
-            menu_options = ["cookie"]
-            addon_status = (
-                "⚠️ **PSE&G Auth Companion Add-on Not Detected**\n\n"
-                "Automated OTP/MFA login is disabled because the companion add-on is not running on port 8000. "
-                "To enable automated sign-in, install and start the companion add-on from "
-                "[ha-pseg-auth-addon](https://github.com/sidprax/ha-pseg-auth-addon).\n\n"
-                "Alternatively, connect using a **Browser Session Cookie** below:\n\n"
-            )
-
-        return self.async_show_menu(
-            step_id="user",
-            menu_options=menu_options,
-            description_placeholders={"addon_status": addon_status},
-        )
-
-    async def async_step_reauth(
-        self, entry_data: Mapping[str, Any]
-    ) -> FlowResult:
-        """Handle reauthorization request from Home Assistant."""
-        self._reauth_entry = self.hass.config_entries.async_get_entry(
-            self.context["entry_id"]
-        )
-        working_url = await self._async_detect_auth_server()
-        if working_url:
-            menu_options = ["reauth_confirm", "cookie"]
-            addon_status = ""
-        else:
-            menu_options = ["cookie"]
-            addon_status = (
-                "⚠️ **PSE&G Auth Companion Add-on Not Detected**\n\n"
-                "Automated re-authentication is disabled because the companion add-on is not running. "
-                "To enable automated sign-in, install or start the companion add-on from "
-                "[ha-pseg-auth-addon](https://github.com/sidprax/ha-pseg-auth-addon).\n\n"
-                "Alternatively, re-authenticate using a **Browser Session Cookie** below:\n\n"
-            )
-
-        return self.async_show_menu(
-            step_id="reauth",
-            menu_options=menu_options,
-            description_placeholders={"addon_status": addon_status},
-        )
-
-    async def async_step_reconfigure(
-        self, user_input: Optional[Dict[str, Any]] = None
-    ) -> FlowResult:
-        """Handle a reconfiguration flow initialized by the user."""
-        self._reauth_entry = self.hass.config_entries.async_get_entry(
-            self.context["entry_id"]
-        )
-        working_url = await self._async_detect_auth_server()
-        if working_url:
-            menu_options = ["reauth_confirm", "cookie"]
-            addon_status = ""
-        else:
-            menu_options = ["cookie"]
-            addon_status = (
-                "⚠️ **PSE&G Auth Companion Add-on Not Detected**\n\n"
-                "Automated reconfiguration is disabled because the companion add-on is not running. "
-                "To enable automated sign-in, install or start the companion add-on from "
-                "[ha-pseg-auth-addon](https://github.com/sidprax/ha-pseg-auth-addon).\n\n"
-                "Alternatively, update credentials using a **Browser Session Cookie** below:\n\n"
-            )
-
-        return self.async_show_menu(
-            step_id="reconfigure",
-            menu_options=menu_options,
-            description_placeholders={"addon_status": addon_status},
-        )
-
-    async def async_step_reauth_confirm(
-        self, user_input: Optional[Dict[str, Any]] = None
-    ) -> FlowResult:
-        """Confirm reauth credentials and trigger sign-in."""
-        errors: Dict[str, str] = {}
-        existing_data = self._reauth_entry.data if self._reauth_entry else {}
-        default_username = existing_data.get(CONF_USERNAME, "")
-        default_mfa = existing_data.get(CONF_MFA_METHOD, DEFAULT_MFA_METHOD)
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 1: Enter Okta and optional portal cookies."""
+        errors: dict[str, str] = {}
 
         if user_input is not None:
-            username = user_input.get(CONF_USERNAME, default_username).strip()
-            password = user_input.get(CONF_PASSWORD, "").strip()
-            mfa_method = user_input.get(CONF_MFA_METHOD, default_mfa)
-            auth_url = existing_data.get(CONF_AUTH_SERVER_URL, DEFAULT_AUTH_SERVER_URL)
+            okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
+            portal_cookies = user_input.get(CONF_PORTAL_COOKIES, "").strip()
 
-            if not username or not password:
+            if not okta_cookies:
                 errors["base"] = "missing_credentials"
             else:
-                candidate_urls = [auth_url]
-                for fallback in ["http://127.0.0.1:8000", "http://10.0.1.51:8000", "http://10.0.2.52:8000", "http://localhost:8000"]:
-                    if fallback not in candidate_urls:
-                        candidate_urls.append(fallback)
+                errors, client, meter_id = await self._async_validate_and_extract_meter(
+                    okta_cookies, portal_cookies
+                )
+                if not errors and client and meter_id:
+                    await self.async_set_unique_id(meter_id)
+                    self._abort_if_unique_id_configured()
 
-                connected = False
-                session = async_get_clientsession(self.hass)
-                auth_result = None
-                for target_url in candidate_urls:
-                    try:
-                        async with session.post(
-                            f"{target_url}/login",
-                            json={
-                                "username": username,
-                                "password": password,
-                                "mfa_method": mfa_method,
-                                "dispatch_mfa": True,
-                            },
-                            timeout=aiohttp.ClientTimeout(total=90),
-                        ) as resp:
-                            connected = True
-                            self.context["auth_url"] = target_url
-                            self.context["username"] = username
-                            self.context["password"] = password
-                            if resp.status == 200:
-                                res_json = await resp.json()
-                                if res_json.get("success") and res_json.get("cookies"):
-                                    auth_result = ("success", res_json["cookies"], target_url)
-                                    break
-                                elif res_json.get("mfa_required"):
-                                    auth_result = ("mfa", None, target_url)
-                                    break
-                                else:
-                                    _LOGGER.error("Auth helper response: %s", res_json)
-                                    errors["base"] = "invalid_auth"
-                                    break
-                            else:
-                                try:
-                                    res_json = await resp.json()
-                                except Exception:
-                                    res_json = {}
-                                if resp.status == 403 or res_json.get("recaptcha_blocked"):
-                                    errors["base"] = "recaptcha_blocked"
-                                elif resp.status == 500:
-                                    _LOGGER.error("Auth helper returned 500: %s", res_json)
-                                    errors["base"] = "auth_server_error"
-                                else:
-                                    errors["base"] = "invalid_auth"
-                                break
-                    except aiohttp.ClientConnectorError:
-                        _LOGGER.debug("Could not reach auth server at %s", target_url)
-                        continue
-                    except Exception as err:
-                        _LOGGER.exception("Reauth attempt to %s failed: %s", target_url, err)
-                        errors["base"] = "unknown"
-                        break
-
-                if auth_result:
-                    action, cookies, target_url = auth_result
-                    if action == "success":
-                        return self.async_update_reload_and_abort(
-                            self._reauth_entry,
-                            data={
-                                **self._reauth_entry.data,
-                                CONF_COOKIE: cookies,
-                                CONF_USERNAME: username,
-                                CONF_PASSWORD: password,
-                                CONF_AUTH_SERVER_URL: target_url,
-                            },
-                        )
-                    elif action == "mfa":
-                        return await self.async_step_mfa()
-
-                if not connected and not errors:
-                    errors["base"] = "auth_server_unavailable"
+                    return self.async_create_entry(
+                        title=f"PSE&G ({meter_id})",
+                        data={
+                            CONF_OKTA_COOKIES: okta_cookies,
+                            CONF_PORTAL_COOKIES: portal_cookies,
+                            CONF_METER_ID: meter_id,
+                            "cookies": client.export_cookies(),
+                        },
+                    )
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_USERNAME, default=default_username): str,
-                vol.Required(CONF_PASSWORD): str,
-                vol.Required(CONF_MFA_METHOD, default=default_mfa): vol.In(
-                    [MFA_METHOD_SMS, MFA_METHOD_EMAIL]
-                ),
+                vol.Required(CONF_OKTA_COOKIES): str,
+                vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
+            }
+        )
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=schema,
+            errors=errors,
+        )
+
+    async def async_step_reauth(
+        self, entry_data: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Handle re-authentication triggered by HA."""
+        self._reauth_entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"]
+        )
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Confirm re-authentication with fresh session cookies."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None and self._reauth_entry:
+            okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
+            portal_cookies = user_input.get(CONF_PORTAL_COOKIES, "").strip()
+
+            if not okta_cookies:
+                errors["base"] = "missing_credentials"
+            else:
+                errors, client, meter_id = await self._async_validate_and_extract_meter(
+                    okta_cookies, portal_cookies
+                )
+                if not errors and client and meter_id:
+                    if self._reauth_entry.unique_id and self._reauth_entry.unique_id != meter_id:
+                        return self.async_abort(reason="reauth_account_mismatch")
+
+                    return self.async_update_reload_and_abort(
+                        self._reauth_entry,
+                        data={
+                            **self._reauth_entry.data,
+                            CONF_OKTA_COOKIES: okta_cookies,
+                            CONF_PORTAL_COOKIES: portal_cookies,
+                            "cookies": client.export_cookies(),
+                        },
+                    )
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_OKTA_COOKIES): str,
+                vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
             }
         )
 
@@ -257,250 +168,82 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="reauth_confirm",
             data_schema=schema,
             errors=errors,
-            description_placeholders={"username": default_username},
         )
 
-    async def async_step_automated(
-        self, user_input: Optional[Dict[str, Any]] = None
-    ) -> FlowResult:
-        """Step 2a: Automated sign-in with username, password, and MFA channel."""
-        errors: Dict[str, str] = {}
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle manual reconfiguration from device/service settings."""
+        errors: dict[str, str] = {}
+        reconfigure_entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"]
+        )
 
-        if user_input is not None:
-            username = user_input.get(CONF_USERNAME, "").strip()
-            password = user_input.get(CONF_PASSWORD, "").strip()
-            mfa_method = user_input.get(CONF_MFA_METHOD, DEFAULT_MFA_METHOD)
-            auth_url = DEFAULT_AUTH_SERVER_URL
+        if user_input is not None and reconfigure_entry:
+            okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
+            portal_cookies = user_input.get(CONF_PORTAL_COOKIES, "").strip()
 
-            if not username or not password:
+            if not okta_cookies:
                 errors["base"] = "missing_credentials"
             else:
-                candidate_urls = [auth_url]
-                for fallback in ["http://127.0.0.1:8000", "http://10.0.1.51:8000", "http://10.0.2.52:8000", "http://localhost:8000"]:
-                    if fallback not in candidate_urls:
-                        candidate_urls.append(fallback)
+                errors, client, meter_id = await self._async_validate_and_extract_meter(
+                    okta_cookies, portal_cookies
+                )
+                if not errors and client and meter_id:
+                    if reconfigure_entry.unique_id and reconfigure_entry.unique_id != meter_id:
+                        return self.async_abort(reason="reauth_account_mismatch")
 
-                connected = False
-                session = async_get_clientsession(self.hass)
-                auth_result = None
-                for target_url in candidate_urls:
-                    try:
-                        async with session.post(
-                            f"{target_url}/login",
-                            json={
-                                "username": username,
-                                "password": password,
-                                "mfa_method": mfa_method,
-                                "dispatch_mfa": True,
-                            },
-                            timeout=aiohttp.ClientTimeout(total=90),
-                        ) as resp:
-                            connected = True
-                            self.context["auth_url"] = target_url
-                            self.context["username"] = username
-                            self.context["password"] = password
-                            if resp.status == 200:
-                                res_json = await resp.json()
-                                if res_json.get("success") and res_json.get("cookies"):
-                                    auth_result = ("success", res_json["cookies"], target_url)
-                                    break
-                                elif res_json.get("mfa_required"):
-                                    auth_result = ("mfa", None, target_url)
-                                    break
-                                else:
-                                    _LOGGER.error("Auth helper response: %s", res_json)
-                                    errors["base"] = "invalid_auth"
-                                    break
-                            else:
-                                try:
-                                    res_json = await resp.json()
-                                except Exception:
-                                    res_json = {}
-                                if resp.status == 403 or res_json.get("recaptcha_blocked"):
-                                    errors["base"] = "recaptcha_blocked"
-                                elif resp.status == 500:
-                                    _LOGGER.error("Auth helper returned 500: %s", res_json)
-                                    errors["base"] = "auth_server_error"
-                                else:
-                                    err_text = await resp.text()
-                                    _LOGGER.error("Auth helper returned status %s: %s", resp.status, err_text)
-                                    errors["base"] = "invalid_auth"
-                                break
-                    except aiohttp.ClientConnectorError:
-                        _LOGGER.debug("Could not reach auth server at %s", target_url)
-                        continue
-                    except Exception as err:
-                        _LOGGER.exception("Error calling auth server at %s: %s", target_url, err)
-                        errors["base"] = "unknown"
-                        break
-
-                if auth_result:
-                    action, cookies, target_url = auth_result
-                    if action == "success":
-                        await self.async_set_unique_id(username.lower())
-                        self._abort_if_unique_id_configured()
-                        return self.async_create_entry(
-                            title=f"PSE&G ({username})",
-                            data={
-                                CONF_COOKIE: cookies,
-                                CONF_USERNAME: username,
-                                CONF_PASSWORD: password,
-                                CONF_AUTH_SERVER_URL: target_url,
-                            },
-                        )
-                    elif action == "mfa":
-                        return await self.async_step_mfa()
-
-                if not connected and not errors:
-                    errors["base"] = "auth_server_unavailable"
-
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_USERNAME): str,
-                vol.Required(CONF_PASSWORD): str,
-                vol.Required(CONF_MFA_METHOD, default=DEFAULT_MFA_METHOD): vol.In(
-                    [MFA_METHOD_SMS, MFA_METHOD_EMAIL]
-                ),
-            }
-        )
-
-        return self.async_show_form(
-            step_id="automated",
-            data_schema=schema,
-            errors=errors,
-        )
-
-    async def async_step_mfa(
-        self, user_input: Optional[Dict[str, Any]] = None
-    ) -> FlowResult:
-        """Step 3: Verification of 6-digit OTP code."""
-        errors: Dict[str, str] = {}
-        auth_url = self.context.get("auth_url", DEFAULT_AUTH_SERVER_URL)
-        username = self.context.get("username", "")
-        password = self.context.get("password", "")
-
-        if user_input is not None:
-            if user_input.get("restart"):
-                if getattr(self, "_reauth_entry", None):
-                    return await self.async_step_reauth_confirm()
-                return await self.async_step_user()
-
-            code = user_input.get(CONF_MFA_CODE, "").strip()
-            if not code:
-                errors["base"] = "invalid_code"
-            else:
-                mfa_success = False
-                cookies = None
-                session = async_get_clientsession(self.hass)
-                try:
-                    async with session.post(
-                        f"{auth_url}/login/mfa",
-                        json={"code": code},
-                        timeout=aiohttp.ClientTimeout(total=60),
-                    ) as resp:
-                        if resp.status == 200:
-                            res_json = await resp.json()
-                            if res_json.get("success") and res_json.get("cookies"):
-                                cookies = res_json["cookies"]
-                                mfa_success = True
-                            else:
-                                errors["base"] = "invalid_code"
-                        elif resp.status == 400:
-                            _LOGGER.warning("Auth session expired on helper service, restarting sign-in")
-                            if getattr(self, "_reauth_entry", None):
-                                return await self.async_step_reauth_confirm()
-                            return await self.async_step_user()
-                        else:
-                            errors["base"] = "invalid_code"
-                except Exception as err:
-                    _LOGGER.exception("MFA verification error: %s", err)
-                    errors["base"] = "unknown"
-
-                if mfa_success and cookies:
-                    if getattr(self, "_reauth_entry", None):
-                        return self.async_update_reload_and_abort(
-                            self._reauth_entry,
-                            data={
-                                **self._reauth_entry.data,
-                                CONF_COOKIE: cookies,
-                                CONF_USERNAME: username or self._reauth_entry.data.get(CONF_USERNAME),
-                                CONF_PASSWORD: password or self._reauth_entry.data.get(CONF_PASSWORD),
-                                CONF_AUTH_SERVER_URL: auth_url,
-                            },
-                        )
-                    if username:
-                        await self.async_set_unique_id(username.lower())
-                        self._abort_if_unique_id_configured()
-                    return self.async_create_entry(
-                        title=f"PSE&G ({username})" if username else "PSE&G Energy",
+                    return self.async_update_reload_and_abort(
+                        reconfigure_entry,
                         data={
-                            CONF_COOKIE: cookies,
-                            CONF_USERNAME: username,
-                            CONF_PASSWORD: password,
-                            CONF_AUTH_SERVER_URL: auth_url,
+                            **reconfigure_entry.data,
+                            CONF_OKTA_COOKIES: okta_cookies,
+                            CONF_PORTAL_COOKIES: portal_cookies,
+                            "cookies": client.export_cookies(),
                         },
                     )
 
         schema = vol.Schema(
             {
-                vol.Optional(CONF_MFA_CODE, default=""): str,
-                vol.Optional("restart", default=False): bool,
+                vol.Required(CONF_OKTA_COOKIES): str,
+                vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
             }
         )
 
         return self.async_show_form(
-            step_id="mfa",
+            step_id="reconfigure",
             data_schema=schema,
             errors=errors,
         )
 
-    async def async_step_cookie(
-        self, user_input: Optional[Dict[str, Any]] = None
-    ) -> FlowResult:
-        """Step 2b: Direct browser session cookie entry."""
-        errors: Dict[str, str] = {}
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: ConfigEntry,
+    ) -> OptionsFlow:
+        """Get options flow for this entry."""
+        return PsegOptionsFlowHandler()
 
+
+class PsegOptionsFlowHandler(OptionsFlow):
+    """Handle options flow for PSE&G Energy."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage integration options."""
         if user_input is not None:
-            cookie = user_input.get(CONF_COOKIE, "").strip()
-            if not cookie:
-                errors["base"] = "missing_credentials"
-            else:
-                cookie_valid = False
-                try:
-                    client = PsegClient(cookie)
-                    await self.hass.async_add_executor_job(client.test_connection)
-                    cookie_valid = True
-                except PsegAuthError as err:
-                    _LOGGER.error("Cookie validation error: %s", err)
-                    errors["base"] = "invalid_cookie"
-                except Exception as err:
-                    _LOGGER.exception("Unexpected error validating cookie: %s", err)
-                    errors["base"] = "unknown"
-
-                if cookie_valid:
-                    if getattr(self, "_reauth_entry", None):
-                        return self.async_update_reload_and_abort(
-                            self._reauth_entry,
-                            data={
-                                **self._reauth_entry.data,
-                                CONF_COOKIE: cookie,
-                            },
-                        )
-                    return self.async_create_entry(
-                        title="PSE&G Energy",
-                        data={
-                            CONF_COOKIE: cookie,
-                        },
-                    )
+            return self.async_create_entry(title="", data=user_input)
 
         schema = vol.Schema(
             {
-                vol.Required(CONF_COOKIE): str,
+                vol.Optional(
+                    CONF_PRICE_PER_KWH,
+                    default=self.config_entry.options.get(
+                        CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH
+                    ),
+                ): vol.Coerce(float),
             }
         )
 
-        return self.async_show_form(
-            step_id="cookie",
-            data_schema=schema,
-            errors=errors,
-        )
+        return self.async_show_form(step_id="init", data_schema=schema)
