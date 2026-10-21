@@ -109,17 +109,17 @@ async def _async_get_last_stat_before(
     return best_sum
 
 
-async def _async_get_stats_after(
+async def _async_get_stats_from(
     hass: HomeAssistant,
     statistic_id: str,
-    after_dt: datetime,
+    from_dt: datetime,
 ) -> list[tuple[datetime, float | None]]:
-    """Return (start, state) of existing rows strictly after after_dt, oldest first."""
+    """Return (start, state) of existing rows with start >= from_dt, oldest first."""
     try:
         stats = await get_instance(hass).async_add_executor_job(
             statistics_during_period,
             hass,
-            after_dt + timedelta(seconds=1),
+            from_dt,
             None,
             {statistic_id},
             "hour",
@@ -128,29 +128,39 @@ async def _async_get_stats_after(
         )
     except Exception as err:
         raise PsegStatisticsError(
-            f"Could not read newer statistics for {statistic_id}: {err}"
+            f"Could not read existing statistics for {statistic_id}: {err}"
         ) from err
 
     rows: list[tuple[datetime, float | None]] = []
     for stat in stats.get(statistic_id, []):
         start = _row_start(stat)
-        if start is not None and start > after_dt:
+        if start is not None and start >= from_dt:
             state = stat.get("state")
             rows.append((start, None if state is None else float(state)))
     rows.sort(key=lambda row: row[0])
     return rows
 
 
-def _rechain(
-    rows: list[tuple[datetime, float | None]], running: float
+def _merge_and_chain(
+    existing: list[tuple[datetime, float | None]],
+    new: list[StatisticData],
+    prior_sum: float | None,
 ) -> list[StatisticData]:
-    """Recompute cumulative sums for existing rows after a newly imported window.
+    """Merge stored daily values with newly fetched ones and recompute every sum.
 
-    Each row's state is its own daily value, so the chain continues from the last
-    imported sum instead of keeping sums based on the old (pre-backfill) baseline.
+    Every stored row from the window start onward is rewritten: fetched days replace
+    the stored value, days the fetch did not return (a missing day inside the window,
+    or newer rows after it) keep their stored value. One chain over the union means a
+    partial fetch can never leave a row whose sum was built on a different baseline.
     """
+    by_start: dict[datetime, float | None] = dict(existing)
+    for stat in new:
+        by_start[stat["start"]] = stat["state"]
+
+    running = float(prior_sum or 0.0)
     out: list[StatisticData] = []
-    for start, state in rows:
+    for start in sorted(by_start):
+        state = by_start[start]
         running += state or 0.0
         out.append(StatisticData(start=start, state=state, sum=round(running, 2)))
     return out
@@ -479,17 +489,18 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             price_per_kwh=self.client.price_per_kwh,
         )
 
-        # Rows newer than this window (e.g. a backfill ending before the newest poll)
-        # were chained off the old baseline; re-chain them so the sum never steps back.
-        last_start_utc = consumption_stats[-1]["start"]
-        later_consumption = await _async_get_stats_after(
-            self.hass, consumption_statistic_id, last_start_utc
+        # Stored rows from the window start onward were chained off the old baseline:
+        # days missing from this fetch and rows newer than it (e.g. a backfill ending
+        # before the newest poll). Merge and re-chain them so the sum never steps back.
+        # All reads happen before any write, so a failed read imports nothing.
+        existing_consumption = await _async_get_stats_from(
+            self.hass, consumption_statistic_id, first_start_utc
         )
-        later_cost = await _async_get_stats_after(self.hass, cost_statistic_id, last_start_utc)
-        consumption_stats.extend(
-            _rechain(later_consumption, consumption_stats[-1]["sum"])
+        existing_cost = await _async_get_stats_from(self.hass, cost_statistic_id, first_start_utc)
+        consumption_stats = _merge_and_chain(
+            existing_consumption, consumption_stats, prior_consumption
         )
-        cost_stats.extend(_rechain(later_cost, cost_stats[-1]["sum"]))
+        cost_stats = _merge_and_chain(existing_cost, cost_stats, prior_cost)
 
         async_add_external_statistics(self.hass, consumption_metadata, consumption_stats)
         async_add_external_statistics(self.hass, cost_metadata, cost_stats)

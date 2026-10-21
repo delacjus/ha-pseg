@@ -172,7 +172,7 @@ async def test_coordinator_async_record_statistics_integration(hass: HomeAssista
             return_value=100.0,
         ) as mock_get_prior,
         patch(
-            "custom_components.pseg.coordinator._async_get_stats_after",
+            "custom_components.pseg.coordinator._async_get_stats_from",
             new_callable=AsyncMock,
             return_value=[],
         ),

@@ -390,6 +390,8 @@ class PsegClient:
         }
 
         records_map: dict[str, dict[str, Any]] = {}
+        # (start, end, had_data) per chunk, to tell an outage from range edges.
+        chunks: list[tuple[str, str, bool]] = []
         curr_start = start_dt
 
         while curr_start <= end_dt:
@@ -452,6 +454,7 @@ class PsegClient:
                         self.okta_session_expired_at = datetime.now(UTC).isoformat()
                         raise PsegOktaSessionExpired("Session expired during history backfill: Redirected to login")
                 _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
+                chunks.append((chunk_start_str, chunk_end_str, False))
             else:
                 series_list = chart_data.get("series", [])
                 meter_series = {}
@@ -461,6 +464,9 @@ class PsegClient:
                         break
 
                 pts = meter_series.get("data", [])
+                chunks.append(
+                    (chunk_start_str, chunk_end_str, any(isinstance(pt, dict) for pt in pts))
+                )
                 for pt in pts:
                     if isinstance(pt, dict):
                         kwh = round(pt.get("y", 0.0), 2)
@@ -482,6 +488,18 @@ class PsegClient:
             curr_start = curr_end + timedelta(days=1)
             if curr_start <= end_dt:
                 time.sleep(0.1)
+
+        # Empty chunks at the edges are normal (before the meter existed, days not yet
+        # published). An empty chunk BETWEEN populated ones is a portal hiccup; importing
+        # around it would rewrite the range with a hole, so abort and retry later.
+        populated = [i for i, (_, _, had_data) in enumerate(chunks) if had_data]
+        if populated:
+            for chunk_start_str, chunk_end_str, had_data in chunks[populated[0] : populated[-1]]:
+                if not had_data:
+                    raise PsegTransientError(
+                        f"PSE&G returned no data for {chunk_start_str} to {chunk_end_str} "
+                        "between populated chunks; backfill aborted"
+                    )
 
         sorted_records = [records_map[d] for d in sorted(records_map.keys())]
         _LOGGER.info(

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
+import urllib.parse
 
 from homeassistant.components.recorder.statistics import statistics_during_period
 from homeassistant.core import HomeAssistant
@@ -17,9 +18,12 @@ import pytest
 from pytest_homeassistant_custom_component.components.recorder.common import (
     async_wait_recording_done,
 )
+import requests_mock
 
 from custom_components.pseg import coordinator as coord_mod
+from custom_components.pseg.const import PORTAL_BASE_URL
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
+from custom_components.pseg.pseg_client import PsegClient, PsegTransientError
 
 CONSUMPTION_ID = "pseg:m1_energy_consumption"
 COST_ID = "pseg:m1_energy_cost"
@@ -191,3 +195,125 @@ async def test_backfill_with_gap_rechains_newer_rows(coord, hass) -> None:
     await coord.async_record_statistics(_recs("2026-10-02", 14), meter_id="m1")
     await async_wait_recording_done(hass)
     assert dict(await _sums(hass))["2026-10-15"] == 350.0
+
+
+async def test_reimport_missing_day_keeps_existing_row_in_chain(coord, hass) -> None:
+    """A day missing from a re-fetched window keeps its stored value inside the chain."""
+    await coord.async_record_statistics(_recs("2026-09-01", 44), meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    refetch = [r for r in _recs("2026-09-01", 44, kwh=20.0) if r["date"] != "2026-09-15"]
+    await coord.async_record_statistics(refetch, meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    sums = await _sums(hass)
+    values = [v for _, v in sums]
+    assert values == sorted(values), f"negative step: {sums}"
+    by_day = dict(sums)
+    assert by_day["2026-09-14"] == 280.0
+    assert by_day["2026-09-15"] == 290.0  # stored 10 kWh kept, not dropped from the chain
+    assert by_day["2026-09-16"] == 310.0
+    assert by_day["2026-10-14"] == 870.0
+
+
+def _chart_mocker(m, empty_chunk_start: str | None) -> None:
+    """Portal stub: 20 kWh/day for the requested range, one chunk optionally empty."""
+    state: dict = {}
+
+    def chart(req, ctx):
+        q = urllib.parse.parse_qs(req.text)
+        state["range"] = (q["Start"][0], q["End"][0])
+        return ""
+
+    def data(req, ctx):
+        start, end = state["range"]
+        if start == empty_chunk_start:
+            return {"Data": None, "AjaxResults": []}
+        d = datetime.strptime(start, "%Y-%m-%d")
+        d1 = datetime.strptime(end, "%Y-%m-%d")
+        pts = []
+        while d <= d1:
+            pts.append({"y": 20.0, "hs": {"start": d.strftime("%m/%d/%Y")}})
+            d += timedelta(days=1)
+        return {"Data": {"series": [{"name": "Electric Meter 1", "data": pts}]}}
+
+    m.get(f"{PORTAL_BASE_URL}/Dashboard", text='<input name="__RequestVerificationToken" value="t"/>')
+    m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
+    m.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=data)
+
+
+async def test_backfill_with_empty_middle_chunk_aborts_without_import(hass) -> None:
+    """An empty chunk between populated chunks aborts the backfill; history untouched."""
+    client = PsegClient(portal_cookies="MM_SID=x", price_per_kwh=0.25)
+    coord = PsegDataUpdateCoordinator(hass, client, {})
+    await coord.async_record_statistics(_recs("2026-03-01", 228), meter_id="m1")
+    await async_wait_recording_done(hass)
+    before = await _sums(hass)
+
+    with requests_mock.Mocker() as m, patch.object(coord, "_get_meter_id", return_value="m1"):
+        _chart_mocker(m, empty_chunk_start="2026-05-31")
+        with pytest.raises(PsegTransientError, match="no data"):
+            await coord.async_backfill_history("2026-03-01", "2026-10-14")
+    await async_wait_recording_done(hass)
+
+    assert await _sums(hass) == before
+
+
+@pytest.mark.parametrize(
+    ("empty_chunk_start", "expected_days"),
+    [
+        ("2026-03-01", 63),  # leading chunk 03-01..05-30 empty -> 05-31..08-01 imported
+        ("2026-05-31", 91),  # trailing chunk 05-31..08-01 empty -> 03-01..05-30 imported
+    ],
+)
+async def test_backfill_with_empty_leading_or_trailing_chunk_imports(
+    hass, empty_chunk_start, expected_days
+) -> None:
+    """Empty edges (before the meter existed / not published yet) are not an outage."""
+    client = PsegClient(portal_cookies="MM_SID=x", price_per_kwh=0.25)
+    coord = PsegDataUpdateCoordinator(hass, client, {})
+    with requests_mock.Mocker() as m, patch.object(coord, "_get_meter_id", return_value="m1"):
+        _chart_mocker(m, empty_chunk_start=empty_chunk_start)
+        count = await coord.async_backfill_history("2026-03-01", "2026-08-01")
+    await async_wait_recording_done(hass)
+    assert count == expected_days
+    assert len(await _sums(hass)) == expected_days
+
+
+async def test_failed_second_read_imports_nothing(coord, hass) -> None:
+    """If the cost read fails after the consumption read, neither series is written."""
+    await coord.async_record_statistics(_recs("2026-10-01", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+    before = (await _sums(hass), await _sums(hass, COST_ID))
+
+    real = coord_mod._async_get_stats_from
+    calls = {"n": 0}
+
+    async def fail_second(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise coord_mod.PsegStatisticsError("cost read failed")
+        return await real(*args, **kwargs)
+
+    with (
+        patch.object(coord_mod, "_async_get_stats_from", fail_second),
+        pytest.raises(coord_mod.PsegStatisticsError),
+    ):
+        await coord.async_record_statistics(_recs("2026-09-01", 30, kwh=5.0), meter_id="m1")
+    await async_wait_recording_done(hass)
+
+    assert (await _sums(hass), await _sums(hass, COST_ID)) == before
+
+
+async def test_backfill_with_different_daily_values_numeric_trace(coord, hass) -> None:
+    """Exact sums after an older backfill at a different rate, then a rolling poll."""
+    await coord.async_record_statistics(_recs("2026-10-01", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+    await coord.async_record_statistics(_recs("2026-09-01", 30, kwh=5.0), meter_id="m1")
+    await async_wait_recording_done(hass)
+    sums = dict(await _sums(hass))
+    assert (sums["2026-09-30"], sums["2026-10-01"], sums["2026-10-14"]) == (150.0, 160.0, 290.0)
+
+    await coord.async_record_statistics(_recs("2026-10-02", 14), meter_id="m1")
+    await async_wait_recording_done(hass)
+    assert dict(await _sums(hass))["2026-10-15"] == 300.0
