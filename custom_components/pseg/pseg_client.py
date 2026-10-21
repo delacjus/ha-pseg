@@ -85,7 +85,15 @@ class AllowlistedSession(requests.Session):
             raise PsegSecurityError(f"Request to {parsed.hostname} blocked: bad port") from err
         if port not in (None, 443):
             raise PsegSecurityError(f"Request to {parsed.hostname} blocked: port {port}")
-        return super().send(request, **kwargs)
+        resp = super().send(request, **kwargs)
+        # Diagnostics only: host/path/status of each hop, never queries or cookies.
+        self.trace.append(f"{request.method} {parsed.hostname}{parsed.path} -> {resp.status_code}")
+        del self.trace[:-20]
+        return resp
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.trace: list[str] = []
 
 
 def _locked[**P, R](func: Callable[P, R]) -> Callable[P, R]:
@@ -269,6 +277,13 @@ class PsegClient:
         if resp.status_code >= 500:
             raise PsegTransientError(f"PSE&G portal returned HTTP {resp.status_code}")
         return resp
+
+    def auth_diagnostics(self) -> str:
+        """Hop trace and cookie NAMES per host (no values) for setup failure logs."""
+        names: dict[str, list[str]] = {}
+        for c in self.session.cookies:
+            names.setdefault(c.domain, []).append(c.name)
+        return f"hops={self.session.trace} cookie_names={names}"
 
     def _has_cookie(self, name: str, host: str) -> bool:
         return any(

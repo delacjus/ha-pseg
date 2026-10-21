@@ -63,6 +63,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         try:
             await self.hass.async_add_executor_job(client.ensure_session)
         except PsegOktaSessionExpired:
+            _LOGGER.warning("PSE&G cookies rejected at setup: %s", client.auth_diagnostics())
             errors["base"] = "okta_session_invalid"
             return errors, None, None, []
         except (PsegTransientError, requests.RequestException):
@@ -79,6 +80,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         try:
             data = await self.hass.async_add_executor_job(client.fetch_energy_data, 1)
         except PsegOktaSessionExpired:
+            _LOGGER.warning("PSE&G cookies rejected at setup: %s", client.auth_diagnostics())
             errors["base"] = "okta_session_invalid"
             return errors, None, None, []
         except Exception as err:
@@ -117,6 +119,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         try:
             renewed = await self.hass.async_add_executor_job(renew)
         except PsegOktaSessionExpired:
+            _LOGGER.warning("PSE&G renewal check failed at setup: %s", renewal_client.auth_diagnostics())
             errors["base"] = no_session_error
             return errors, None, None, []
         except (PsegTransientError, requests.RequestException):
