@@ -1,5 +1,7 @@
 """Unit tests for PSE&G API client."""
 
+from datetime import UTC, datetime
+
 import pytest
 import requests
 import requests_mock
@@ -548,3 +550,74 @@ def test_post_saml_landing_on_okta_widget_is_expired() -> None:
         m.post(f"https://{PORTAL_HOST}/Saml/okta-prod/Acs", text="ok")
         with pytest.raises(PsegOktaSessionExpired):
             client.ensure_session()
+
+
+# --- Live 2026-10-21: account lists a replaced meter (empty series) after the active one ---
+
+def _meter(name: str, days: list[tuple[str, float]]) -> dict:
+    pts = []
+    for start, y in days:
+        x = int(datetime.strptime(start, "%m/%d/%Y").replace(tzinfo=UTC).timestamp() * 1000)
+        pts.append({"x": x, "y": y, "hs": {"start": start, "end": start}, "v": False})
+    return {"name": name, "type": "column", "data": pts}
+
+
+TWO_METER_CHART = {
+    "Data": {
+        "series": [
+            {"data": [[1792281600000, 17.6]], "showInLegend": False},  # unnamed navigator
+            _meter("Meter #000303817579 (Residential Service (RS))", [("10/18/2026", 17.586), ("10/19/2026", 14.5368)]),
+            _meter("Meter #000126274191 (Residential Service (RS))", []),
+            {"name": "Temperature", "type": "spline", "data": [{"x": 1792368000000, "y": 46.66, "tr": "31° | 47° | 69°F"}]},
+            {"name": "Energy Marker", "type": "flags", "data": []},
+        ]
+    }
+}
+
+
+def test_parse_uses_meter_with_data_when_replaced_meter_listed_last() -> None:
+    """The empty replaced meter listed last must not blank out the active meter's usage."""
+    parsed = PsegClient(price_per_kwh=0.25)._parse_chart_data(TWO_METER_CHART)
+    assert [r["date"] for r in parsed["history_14d"]] == ["2026-10-18", "2026-10-19"]
+    assert parsed["latest_kwh"] == 14.54
+    assert parsed["previous_kwh"] == 17.59
+    assert parsed["meter"].startswith("Meter #000303817579")
+    assert parsed["meter_ids"] == ["000303817579", "000126274191"]
+
+
+def test_parse_sums_both_meters_on_swap_day() -> None:
+    """On the swap day both meters report part of the day; the account total is their sum."""
+    chart = {
+        "Data": {
+            "series": [
+                _meter("Meter #111 (RS)", [("01/08/2026", 10.0), ("01/09/2026", 4.0)]),
+                _meter("Meter #222 (RS)", [("01/09/2026", 6.0), ("01/10/2026", 12.0)]),
+            ]
+        }
+    }
+    parsed = PsegClient(price_per_kwh=0.5)._parse_chart_data(chart)
+    assert [(r["date"], r["kwh"], r["cost"]) for r in parsed["history_14d"]] == [
+        ("2026-01-08", 10.0, 5.0),
+        ("2026-01-09", 10.0, 5.0),
+        ("2026-01-10", 12.0, 6.0),
+    ]
+    assert parsed["meter"] == "Meter #222 (RS)"
+
+
+def test_history_range_reads_every_meter_series() -> None:
+    """Backfill takes usage from the active meter even when the empty one is listed first."""
+    client = PsegClient(portal_cookies="MM_SID=x")
+    chart = {
+        "Data": {
+            "series": [
+                _meter("Meter #000126274191 (RS)", []),
+                _meter("Meter #000303817579 (RS)", [("10/18/2026", 17.586)]),
+            ]
+        }
+    }
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
+        m.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart)
+        records = client.fetch_history_range("2026-10-18", "2026-10-18")
+    assert records == [{"date": "2026-10-18", "kwh": 17.59, "cost": round(17.59 * client.price_per_kwh, 2)}]

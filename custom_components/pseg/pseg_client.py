@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 import functools
 import json
 import logging
+import re
 import threading
 import time
 from typing import Any
@@ -467,34 +468,10 @@ class PsegClient:
                 _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
                 chunks.append((chunk_start_str, chunk_end_str, False))
             else:
-                series_list = chart_data.get("series", [])
-                meter_series = {}
-                for s in series_list:
-                    if "Meter" in str(s.get("name") or ""):
-                        meter_series = s
-                        break
-
-                pts = meter_series.get("data", [])
-                chunks.append(
-                    (chunk_start_str, chunk_end_str, any(isinstance(pt, dict) for pt in pts))
-                )
-                for pt in pts:
-                    if isinstance(pt, dict):
-                        kwh = round(pt.get("y", 0.0), 2)
-                        hs = pt.get("hs", {})
-                        p_start = hs.get("start", "")
-                        try:
-                            dt = datetime.strptime(p_start, "%m/%d/%Y")
-                            date_iso = dt.strftime("%Y-%m-%d")
-                        except Exception:
-                            date_iso = p_start
-
-                        est_cost = round(kwh * self.price_per_kwh, 2)
-                        records_map[date_iso] = {
-                            "date": date_iso,
-                            "kwh": kwh,
-                            "cost": est_cost,
-                        }
+                chunk_records, _, _ = self._merge_meter_series(chart_data.get("series", []))
+                chunks.append((chunk_start_str, chunk_end_str, bool(chunk_records)))
+                for rec in chunk_records:
+                    records_map[rec["date"]] = rec
 
             curr_start = curr_end + timedelta(days=1)
             if curr_start <= end_dt:
@@ -587,6 +564,48 @@ class PsegClient:
 
         return self._parse_chart_data(data)
 
+    def _merge_meter_series(
+        self, series_list: list[Any]
+    ) -> tuple[list[dict[str, Any]], str | None, list[str]]:
+        """Sum daily kWh across every meter series on the account.
+
+        An account can list a replaced meter next to its successor: the old one
+        carries the history before the swap and an empty series after it. Summing
+        per day keeps the account total continuous across the swap; picking one
+        series by position silently dropped all usage. Returns (records sorted by
+        date, name of the meter with the most recent reading, all meter ids).
+        """
+        totals: dict[str, float] = {}
+        active_name: str | None = None
+        active_x = -1
+        meter_ids: list[str] = []
+        for s in series_list:
+            if not isinstance(s, dict) or "Meter" not in str(s.get("name") or ""):
+                continue
+            name = str(s["name"])
+            match = re.search(r"\d+", name)
+            if match and match.group(0) not in meter_ids:
+                meter_ids.append(match.group(0))
+            if active_name is None:
+                active_name = name
+            for pt in s.get("data") or []:
+                if not isinstance(pt, dict):
+                    continue
+                start_str = (pt.get("hs") or {}).get("start", "")
+                try:
+                    date_iso = datetime.strptime(start_str, "%m/%d/%Y").strftime("%Y-%m-%d")
+                except (TypeError, ValueError):
+                    date_iso = start_str
+                totals[date_iso] = totals.get(date_iso, 0.0) + float(pt.get("y") or 0.0)
+                x = pt.get("x")
+                if isinstance(x, (int, float)) and x > active_x:
+                    active_x, active_name = x, name
+        records = []
+        for date_iso in sorted(totals):
+            kwh = round(totals[date_iso], 2)
+            records.append({"date": date_iso, "kwh": kwh, "cost": round(kwh * self.price_per_kwh, 2)})
+        return records, active_name, meter_ids
+
     def _parse_chart_data(self, data: dict[str, Any]) -> dict[str, Any]:
         """Parse series into clean sensor model."""
         chart_data = data.get("Data")
@@ -603,38 +622,14 @@ class PsegClient:
             raise PsegTransientError("No series data returned from MyMeter.")
 
         nav_series = series_list[0].get("data", [])
-        meter_series = {}
         temp_series = {}
-
         for s in series_list:
-            name = str(s.get("name") or "")
-            if "Meter" in name:
-                meter_series = s
-            elif "Temperature" in name:
+            if "Temperature" in str(s.get("name") or ""):
                 temp_series = s
 
-        meter_name = meter_series.get("name") or DEFAULT_METER_NAME
-        detailed_pts = meter_series.get("data", [])
+        history_14d, active_name, meter_ids = self._merge_meter_series(series_list)
+        meter_name = active_name or DEFAULT_METER_NAME
         temp_pts = temp_series.get("data", [])
-
-        history_14d = []
-        for pt in detailed_pts:
-            if isinstance(pt, dict):
-                kwh = round(pt.get("y", 0.0), 2)
-                hs = pt.get("hs", {})
-                start_str = hs.get("start", "")
-                try:
-                    dt = datetime.strptime(start_str, "%m/%d/%Y")
-                    date_iso = dt.strftime("%Y-%m-%d")
-                except Exception:
-                    date_iso = start_str
-
-                est_cost = round(kwh * self.price_per_kwh, 2)
-                history_14d.append({
-                    "date": date_iso,
-                    "kwh": kwh,
-                    "cost": est_cost,
-                })
 
         latest_record = history_14d[-1] if history_14d else {"date": "None", "kwh": 0.0, "cost": 0.0}
         prev_record = history_14d[-2] if len(history_14d) > 1 else {"date": "None", "kwh": 0.0, "cost": 0.0}
@@ -644,6 +639,7 @@ class PsegClient:
 
         return {
             "meter": meter_name,
+            "meter_ids": meter_ids,
             "last_updated": datetime.now(UTC).isoformat(),
             "latest_date": latest_record["date"],
             "latest_kwh": latest_record["kwh"],

@@ -207,6 +207,41 @@ async def test_reauth_flow_account_mismatch(hass: HomeAssistant) -> None:
         assert result2["reason"] == "reauth_account_mismatch"
 
 
+async def test_reauth_accepts_replaced_meter_still_on_account(hass: HomeAssistant) -> None:
+    """Entry keyed on a replaced meter reauths fine while that meter is still on the account."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="000126274191",
+        data={CONF_OKTA_COOKIES: "idx=old"},
+    )
+    entry.add_to_hass(hass)
+
+    result = await entry.start_reauth_flow(hass)
+
+    with (
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={
+                "meter": "Meter #000303817579 (Residential Service (RS))",
+                "meter_ids": ["000303817579", "000126274191"],
+            },
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={CONF_OKTA_COOKIES: "idx=fresh"},
+        )
+        assert result2["type"] == FlowResultType.ABORT
+        assert result2["reason"] == "reauth_successful"
+    assert entry.data[CONF_OKTA_COOKIES] == "idx=fresh"
+
+
 async def test_reconfigure_flow_success(hass: HomeAssistant) -> None:
     """Test manual reconfiguration updates session cookies."""
     entry = MockConfigEntry(

@@ -46,8 +46,8 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def _async_validate_and_extract_meter(
         self, okta_cookies: str, portal_cookies: str
-    ) -> tuple[dict[str, str], PsegClient | None, str | None]:
-        """Validate credentials and extract the meter ID."""
+    ) -> tuple[dict[str, str], PsegClient | None, str | None, list[str]]:
+        """Validate credentials; return the active meter id and every meter id on the account."""
         errors: dict[str, str] = {}
         client = PsegClient(okta_cookies=okta_cookies, portal_cookies=portal_cookies)
         meter_id = None
@@ -56,14 +56,14 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             await self.hass.async_add_executor_job(client.ensure_session)
         except PsegOktaSessionExpired:
             errors["base"] = "okta_session_invalid"
-            return errors, None, None
+            return errors, None, None, []
         except (PsegTransientError, requests.RequestException):
             errors["base"] = "cannot_connect"
-            return errors, None, None
+            return errors, None, None, []
         except Exception as err:
             _LOGGER.exception("Unexpected error validating session: %s", err)
             errors["base"] = "unknown"
-            return errors, None, None
+            return errors, None, None, []
 
         # The meter id becomes the entry unique_id (duplicate + reauth account checks),
         # so a failed lookup must fail the step rather than fall back to a placeholder
@@ -72,11 +72,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data = await self.hass.async_add_executor_job(client.fetch_energy_data, 1)
         except PsegOktaSessionExpired:
             errors["base"] = "okta_session_invalid"
-            return errors, None, None
+            return errors, None, None, []
         except Exception as err:
             _LOGGER.debug("Could not determine meter id during config flow: %s", type(err).__name__)
             errors["base"] = "cannot_connect"
-            return errors, None, None
+            return errors, None, None, []
 
         meter_str = str(data.get("meter") or "")
         if meter_str and meter_str != DEFAULT_METER_NAME:
@@ -88,9 +88,9 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if not meter_id:
             errors["base"] = "cannot_connect"
-            return errors, None, None
+            return errors, None, None, []
 
-        return errors, client, meter_id
+        return errors, client, meter_id, list(data.get("meter_ids") or [meter_id])
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -105,7 +105,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not okta_cookies:
                 errors["base"] = "missing_credentials"
             else:
-                errors, client, meter_id = await self._async_validate_and_extract_meter(
+                errors, client, meter_id, meter_ids = await self._async_validate_and_extract_meter(
                     okta_cookies, portal_cookies
                 )
                 if not errors and client and meter_id:
@@ -157,11 +157,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not okta_cookies:
                 errors["base"] = "missing_credentials"
             else:
-                errors, client, meter_id = await self._async_validate_and_extract_meter(
+                errors, client, meter_id, meter_ids = await self._async_validate_and_extract_meter(
                     okta_cookies, portal_cookies
                 )
                 if not errors and client and meter_id:
-                    if self._reauth_entry.unique_id and self._reauth_entry.unique_id != meter_id:
+                    if self._reauth_entry.unique_id and self._reauth_entry.unique_id not in meter_ids:
                         return self.async_abort(reason="reauth_account_mismatch")
 
                     return self.async_update_reload_and_abort(
@@ -203,11 +203,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not okta_cookies:
                 errors["base"] = "missing_credentials"
             else:
-                errors, client, meter_id = await self._async_validate_and_extract_meter(
+                errors, client, meter_id, meter_ids = await self._async_validate_and_extract_meter(
                     okta_cookies, portal_cookies
                 )
                 if not errors and client and meter_id:
-                    if reconfigure_entry.unique_id and reconfigure_entry.unique_id != meter_id:
+                    if reconfigure_entry.unique_id and reconfigure_entry.unique_id not in meter_ids:
                         return self.async_abort(reason="reauth_account_mismatch")
 
                     return self.async_update_reload_and_abort(
