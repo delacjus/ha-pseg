@@ -220,6 +220,18 @@ class PsegClient:
     def _mark_okta_expired(self) -> None:
         self.okta_session_expired_at = datetime.now(UTC).isoformat()
 
+    def _raise_post_renewal_logged_out(self, resp: requests.Response) -> None:
+        """Classify a still-logged-out /Dashboard right after Okta issued an assertion.
+
+        Okta just proved the session is valid, so only Okta itself (its host or the
+        sign-in widget) means "expired". A plain bounce to the portal home page is the
+        portal refusing sessions (e.g. maintenance) and is transient.
+        """
+        if urllib.parse.urlparse(resp.url).hostname == OKTA_HOST or self._is_okta_widget(resp):
+            self._mark_okta_expired()
+            raise PsegOktaSessionExpired("Failed to establish portal session after SAML post")
+        raise PsegTransientError("Portal still logged out after SAML post (maintenance?)")
+
     def _get_dashboard(self, timeout: int = 20) -> requests.Response:
         """GET /Dashboard; network errors and 5xx are transient."""
         try:
@@ -311,8 +323,7 @@ class PsegClient:
 
         dash_resp = self._get_dashboard()
         if self._is_login_page(dash_resp):
-            self._mark_okta_expired()
-            raise PsegOktaSessionExpired("Failed to establish portal session after SAML post")
+            self._raise_post_renewal_logged_out(dash_resp)
         if dash_resp.status_code != 200:
             raise PsegTransientError(
                 f"Unexpected HTTP {dash_resp.status_code} from /Dashboard after SSO"
@@ -353,8 +364,7 @@ class PsegClient:
             self.renew_sso()
             resp = self._get_dashboard(timeout=25)
             if self._is_login_page(resp):
-                self._mark_okta_expired()
-                raise PsegOktaSessionExpired("Portal still logged out after SSO renewal")
+                self._raise_post_renewal_logged_out(resp)
 
         soup = BeautifulSoup(resp.text, "html.parser")
         tag = soup.find("input", attrs={"name": "__RequestVerificationToken"})

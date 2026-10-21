@@ -512,3 +512,39 @@ def test_portal_and_okta_outages_are_transient(variant: str) -> None:
         with pytest.raises(PsegTransientError):
             client.fetch_energy_data(14)
     assert client.okta_session_expired_at is None
+
+
+def test_post_saml_home_bounce_without_widget_is_transient() -> None:
+    """Okta issued an assertion but the portal still bounces to "/" (maintenance): transient."""
+    client = PsegClient(okta_cookies="idx=ok")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        _sso_to_okta(m, SAML_FORM_TO_ACS)
+        m.post(
+            f"https://{PORTAL_HOST}/Saml/okta-prod/Acs",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
+        with pytest.raises(PsegTransientError):
+            client.ensure_session()
+        with pytest.raises(PsegTransientError):
+            client.fetch_energy_data(14)
+    assert client.okta_session_expired_at is None
+
+
+def test_post_saml_landing_on_okta_widget_is_expired() -> None:
+    """After the SAML post, ending on the Okta widget still means the session is gone."""
+    client = PsegClient(okta_cookies="idx=ok")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            [
+                LOGGED_OUT_REDIRECT,
+                {"status_code": 302, "headers": {"Location": f"https://{OKTA_HOST}/signin"}},
+            ],
+        )
+        m.get(f"https://{OKTA_HOST}/signin", text=R2_WIDGET)
+        _sso_to_okta(m, SAML_FORM_TO_ACS)
+        m.post(f"https://{PORTAL_HOST}/Saml/okta-prod/Acs", text="ok")
+        with pytest.raises(PsegOktaSessionExpired):
+            client.ensure_session()
