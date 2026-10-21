@@ -8,3 +8,8 @@ browser_data/
 *.log
 .vscode/
 .idea/
+
+# Local virtualenv & caches
+.venv/
+.pytest_cache/
+.ruff_cache/
