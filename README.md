@@ -38,17 +38,15 @@ This fork (`delacjus/ha-pseg`, forked from `sidprax/ha-pseg`) hardens the integr
 
 ## How to Get Your Session Cookies ("Log In Once")
 
-You log into PSE&G **once** in your browser, copy your session cookies, and the integration maintains the session automatically.
+Sign in through PSE&G's Okta link, then copy the cookies used by that sign-in. The integration checks that these cookies can renew a portal session.
 
 ### Chrome / Edge:
-1. In your browser, go to `https://id.myaccount.pseg.com` or `https://mysmartenergy.nj.pseg.com` and log in. Check **"Remember me"** or **"Keep me signed in"** if offered.
-2. Press **F12** (or right-click anywhere and choose **Inspect**) to open Developer Tools.
-3. Switch to the **Network** tab and refresh the page (**F5**).
-4. Filter by `id.myaccount.pseg.com` and click on any network request made to that domain (for example, `/app/...` or `introspect`).
-5. In the **Headers** pane on the right, find **Request Headers**.
-6. Find the **`Cookie:`** line, right-click its value, and select **Copy value**.
-7. In Home Assistant, paste this into the **Okta Cookies** field.
-8. *(Optional)* Click any request to `mysmartenergy.nj.pseg.com` (such as `/Dashboard`), copy its `Cookie:` header value, and paste it into **Portal Cookies**.
+1. Open `https://mysmartenergy.nj.pseg.com`. Press **F12** (or right-click and choose **Inspect**) and select the **Network** tab.
+2. Enable **Preserve log** and **Disable cache**, then select the **Doc** filter.
+3. Click **Sign in Via My Account** and complete sign-in. Do not use the email/password boxes on the MyMeter page; that local form does not establish the Okta session needed for renewal.
+4. In Network, find the request to `id.myaccount.pseg.com` ending in `/app/psegnjb2c_mymeter_1/exktrfl7ruOTPxcyv357/sso/saml`.
+5. In **Headers** > **Request Headers**, right-click the `Cookie:` value and select **Copy value**. It should contain `idx=`. Paste it into Home Assistant's **Okta Cookies** field.
+6. *(Optional)* Find the request to `mysmartenergy.nj.pseg.com/Dashboard`, copy its `Cookie:` header value the same way, and paste it into **Portal Cookies**.
 
 ## Installation
 

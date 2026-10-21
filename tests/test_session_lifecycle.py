@@ -47,6 +47,12 @@ DATA = {
 }
 
 
+def _successful_session(client: PsegClient) -> bool:
+    """Model a session whose Okta cookies can renew a fresh portal client."""
+    client.sso_renewals = 1
+    return True
+
+
 def _entry(hass: HomeAssistant, **data) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -83,7 +89,7 @@ def portal() -> Generator[None]:
     """Stub portal calls and statistics import."""
     with (
         patch.object(PsegClient, "fetch_energy_data", return_value=dict(DATA)),
-        patch.object(PsegClient, "ensure_session", return_value=True),
+        patch.object(PsegClient, "ensure_session", _successful_session),
         patch.object(PsegClient, "keepalive", return_value=True),
         patch(
             "custom_components.pseg.coordinator.PsegDataUpdateCoordinator.async_record_statistics"

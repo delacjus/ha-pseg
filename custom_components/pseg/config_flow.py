@@ -99,6 +99,27 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return errors, None, None, []
 
         meter_ids = list(data.get("meter_ids") or []) if "meter_ids" in data else [meter_id]
+
+        # A live portal cookie can mask unusable Okta cookies. Prove the Okta
+        # header can renew a fresh client without borrowing the portal session.
+        renewal_client = PsegClient(okta_cookies=okta_cookies)
+        try:
+            renewed = await self.hass.async_add_executor_job(renewal_client.ensure_session)
+        except PsegOktaSessionExpired:
+            errors["base"] = "okta_no_session"
+            return errors, None, None, []
+        except (PsegTransientError, requests.RequestException):
+            errors["base"] = "cannot_connect"
+            return errors, None, None, []
+        except Exception as err:
+            _LOGGER.exception("Unexpected error validating Okta renewal: %s", err)
+            errors["base"] = "unknown"
+            return errors, None, None, []
+
+        if not renewed or renewal_client.sso_renewals < 1:
+            errors["base"] = "okta_no_session"
+            return errors, None, None, []
+
         return errors, client, meter_id, meter_ids
 
     async def async_step_user(

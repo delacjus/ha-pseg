@@ -1,12 +1,13 @@
 """Tests for PSE&G config flow and options flow."""
 
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+import requests
 
 from custom_components.pseg.const import (
     CONF_KNOWN_METER_IDS,
@@ -18,9 +19,16 @@ from custom_components.pseg.const import (
     DOMAIN,
 )
 from custom_components.pseg.pseg_client import (
+    PsegClient,
     PsegOktaSessionExpired,
     PsegTransientError,
 )
+
+
+def _successful_session(client: PsegClient) -> bool:
+    """Model a usable Okta session when tests are focused on another behavior."""
+    client.sso_renewals = 1
+    return True
 
 
 async def test_user_flow_shows_form(hass: HomeAssistant) -> None:
@@ -79,7 +87,7 @@ async def test_user_flow_success_creates_entry(hass: HomeAssistant) -> None:
     with (
         patch(
             "custom_components.pseg.pseg_client.PsegClient.ensure_session",
-            return_value=True,
+            new=_successful_session,
         ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
@@ -110,6 +118,126 @@ async def test_user_flow_success_creates_entry(hass: HomeAssistant) -> None:
         assert result["data"][CONF_KNOWN_METER_IDS] == ["88776655", "11223344"]
 
 
+async def test_user_flow_proves_okta_only_renewal(hass: HomeAssistant) -> None:
+    """Setup needs a second client that renews without the pasted portal session."""
+    sessions: list[PsegClient] = []
+
+    def ensure_session(client: PsegClient) -> bool:
+        sessions.append(client)
+        if len(sessions) == 2:
+            client.sso_renewals = 1
+        return True
+
+    with (
+        patch("custom_components.pseg.config_flow.PsegClient", wraps=PsegClient) as clients,
+        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", new=ensure_session),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": "Meter 88776655"},
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+            data={
+                CONF_OKTA_COOKIES: "idx=example",
+                CONF_PORTAL_COOKIES: "MM_SID=example",
+            },
+        )
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert clients.call_args_list == [
+        call(okta_cookies="idx=example", portal_cookies="MM_SID=example"),
+        call(okta_cookies="idx=example"),
+    ]
+    assert len(sessions) == 2
+    assert sessions[0] is not sessions[1]
+    assert sessions[1].sso_renewals == 1
+    assert any(cookie["name"] == "MM_SID" for cookie in result["data"]["cookies"])
+
+
+@pytest.mark.parametrize(
+    ("renewal_result", "error"),
+    [
+        (PsegOktaSessionExpired("sign-in widget"), "okta_no_session"),
+        (True, "okta_no_session"),
+        (PsegTransientError("timeout"), "cannot_connect"),
+        (requests.Timeout("timeout"), "cannot_connect"),
+    ],
+)
+async def test_user_flow_rejects_unrenewable_okta_cookies(
+    hass: HomeAssistant, renewal_result: bool | Exception, error: str
+) -> None:
+    """A valid portal session alone cannot establish durable Okta access."""
+    with (
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            side_effect=[True, renewal_result],
+        ),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": "Meter 88776655"},
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+            data={
+                CONF_OKTA_COOKIES: "idx=example",
+                CONF_PORTAL_COOKIES: "MM_SID=example",
+            },
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": error}
+    assert hass.config_entries.async_entries(DOMAIN) == []
+
+
+@pytest.mark.parametrize("source", ["reauth", "reconfigure"])
+async def test_reauthentication_requires_okta_only_renewal(
+    hass: HomeAssistant, source: str
+) -> None:
+    """Replacing stored cookies also needs proof that Okta can renew them."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="88776655",
+        data={CONF_OKTA_COOKIES: "idx=old", CONF_PORTAL_COOKIES: "MM_SID=old"},
+    )
+    entry.add_to_hass(hass)
+    if source == "reauth":
+        flow = await entry.start_reauth_flow(hass)
+    else:
+        flow = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": source, "entry_id": entry.entry_id}
+        )
+
+    with (
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            side_effect=[True, PsegOktaSessionExpired("sign-in widget")],
+        ),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": "Meter 88776655"},
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_configure(
+            flow["flow_id"],
+            user_input={
+                CONF_OKTA_COOKIES: "idx=new",
+                CONF_PORTAL_COOKIES: "MM_SID=new",
+            },
+        )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "okta_no_session"}
+    assert entry.data[CONF_OKTA_COOKIES] == "idx=old"
+
+
 async def test_user_flow_duplicate_aborts(hass: HomeAssistant) -> None:
     """Test adding an account that is already configured aborts."""
     existing_entry = MockConfigEntry(
@@ -123,7 +251,7 @@ async def test_user_flow_duplicate_aborts(hass: HomeAssistant) -> None:
     with (
         patch(
             "custom_components.pseg.pseg_client.PsegClient.ensure_session",
-            return_value=True,
+            new=_successful_session,
         ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
@@ -152,7 +280,10 @@ async def test_user_flow_aborts_for_any_existing_account_meter(
     )
     entry.add_to_hass(hass)
     with (
-        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            new=_successful_session,
+        ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
             return_value={
@@ -190,7 +321,7 @@ async def test_reauth_flow_matching_account(hass: HomeAssistant) -> None:
     with (
         patch(
             "custom_components.pseg.pseg_client.PsegClient.ensure_session",
-            return_value=True,
+            new=_successful_session,
         ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
@@ -228,7 +359,7 @@ async def test_reauth_flow_account_mismatch(hass: HomeAssistant) -> None:
     with (
         patch(
             "custom_components.pseg.pseg_client.PsegClient.ensure_session",
-            return_value=True,
+            new=_successful_session,
         ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
@@ -258,7 +389,7 @@ async def test_reauth_accepts_replaced_meter_still_on_account(hass: HomeAssistan
     with (
         patch(
             "custom_components.pseg.pseg_client.PsegClient.ensure_session",
-            return_value=True,
+            new=_successful_session,
         ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
@@ -297,7 +428,10 @@ async def test_reauthentication_survives_removed_old_meter(
             DOMAIN, context={"source": source, "entry_id": entry.entry_id}
         )
     with (
-        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            new=_successful_session,
+        ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
             return_value={
@@ -335,7 +469,10 @@ async def test_reauthentication_rejects_disjoint_account(
             DOMAIN, context={"source": source, "entry_id": entry.entry_id}
         )
     with (
-        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            new=_successful_session,
+        ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
             return_value={"meter": "Meter #999 (RS)", "meter_ids": ["999"]},
@@ -356,7 +493,10 @@ async def test_reauth_legacy_entry_accepts_its_original_meter(hass: HomeAssistan
     entry.add_to_hass(hass)
     result = await entry.start_reauth_flow(hass)
     with (
-        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            new=_successful_session,
+        ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
             return_value={"meter": "Meter #222 (RS)", "meter_ids": ["222"]},
@@ -376,7 +516,10 @@ async def test_reauth_with_empty_meter_list_keeps_existing_identity(hass: HomeAs
     entry.add_to_hass(hass)
     result = await entry.start_reauth_flow(hass)
     with (
-        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            new=_successful_session,
+        ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
             return_value={"meter": "Meter #999 (RS)", "meter_ids": []},
@@ -411,7 +554,7 @@ async def test_reconfigure_flow_success(hass: HomeAssistant) -> None:
     with (
         patch(
             "custom_components.pseg.pseg_client.PsegClient.ensure_session",
-            return_value=True,
+            new=_successful_session,
         ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
@@ -469,7 +612,10 @@ async def test_user_flow_meter_lookup_failure_creates_no_entry(
 ) -> None:
     """A failed meter lookup must not create an entry pinned to a placeholder unique_id."""
     with (
-        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            new=_successful_session,
+        ),
         patch("custom_components.pseg.pseg_client.PsegClient.fetch_energy_data", **fetch_kwargs),
     ):
         result = await hass.config_entries.flow.async_init(
@@ -490,7 +636,10 @@ async def test_reauth_meter_lookup_failure_is_not_account_mismatch(hass: HomeAss
     entry.add_to_hass(hass)
     result = await entry.start_reauth_flow(hass)
     with (
-        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            new=_successful_session,
+        ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
             side_effect=PsegTransientError("chart 503"),

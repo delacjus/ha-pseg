@@ -29,6 +29,7 @@
     "error": {
       "missing_credentials": "Please enter your Okta session cookies.",
       "okta_session_invalid": "The Okta session cookies provided are expired or invalid.",
+      "okta_no_session": "These Okta cookies cannot sign in on their own. On mysmartenergy.nj.pseg.com, use the 'Sign in Via My Account' link (not the email/password boxes), then copy the Cookie header from the id.myaccount.pseg.com /sso/saml request. It should contain idx=.",
       "cannot_connect": "Failed to connect to PSE&G. Please check your network connection.",
       "unknown": "An unexpected error occurred while communicating with PSE&G."
     },
