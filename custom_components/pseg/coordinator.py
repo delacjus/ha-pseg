@@ -23,11 +23,12 @@ from homeassistant.components.recorder.statistics import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfEnergy
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.recorder import DATA_INSTANCE
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 import requests
@@ -440,12 +441,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 if "history_14d" in data and data["history_14d"]:
                     meter_id = self._get_meter_id(data)
-                    try:
-                        await self.async_record_statistics(
-                            data["history_14d"], meter_id=meter_id
+                    if self.hass.state is CoreState.running:
+                        await self._async_record_statistics_logged(
+                            data["history_14d"], meter_id
                         )
-                    except Exception as stat_err:
-                        _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
+                    else:
+                        self._defer_statistics_until_started(data["history_14d"], meter_id)
 
             self.next_update_time = dt_util.utcnow() + self.update_interval
             data["next_update"] = self.next_update_time.isoformat()
@@ -472,6 +473,34 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             self.status = "error"
             raise UpdateFailed(f"Error communicating with PSE&G: {err}") from err
+
+    async def _async_record_statistics_logged(
+        self, records: list[dict[str, Any]], meter_id: str
+    ) -> None:
+        """Import statistics; a failure is logged and never fails the poll."""
+        try:
+            await self.async_record_statistics(records, meter_id=meter_id)
+        except Exception as stat_err:
+            _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
+
+    def _defer_statistics_until_started(
+        self, records: list[dict[str, Any]], meter_id: str
+    ) -> None:
+        """Import after Home Assistant has started instead of during setup.
+
+        The recorder only processes its queue once HA has started, and HA only
+        starts once this first refresh returns, so waiting for the commit here
+        deadlocked bootstrap until RECORDER_COMMIT_TIMEOUT (seen live 2026-10-21).
+        """
+
+        async def _import_when_started(_hass: HomeAssistant) -> None:
+            if self._is_stale():
+                return
+            await self._async_record_statistics_logged(records, meter_id)
+
+        unsub = async_at_started(self.hass, _import_when_started)
+        if self.config_entry is not None:
+            self.config_entry.async_on_unload(unsub)
 
     async def async_record_statistics(
         self, records: list[dict[str, Any]], meter_id: str | None = None

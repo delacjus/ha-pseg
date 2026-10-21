@@ -3,7 +3,8 @@
 from datetime import UTC, datetime
 from unittest.mock import patch
 
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import UpdateFailed
@@ -259,3 +260,33 @@ async def test_backfill_of_old_range_leaves_sensor_data_alone(hass: HomeAssistan
     assert coord.data == polled
     assert coord._last_valid_data == polled
     assert pushes == []
+
+
+async def test_first_refresh_during_startup_defers_statistics(hass: HomeAssistant) -> None:
+    """During bootstrap the import waits for HA started instead of blocking setup.
+
+    The recorder only commits after HA has started, and HA only starts after setup,
+    so an inline commit wait here deadlocked startup for 120 s (live 2026-10-21).
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345", data={CONF_OKTA_COOKIES: "idx=test"}
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    sample = {"meter": "Meter #12345", "history_14d": [{"date": "2026-10-20", "kwh": 10.0, "cost": 2.47}]}
+
+    hass.set_state(CoreState.starting)
+    with (
+        patch.object(client, "fetch_energy_data", return_value=sample),
+        patch.object(coord, "async_record_statistics", return_value=None) as record,
+    ):
+        data = await coord._async_update_data()
+        assert data["history_14d"] == sample["history_14d"]
+        record.assert_not_awaited()
+
+        hass.set_state(CoreState.running)
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+        await hass.async_block_till_done()
+
+    record.assert_awaited_once_with(sample["history_14d"], meter_id="12345")
