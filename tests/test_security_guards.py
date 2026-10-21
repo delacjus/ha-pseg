@@ -5,7 +5,10 @@ from pathlib import Path
 import re
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.update_coordinator import UpdateFailed
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+import requests
 import requests_mock
 
 from custom_components.pseg.button import PsegRefreshButton
@@ -15,6 +18,8 @@ from custom_components.pseg.const import (
     ATTR_OKTA_SESSION_EXPIRED_AT,
     ATTR_SESSION_ESTABLISHED_AT,
     ATTR_SSO_RENEWALS,
+    CONF_OKTA_COOKIES,
+    CONF_PORTAL_COOKIES,
     DOMAIN,
     PORTAL_BASE_URL,
 )
@@ -124,3 +129,66 @@ def test_sensor_architecture_and_attributes(hass: HomeAssistant) -> None:
     assert attrs[ATTR_SSO_RENEWALS] == 1
     assert attrs[ATTR_LAST_KEEPALIVE] == "2026-10-20T11:00:00Z"
     assert attrs[ATTR_OKTA_SESSION_EXPIRED_AT] is None
+
+
+SECRET_VALUES = (
+    "secret_okta_token_998877",
+    "sid_secret_665544",
+    "secret_portal_session_112233",
+    "secret_saml_assertion_445566",
+)
+SECRET_OKTA = f"idx={SECRET_VALUES[0]}; sid={SECRET_VALUES[1]}"
+SECRET_PORTAL = f"MM_SID={SECRET_VALUES[2]}"
+OKTA_WIDGET = '<html><script>new OktaSignIn({stateToken: "x"})</script></html>'
+LOGGED_OUT = {"status_code": 302, "headers": {"Location": "/"}}
+
+
+def _assert_no_secrets(text: str) -> None:
+    for value in SECRET_VALUES:
+        assert value not in text, f"secret {value[:12]}... leaked"
+
+
+async def test_guard_no_cookie_values_in_caplog_on_error_paths(hass: HomeAssistant, caplog) -> None:
+    """Expired, transient and SSO-failure paths must not log or raise cookie/assertion values."""
+    caplog.set_level(logging.DEBUG)
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="12345",
+        data={CONF_OKTA_COOKIES: SECRET_OKTA, CONF_PORTAL_COOKIES: SECRET_PORTAL},
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies=SECRET_OKTA, portal_cookies=SECRET_PORTAL)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    messages: list[str] = []
+
+    scenarios = {
+        "okta_expired": {"sso": {"text": OKTA_WIDGET}},
+        "sso_503": {"sso": {"status_code": 503, "text": "down"}},
+        "sso_no_form": {"sso": {"text": "<html>oops</html>"}},
+        "sso_network": {"sso": {"exc": requests.ConnectionError("reset by peer")}},
+        "saml_untrusted": {
+            "sso": {
+                "text": (
+                    '<form action="https://evil.example/x">'
+                    f'<input name="SAMLResponse" value="{SECRET_VALUES[3]}"/></form>'
+                )
+            }
+        },
+        "dashboard_503": {"dashboard": {"status_code": 503, "text": "down"}},
+    }
+    for name, scenario in scenarios.items():
+        with requests_mock.Mocker(session=client.session) as m:
+            m.get(f"{PORTAL_BASE_URL}/Dashboard", **scenario.get("dashboard", LOGGED_OUT))
+            m.get(f"{PORTAL_BASE_URL}/", text="home")
+            m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", **scenario.get("sso", {"text": ""}))
+            try:
+                await coord._async_update_data()
+            except (ConfigEntryAuthFailed, UpdateFailed) as err:
+                messages.append(f"{name}: {err!r} {err.__cause__!r}")
+            await coord._async_keepalive(None)
+    await hass.async_block_till_done()
+
+    assert len(messages) == len(scenarios)
+    _assert_no_secrets("\n".join(messages))
+    _assert_no_secrets(caplog.text)
