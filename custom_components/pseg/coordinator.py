@@ -289,6 +289,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.status: str = "connected"
         self.last_successful_update: str | None = None
         self._unsub_keepalive: Callable[[], None] | None = None
+        # Set on unload. A keepalive/poll still in the executor at that point belongs
+        # to a dead coordinator and must not write to the entry or start reauth.
+        self._stopped = False
+        # The jar this coordinator loaded or last wrote. If entry.data["cookies"]
+        # differs, reauth/reconfigure replaced it and our in-memory jar is stale.
+        self._jar_baseline = config_entry.data.get("cookies") if config_entry else None
         # Serializes portal fetch + statistics import for poll, refresh and backfill.
         self._update_lock = asyncio.Lock()
         # Serializes baseline read -> import -> commit so concurrent imports chain.
@@ -312,7 +318,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
     def stop_keepalive(self) -> None:
-        """Cancel recurring keepalive timer."""
+        """Cancel recurring keepalive timer and retire this coordinator's session."""
+        self._stopped = True
         if self._unsub_keepalive is not None:
             self._unsub_keepalive()
             self._unsub_keepalive = None
@@ -328,6 +335,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             _LOGGER.debug("Error during keepalive check: %s", err)
 
+        if self._is_stale():
+            _LOGGER.debug("Ignoring keepalive result from a retired PSE&G session")
+            return
+
         await self._async_persist_cookies()
 
         if (expired or self.client.okta_session_expired_at) and not self.auth_required:
@@ -341,6 +352,15 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.config_entry.async_start_reauth(self.hass)
             self.async_update_listeners()
 
+    def _is_stale(self) -> bool:
+        """Return True if this coordinator was unloaded or its jar was replaced."""
+        if self._stopped:
+            return True
+        return bool(
+            self.config_entry
+            and self.config_entry.data.get("cookies") != self._jar_baseline
+        )
+
     async def _async_persist_cookies(self) -> None:
         """Persist rotated session cookies to entry.data without logging values."""
         if not self.config_entry:
@@ -349,12 +369,16 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         exported = await self.hass.async_add_executor_job(self.client.export_cookies)
         if not exported:
             return
+        if self._is_stale():
+            _LOGGER.debug("Not persisting cookies from a retired PSE&G session")
+            return
         current_cookies = self.config_entry.data.get("cookies")
         if current_cookies != exported:
             _LOGGER.debug("Persisting rotated session cookies to entry.data")
             new_data = dict(self.config_entry.data)
             new_data["cookies"] = exported
             self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+        self._jar_baseline = exported
 
     def _dismiss_auth_issues(self) -> None:
         """Dismiss persistent notification and repairs issue once authenticated."""

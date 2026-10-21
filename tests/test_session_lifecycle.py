@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Generator
 import logging
+import threading
 from unittest.mock import patch
 
 from homeassistant.config_entries import ConfigEntryState
@@ -26,7 +28,7 @@ from custom_components.pseg.const import (
     PORTAL_HOST,
 )
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
-from custom_components.pseg.pseg_client import PsegClient
+from custom_components.pseg.pseg_client import PsegClient, PsegOktaSessionExpired
 
 METER = "12345678"
 DATA = {
@@ -294,3 +296,78 @@ async def test_second_account_gets_suffixed_entity_ids(hass: HomeAssistant, port
     assert "sensor.pseg_connection_status_2" in second_ids
     assert "sensor.pseg_electricity_consumption_2" in second_ids
     assert registry.async_get("sensor.pseg_connection_status").config_entry_id == first.entry_id
+
+
+OLD_JAR = [{"name": "idx", "value": "OLD", "domain": OKTA_HOST, "path": "/", "secure": True}]
+REAUTH_JAR = [
+    {"name": "idx", "value": "NEW_FROM_REAUTH", "domain": OKTA_HOST, "path": "/", "secure": True}
+]
+
+
+async def _start_blocked_keepalive(hass: HomeAssistant, coord, gate: threading.Event):
+    """Run the coordinator keepalive with the portal call parked on `gate`."""
+    entered = threading.Event()
+
+    def parked_keepalive(self):
+        entered.set()
+        gate.wait(10)
+        raise PsegOktaSessionExpired("expired")
+
+    patcher = patch.object(PsegClient, "keepalive", parked_keepalive)
+    patcher.start()
+    task = hass.async_create_task(coord._async_keepalive(None))
+    await hass.async_add_executor_job(entered.wait, 5)
+    return task, patcher
+
+
+def _reauth_flows(hass: HomeAssistant) -> list:
+    return [
+        f
+        for f in hass.config_entries.flow.async_progress()
+        if f["context"].get("source") == "reauth"
+    ]
+
+
+async def test_inflight_keepalive_does_not_overwrite_reauth_jar(
+    hass: HomeAssistant, portal
+) -> None:
+    """A keepalive started before reauth must not persist its stale jar or start reauth."""
+    entry = _entry(hass, cookies=OLD_JAR)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coord = hass.data[DOMAIN][entry.entry_id]
+
+    gate = threading.Event()
+    task, patcher = await _start_blocked_keepalive(hass, coord, gate)
+    try:
+        hass.config_entries.async_update_entry(entry, data={**entry.data, "cookies": REAUTH_JAR})
+        gate.set()
+        await asyncio.wait_for(task, 5)
+    finally:
+        patcher.stop()
+    await hass.async_block_till_done()
+
+    assert [c["value"] for c in entry.data["cookies"]] == ["NEW_FROM_REAUTH"]
+    assert _reauth_flows(hass) == []
+
+
+async def test_keepalive_finishing_after_unload_is_ignored(hass: HomeAssistant, portal) -> None:
+    """An unloaded coordinator's late keepalive must not touch the entry or start reauth."""
+    entry = _entry(hass, cookies=OLD_JAR)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coord = hass.data[DOMAIN][entry.entry_id]
+    coord.client.session.cookies.set("idx", "STALE_ROTATION", domain=OKTA_HOST, path="/")
+
+    gate = threading.Event()
+    task, patcher = await _start_blocked_keepalive(hass, coord, gate)
+    try:
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        gate.set()
+        await asyncio.wait_for(task, 5)
+    finally:
+        patcher.stop()
+    await hass.async_block_till_done()
+
+    assert [c["value"] for c in entry.data["cookies"]] == ["OLD"]
+    assert _reauth_flows(hass) == []
