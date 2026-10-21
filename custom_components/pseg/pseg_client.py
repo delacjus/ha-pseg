@@ -1,78 +1,272 @@
-"""PSEG API Client for Home Assistant (New Jersey).
+"""PSE&G API Client for Home Assistant (New Jersey).
 
-Uses session cookies to communicate directly with the PSE&G MySmartEnergy portal (MyMeter platform).
+Uses domain-scoped session cookies to communicate directly with PSE&G MySmartEnergy portal
+and Okta SAML SSO endpoints.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 import json
 import logging
-import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any
+import urllib.parse
 
+from bs4 import BeautifulSoup
 import requests
+
+from .const import (
+    ALLOWED_HOSTS,
+    DEFAULT_PRICE_PER_KWH,
+    OKTA_HOST,
+    PORTAL_BASE_URL,
+    PORTAL_HOST,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-BASE_URL = "https://mysmartenergy.nj.pseg.com"
+
+class PsegError(Exception):
+    """Base exception for PSE&G errors."""
 
 
-class PsegAuthError(Exception):
-    """Exception raised for authentication or session failures."""
+class PsegSecurityError(PsegError):
+    """Exception raised when an unauthorized host or security restriction is violated."""
+
+
+class PsegAuthError(PsegError):
+    """Base exception for authentication failures."""
+
+
+class PsegOktaSessionExpired(PsegAuthError):
+    """Exception raised when Okta session is expired and requires user re-authentication."""
+
+
+class PsegTransientError(PsegError):
+    """Exception raised for transient network/server errors (timeouts, 5xx, connection)."""
+
+
+class AllowlistedSession(requests.Session):
+    """Requests session that strictly enforces host allowlist on all requests and redirects."""
+
+    def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
+        parsed = urllib.parse.urlparse(request.url)
+        if parsed.hostname not in ALLOWED_HOSTS:
+            raise PsegSecurityError(
+                f"Request to unauthorized host blocked: {parsed.hostname or request.url}"
+            )
+        return super().send(request, **kwargs)
 
 
 class PsegClient:
-    """Client for PSE&G MySmartEnergy."""
+    """Client for PSE&G MySmartEnergy portal."""
 
-    def __init__(self, cookie: str) -> None:
-        self.cookie = cookie
-        self.session = requests.Session()
+    def __init__(
+        self,
+        okta_cookies: str = "",
+        portal_cookies: str = "",
+        cookie_list: list[dict[str, Any]] | None = None,
+        price_per_kwh: float = DEFAULT_PRICE_PER_KWH,
+    ) -> None:
+        """Initialize the client with domain-scoped cookies."""
+        self.session = AllowlistedSession()
         self.session.headers.update({
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             ),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": f"{BASE_URL}/Dashboard",
+            "Referer": f"{PORTAL_BASE_URL}/Dashboard",
         })
-        self.update_cookie(cookie)
+        self.price_per_kwh = price_per_kwh
 
-    def update_cookie(self, new_cookie: str) -> None:
-        """Update active session cookies."""
-        self.cookie = new_cookie
-        self.session.headers.update({"Cookie": new_cookie})
+        # Session telemetry
+        self.session_established_at: str | None = None
+        self.last_sso_renewal: str | None = None
+        self.sso_renewals: int = 0
+        self.last_keepalive: str | None = None
+        self.okta_session_expired_at: str | None = None
+
+        if cookie_list:
+            self.import_cookies(cookie_list)
+        if okta_cookies:
+            self.set_cookies_from_header(okta_cookies, OKTA_HOST)
+        if portal_cookies:
+            self.set_cookies_from_header(portal_cookies, PORTAL_HOST)
+
+    def set_cookies_from_header(self, cookie_header: str, domain: str) -> None:
+        """Parse a Cookie header string (name=val; name2=val2) into the domain-scoped jar."""
+        if not cookie_header:
+            return
+        parts = cookie_header.split(";")
+        for part in parts:
+            part = part.strip()
+            if not part or "=" not in part:
+                continue
+            name, val = part.split("=", 1)
+            name = name.strip()
+            val = val.strip()
+            if name:
+                self.session.cookies.set(name, val, domain=domain, path="/")
+
+    def export_cookies(self) -> list[dict[str, Any]]:
+        """Export cookies as a list of dicts for persistence."""
+        cookie_data = []
+        for c in self.session.cookies:
+            cookie_data.append({
+                "name": c.name,
+                "value": c.value,
+                "domain": c.domain,
+                "path": c.path,
+                "secure": c.secure,
+            })
+        return cookie_data
+
+    def import_cookies(self, cookie_list: list[dict[str, Any]]) -> None:
+        """Restore cookies from persistence."""
+        for c in cookie_list:
+            name = c.get("name")
+            val = c.get("value")
+            domain = c.get("domain", PORTAL_HOST)
+            path = c.get("path", "/")
+            if name and val:
+                self.session.cookies.set(name, val, domain=domain, path=path)
+
+    def _is_login_page(self, resp: requests.Response) -> bool:
+        """Check if response indicates an unauthenticated or login state."""
+        url_lower = resp.url.lower()
+        if "signin" in url_lower or "login" in url_lower:
+            return True
+        parsed = urllib.parse.urlparse(resp.url)
+        if parsed.path.strip("/") == "":
+            return True
+        text_lower = resp.text.lower()
+        if "oktasignin" in text_lower or "statetoken" in text_lower or "sign in" in text_lower or "login" in text_lower:
+            return True
+        return False
+
+    def ensure_session(self) -> bool:
+        """Validate whether portal session is active, attempting SSO renewal if expired."""
+        try:
+            resp = self.session.get(f"{PORTAL_BASE_URL}/Dashboard", allow_redirects=True, timeout=20)
+        except requests.RequestException as err:
+            raise PsegTransientError(f"Network error connecting to PSE&G: {err}") from err
+
+        if resp.status_code == 200 and not self._is_login_page(resp):
+            if not self.session_established_at:
+                self.session_established_at = datetime.now(UTC).isoformat()
+            return True
+
+        return self.renew_sso()
+
+    def renew_sso(self) -> bool:
+        """Perform SSO renewal using Okta session and SAML auto-post form."""
+        _LOGGER.debug("Attempting SSO renewal via Okta...")
+        try:
+            resp = self.session.get(
+                f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn",
+                allow_redirects=True,
+                timeout=25,
+            )
+        except requests.RequestException as err:
+            raise PsegTransientError(f"Network error during SSO sign-in: {err}") from err
+
+        html = resp.text
+        if "OktaSignIn" in html or "stateToken" in html or (OKTA_HOST in resp.url and "/signin" in resp.url.lower()):
+            self.okta_session_expired_at = datetime.now(UTC).isoformat()
+            raise PsegOktaSessionExpired("Okta session expired: sign-in widget returned")
+
+        soup = BeautifulSoup(html, "html.parser")
+        form = soup.find("form")
+        saml_input = soup.find("input", attrs={"name": "SAMLResponse"})
+
+        if not form or not saml_input:
+            if "sign in" in html.lower() or "login" in html.lower():
+                self.okta_session_expired_at = datetime.now(UTC).isoformat()
+                raise PsegOktaSessionExpired("Okta session expired: unauthenticated login page returned")
+            self.okta_session_expired_at = datetime.now(UTC).isoformat()
+            raise PsegOktaSessionExpired("SAML response form not found in SSO response")
+
+        action = form.get("action")
+        if not action:
+            self.okta_session_expired_at = datetime.now(UTC).isoformat()
+            raise PsegOktaSessionExpired("SAML form missing action attribute")
+
+        action_url = urllib.parse.urljoin(resp.url, action)
+        parsed_action = urllib.parse.urlparse(action_url)
+        if parsed_action.hostname not in ALLOWED_HOSTS:
+            raise PsegSecurityError(
+                f"SAML form action points to untrusted host: {parsed_action.hostname}"
+            )
+
+        data = {}
+        for inp in form.find_all("input"):
+            name = inp.get("name")
+            val = inp.get("value", "")
+            if name:
+                data[name] = val
+
+        try:
+            post_resp = self.session.post(action_url, data=data, allow_redirects=True, timeout=25)
+            post_resp.raise_for_status()
+        except requests.RequestException as err:
+            raise PsegTransientError(f"Network error posting SAML response: {err}") from err
+
+        try:
+            dash_resp = self.session.get(f"{PORTAL_BASE_URL}/Dashboard", allow_redirects=True, timeout=20)
+        except requests.RequestException as err:
+            raise PsegTransientError(f"Network error verifying dashboard after SSO: {err}") from err
+
+        if dash_resp.status_code == 200 and not self._is_login_page(dash_resp):
+            now_iso = datetime.now(UTC).isoformat()
+            self.last_sso_renewal = now_iso
+            self.sso_renewals += 1
+            if not self.session_established_at:
+                self.session_established_at = now_iso
+            _LOGGER.info("SSO renewal successful")
+            return True
+
+        self.okta_session_expired_at = datetime.now(UTC).isoformat()
+        raise PsegOktaSessionExpired("Failed to establish portal session after SAML post")
+
+    def keepalive(self) -> bool:
+        """Cheap keepalive check run every 30 minutes in the executor."""
+        self.last_keepalive = datetime.now(UTC).isoformat()
+        try:
+            resp = self.session.get(f"{PORTAL_BASE_URL}/Dashboard", allow_redirects=True, timeout=15)
+            if resp.status_code == 200 and not self._is_login_page(resp):
+                return True
+            return self.renew_sso()
+        except (PsegTransientError, requests.RequestException) as err:
+            _LOGGER.debug("Keepalive network check encountered transient error: %s", err)
+            return False
 
     def test_connection(self) -> bool:
-        """Validate whether current session cookie is authorized."""
-        try:
-            resp = self.session.get(f"{BASE_URL}/Dashboard", allow_redirects=True, timeout=20)
-            if resp.status_code != 200:
-                raise PsegAuthError(f"HTTP status {resp.status_code} received from portal")
-            if "signin" in resp.url.lower() or "login" in resp.url.lower():
-                raise PsegAuthError("Session cookie expired or rejected by portal")
-            return True
-        except requests.RequestException as err:
-            raise PsegAuthError(f"Failed to connect to PSE&G: {err}") from err
+        """Validate session during setup or re-auth."""
+        return self.ensure_session()
 
     def _get_verification_token(self) -> str:
-        """Extract __RequestVerificationToken from the /Dashboard page."""
+        """Extract __RequestVerificationToken from /Dashboard, renewing session if needed."""
         try:
-            resp = self.session.get(f"{BASE_URL}/Dashboard", timeout=25)
-            if "signin" in resp.url.lower() or "login" in resp.url.lower():
-                raise PsegAuthError("Session expired: Redirected to login")
-            dash_html = resp.text
+            resp = self.session.get(f"{PORTAL_BASE_URL}/Dashboard", timeout=25)
         except requests.RequestException as err:
-            raise PsegAuthError(f"Network error on Dashboard: {err}") from err
+            raise PsegTransientError(f"Network error fetching /Dashboard: {err}") from err
 
-        token_match = re.search(
-            r'name=[\"\']__RequestVerificationToken[\"\'][^>]*value=[\"\']([^\"\']+)[\"\']',
-            dash_html,
-        )
-        if not token_match:
-            raise PsegAuthError("Session invalid: __RequestVerificationToken not found on /Dashboard")
-        return token_match.group(1)
+        if self._is_login_page(resp):
+            _LOGGER.debug("Portal session expired during token check; attempting renewal")
+            self.ensure_session()
+            try:
+                resp = self.session.get(f"{PORTAL_BASE_URL}/Dashboard", timeout=25)
+            except requests.RequestException as err:
+                raise PsegTransientError(f"Network error fetching /Dashboard after renewal: {err}") from err
+
+        dash_html = resp.text
+        soup = BeautifulSoup(dash_html, "html.parser")
+        tag = soup.find("input", attrs={"name": "__RequestVerificationToken"})
+        if not tag or not tag.get("value"):
+            raise PsegOktaSessionExpired("Session invalid: __RequestVerificationToken not found on /Dashboard")
+        return str(tag["value"])
 
     def fetch_history_range(
         self,
@@ -95,7 +289,7 @@ class PsegClient:
         headers2 = {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-Requested-With": "XMLHttpRequest",
-            "Origin": BASE_URL,
+            "Origin": PORTAL_BASE_URL,
         }
 
         records_map: dict[str, dict[str, Any]] = {}
@@ -109,8 +303,8 @@ class PsegClient:
 
             chart_setup_data = {
                 "__RequestVerificationToken": token,
-                "UsageInterval": "6",  # 6 = Daily
-                "UsageType": "1",  # 1 = Consumption
+                "UsageInterval": "6",
+                "UsageType": "1",
                 "jsTargetName": "StorageType",
                 "EnableHoverChart": "true",
                 "Start": chunk_start_str,
@@ -126,31 +320,40 @@ class PsegClient:
 
             try:
                 resp2 = self.session.post(
-                    f"{BASE_URL}/Dashboard/Chart",
+                    f"{PORTAL_BASE_URL}/Dashboard/Chart",
                     data=chart_setup_data,
                     headers=headers2,
                     timeout=25,
                 )
+                if resp2.status_code >= 500:
+                    raise PsegTransientError(f"Server error {resp2.status_code} setting chart context")
                 resp2.raise_for_status()
 
                 ts = int(time.time() * 1000)
                 resp3 = self.session.get(
-                    f"{BASE_URL}/Dashboard/ChartData",
+                    f"{PORTAL_BASE_URL}/Dashboard/ChartData",
                     params={"_": ts},
                     headers=headers2,
                     timeout=25,
                 )
+                if resp3.status_code >= 500:
+                    raise PsegTransientError(f"Server error {resp3.status_code} fetching chart data")
                 resp3.raise_for_status()
                 data = resp3.json()
+            except (requests.Timeout, requests.ConnectionError) as err:
+                raise PsegTransientError(f"Network timeout/connection error: {err}") from err
+            except json.JSONDecodeError as err:
+                raise PsegTransientError(f"Failed to decode JSON from chart data: {err}") from err
             except requests.RequestException as err:
-                raise PsegAuthError(f"Failed to retrieve chart chunk ({chunk_start_str} to {chunk_end_str}): {err}") from err
+                raise PsegTransientError(f"Request error retrieving chart chunk: {err}") from err
 
             chart_data = data.get("Data")
             if not chart_data or not isinstance(chart_data, dict):
                 ajax_results = data.get("AjaxResults") or []
                 for ar in ajax_results:
                     if isinstance(ar, dict) and ar.get("Action") == "Redirect":
-                        raise PsegAuthError("Session expired during history backfill: Redirected to login")
+                        self.okta_session_expired_at = datetime.now(UTC).isoformat()
+                        raise PsegOktaSessionExpired("Session expired during history backfill: Redirected to login")
                 _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
             else:
                 series_list = chart_data.get("series", [])
@@ -172,7 +375,7 @@ class PsegClient:
                         except Exception:
                             date_iso = p_start
 
-                        est_cost = round(kwh * 0.247, 2)
+                        est_cost = round(kwh * self.price_per_kwh, 2)
                         records_map[date_iso] = {
                             "date": date_iso,
                             "kwh": kwh,
@@ -181,7 +384,7 @@ class PsegClient:
 
             curr_start = curr_end + timedelta(days=1)
             if curr_start <= end_dt:
-                time.sleep(0.75)
+                time.sleep(0.1)
 
         sorted_records = [records_map[d] for d in sorted(records_map.keys())]
         _LOGGER.info(
@@ -192,17 +395,16 @@ class PsegClient:
         )
         return sorted_records
 
-    def fetch_energy_data(self, days_back: int = 14) -> Dict[str, Any]:
+    def fetch_energy_data(self, days_back: int = 14) -> dict[str, Any]:
         """Fetch usage and temperature data using the 3-step MyMeter chart sequence."""
         token = self._get_verification_token()
 
-        # Step 2: POST /Dashboard/Chart -> Set date range and daily granularity
         end_dt = datetime.now()
         start_dt = end_dt - timedelta(days=days_back)
         chart_setup_data = {
             "__RequestVerificationToken": token,
-            "UsageInterval": "6",  # 6 = Daily
-            "UsageType": "1",  # 1 = Consumption
+            "UsageInterval": "6",
+            "UsageType": "1",
             "jsTargetName": "StorageType",
             "EnableHoverChart": "true",
             "Start": start_dt.strftime("%Y-%m-%d"),
@@ -219,39 +421,59 @@ class PsegClient:
         headers2 = {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-Requested-With": "XMLHttpRequest",
-            "Origin": BASE_URL,
+            "Origin": PORTAL_BASE_URL,
         }
 
         try:
-            resp2 = self.session.post(f"{BASE_URL}/Dashboard/Chart", data=chart_setup_data, headers=headers2, timeout=25)
+            resp2 = self.session.post(
+                f"{PORTAL_BASE_URL}/Dashboard/Chart",
+                data=chart_setup_data,
+                headers=headers2,
+                timeout=25,
+            )
+            if resp2.status_code >= 500:
+                raise PsegTransientError(f"Server error {resp2.status_code} setting chart context")
             resp2.raise_for_status()
+        except (requests.Timeout, requests.ConnectionError) as err:
+            raise PsegTransientError(f"Network timeout/connection error: {err}") from err
         except requests.RequestException as err:
-            raise PsegAuthError(f"Failed to set chart context: {err}") from err
+            raise PsegTransientError(f"Failed to set chart context: {err}") from err
 
-        # Step 3: GET /Dashboard/ChartData -> Parse pure JSON series
         ts = int(time.time() * 1000)
         try:
-            resp3 = self.session.get(f"{BASE_URL}/Dashboard/ChartData", params={"_": ts}, headers=headers2, timeout=25)
+            resp3 = self.session.get(
+                f"{PORTAL_BASE_URL}/Dashboard/ChartData",
+                params={"_": ts},
+                headers=headers2,
+                timeout=25,
+            )
+            if resp3.status_code >= 500:
+                raise PsegTransientError(f"Server error {resp3.status_code} fetching chart data")
             resp3.raise_for_status()
             data = resp3.json()
-        except Exception as err:
-            raise PsegAuthError(f"Failed to retrieve chart data: {err}") from err
+        except (requests.Timeout, requests.ConnectionError) as err:
+            raise PsegTransientError(f"Network timeout/connection error: {err}") from err
+        except json.JSONDecodeError as err:
+            raise PsegTransientError(f"Failed to decode JSON from chart data: {err}") from err
+        except requests.RequestException as err:
+            raise PsegTransientError(f"Failed to retrieve chart data: {err}") from err
 
         return self._parse_chart_data(data)
 
-    def _parse_chart_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _parse_chart_data(self, data: dict[str, Any]) -> dict[str, Any]:
         """Parse series into clean sensor model."""
         chart_data = data.get("Data")
         if not chart_data or not isinstance(chart_data, dict):
             ajax_results = data.get("AjaxResults") or []
             for ar in ajax_results:
                 if isinstance(ar, dict) and ar.get("Action") == "Redirect":
-                    raise PsegAuthError("Session expired: Redirected to login portal")
-            raise PsegAuthError("No chart data returned from MyMeter. Session may have expired.")
+                    self.okta_session_expired_at = datetime.now(UTC).isoformat()
+                    raise PsegOktaSessionExpired("Session expired: Redirected to login portal")
+            raise PsegTransientError("No chart data returned from MyMeter.")
 
         series_list = chart_data.get("series", [])
         if not series_list:
-            raise PsegAuthError("No series data returned from MyMeter. Session may have expired.")
+            raise PsegTransientError("No series data returned from MyMeter.")
 
         nav_series = series_list[0].get("data", [])
         meter_series = {}
@@ -280,8 +502,7 @@ class PsegClient:
                 except Exception:
                     date_iso = start_str
 
-                # Estimate cost based on standard NJ tariff (~$0.247/kWh)
-                est_cost = round(kwh * 0.247, 2)
+                est_cost = round(kwh * self.price_per_kwh, 2)
                 history_14d.append({
                     "date": date_iso,
                     "kwh": kwh,
@@ -296,7 +517,7 @@ class PsegClient:
 
         return {
             "meter": meter_name,
-            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "last_updated": datetime.now(UTC).isoformat(),
             "latest_date": latest_record["date"],
             "latest_kwh": latest_record["kwh"],
             "latest_cost": latest_record["cost"],
