@@ -597,18 +597,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             meter_id = self._get_meter_id()
             await self.async_record_statistics(records, meter_id=meter_id)
 
-        latest_record = records[-1]
-        if self._last_valid_data is not None:
-            self._last_valid_data["history_14d"] = records[-14:]
-            self._last_valid_data["latest_date"] = latest_record["date"]
-            self._last_valid_data["latest_kwh"] = latest_record["kwh"]
-            self._last_valid_data["latest_cost"] = latest_record["cost"]
-            if len(records) > 1:
-                prev_record = records[-2]
-                self._last_valid_data["previous_date"] = prev_record["date"]
-                self._last_valid_data["previous_kwh"] = prev_record["kwh"]
-                self._last_valid_data["previous_cost"] = prev_record["cost"]
-            self.async_set_updated_data(self._last_valid_data)
-
+        # Statistics only: sensor values (latest_*, history_14d) stay from the regular
+        # poll. A backfill of a past range must not make "latest" show old readings.
         _LOGGER.info("Completed PSE&G backfill: imported %d days of statistics", len(records))
         return len(records)

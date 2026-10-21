@@ -206,3 +206,36 @@ async def test_keepalive_expiry_starts_reauth_once(hass: HomeAssistant) -> None:
     issue = ir.async_get(hass).async_get_issue(DOMAIN, f"reauth_required_{entry.entry_id}")
     assert issue is not None
     assert issue.is_fixable is False
+
+
+async def test_backfill_of_old_range_leaves_sensor_data_alone(hass: HomeAssistant) -> None:
+    """Backfill only imports statistics; latest_* sensor values stay from the poll."""
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, {})
+    polled = {
+        "meter": "Meter 1",
+        "latest_date": "2026-10-20",
+        "latest_kwh": 12.0,
+        "latest_cost": 3.0,
+        "previous_date": "2026-10-19",
+        "history_14d": [{"date": "2026-10-20", "kwh": 12.0, "cost": 3.0}],
+    }
+    coord.async_set_updated_data(dict(polled))
+    coord._last_valid_data = coord.data
+    pushes: list = []
+    coord.async_add_listener(lambda: pushes.append(dict(coord.data)))
+
+    history = [
+        {"date": "2024-01-01", "kwh": 1.0, "cost": 0.25},
+        {"date": "2024-01-02", "kwh": 2.0, "cost": 0.5},
+    ]
+    with (
+        patch.object(client, "fetch_history_range", return_value=history),
+        patch.object(coord, "async_record_statistics") as record,
+    ):
+        assert await coord.async_backfill_history("2024-01-01", "2024-01-02") == 2
+
+    record.assert_awaited_once()
+    assert coord.data == polled
+    assert coord._last_valid_data == polled
+    assert pushes == []
