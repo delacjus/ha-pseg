@@ -208,6 +208,26 @@ async def test_keepalive_expiry_starts_reauth_once(hass: HomeAssistant) -> None:
     assert issue.is_fixable is False
 
 
+async def test_retired_poll_auth_failure_does_not_start_reauth(hass: HomeAssistant) -> None:
+    """An in-flight poll on an unloaded coordinator reports UpdateFailed, not reauth."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345", data={CONF_OKTA_COOKIES: "idx=test"}
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    coord._stopped = True
+
+    with (
+        patch.object(client, "fetch_energy_data", side_effect=PsegOktaSessionExpired("widget")),
+        pytest.raises(UpdateFailed),
+    ):
+        await coord._async_update_data()
+
+    assert coord.auth_required is False
+    assert ir.async_get(hass).async_get_issue(DOMAIN, f"reauth_required_{entry.entry_id}") is None
+
+
 async def test_backfill_of_old_range_leaves_sensor_data_alone(hass: HomeAssistant) -> None:
     """Backfill only imports statistics; latest_* sensor values stay from the poll."""
     client = PsegClient(okta_cookies="idx=test")

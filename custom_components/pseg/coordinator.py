@@ -456,6 +456,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._dismiss_auth_issues()
             return data
         except PsegOktaSessionExpired as err:
+            if self._is_stale():
+                # A retired coordinator (unloaded or jar replaced by reauth) must not
+                # start another reauth flow over the fresh cookies.
+                raise UpdateFailed("Ignoring auth failure from a retired PSE&G session") from err
             self.auth_required = True
             self.status = "auth_required"
             self._raise_auth_issues(str(err))
