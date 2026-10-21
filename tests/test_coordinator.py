@@ -1,7 +1,7 @@
 """Tests for PSE&G DataUpdateCoordinator error taxonomy, keepalive, and session persistence."""
 
 from datetime import UTC, datetime
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import CoreState, HomeAssistant
@@ -13,6 +13,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 import requests
 
 from custom_components.pseg.const import (
+    CONF_KNOWN_METER_IDS,
+    CONF_METER_ID,
     CONF_OKTA_COOKIES,
     DOMAIN,
 )
@@ -290,3 +292,73 @@ async def test_first_refresh_during_startup_defers_statistics(hass: HomeAssistan
         await hass.async_block_till_done()
 
     record.assert_awaited_once_with(sample["history_14d"], meter_id="12345")
+
+
+async def test_successful_poll_learns_meters_without_retiring_session(hass: HomeAssistant) -> None:
+    """A legacy entry persists newly observed meters through the cookie update path."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="111",
+        data={CONF_OKTA_COOKIES: "idx=test", CONF_METER_ID: "222"},
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    with patch.object(
+        client, "fetch_energy_data", return_value={"meter_ids": ["333"]}
+    ):
+        await coord._async_update_data()
+        assert set(entry.data[CONF_KNOWN_METER_IDS]) == {"111", "222", "333"}
+        assert coord._is_stale() is False
+        await coord._async_update_data()
+    assert coord._is_stale() is False
+
+
+async def test_unload_cancels_deferred_statistics_import(hass: HomeAssistant) -> None:
+    """Entry unload removes the HA-started callback before it can import."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345", data={CONF_OKTA_COOKIES: "idx=test"}
+    )
+    entry.add_to_hass(hass)
+    with patch.object(
+        PsegDataUpdateCoordinator, "async_config_entry_first_refresh", new_callable=AsyncMock
+    ):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    coord = hass.data[DOMAIN][entry.entry_id]
+    sample = {"meter": "Meter #12345", "history_14d": [{"date": "2026-10-20", "kwh": 10.0}]}
+    hass.set_state(CoreState.starting)
+    with (
+        patch.object(coord.client, "fetch_energy_data", return_value=sample),
+        patch.object(coord, "async_record_statistics", new_callable=AsyncMock) as record,
+        patch("custom_components.pseg.async_unload_entry", AsyncMock(return_value=True)),
+    ):
+        await coord._async_update_data()
+        record.assert_not_awaited()
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        hass.set_state(CoreState.running)
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+        await hass.async_block_till_done()
+    record.assert_not_awaited()
+
+
+async def test_stale_coordinator_skips_deferred_statistics_import(hass: HomeAssistant) -> None:
+    """A replaced cookie jar retires a queued import at startup."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345", data={CONF_OKTA_COOKIES: "idx=test"}
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    sample = {"meter": "Meter #12345", "history_14d": [{"date": "2026-10-20", "kwh": 10.0}]}
+    hass.set_state(CoreState.starting)
+    with (
+        patch.object(client, "fetch_energy_data", return_value=sample),
+        patch.object(coord, "async_record_statistics", new_callable=AsyncMock) as record,
+    ):
+        await coord._async_update_data()
+        hass.config_entries.async_update_entry(entry, data={**entry.data, "cookies": []})
+        assert coord._is_stale() is True
+        hass.set_state(CoreState.running)
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+        await hass.async_block_till_done()
+    record.assert_not_awaited()

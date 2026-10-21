@@ -18,6 +18,7 @@ import requests
 import voluptuous as vol
 
 from .const import (
+    CONF_KNOWN_METER_IDS,
     CONF_METER_ID,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
@@ -33,6 +34,13 @@ from .pseg_client import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _known_meter_ids(entry: ConfigEntry) -> set[str]:
+    """Return all meter ids previously associated with this entry."""
+    known = set(entry.data.get(CONF_KNOWN_METER_IDS) or [])
+    known.update(filter(None, (entry.unique_id, entry.data.get(CONF_METER_ID))))
+    return known
 
 
 class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -65,7 +73,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors["base"] = "unknown"
             return errors, None, None, []
 
-        # The meter id becomes the entry unique_id (duplicate + reauth account checks),
+        # The meter id becomes the entry unique_id (the stable statistic key),
         # so a failed lookup must fail the step rather than fall back to a placeholder
         # that every account would share.
         try:
@@ -90,7 +98,8 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors["base"] = "cannot_connect"
             return errors, None, None, []
 
-        return errors, client, meter_id, list(data.get("meter_ids") or [meter_id])
+        meter_ids = list(data.get("meter_ids") or []) if "meter_ids" in data else [meter_id]
+        return errors, client, meter_id, meter_ids
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -111,6 +120,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if not errors and client and meter_id:
                     await self.async_set_unique_id(meter_id)
                     self._abort_if_unique_id_configured()
+                    if any(
+                        set(meter_ids) & _known_meter_ids(entry)
+                        for entry in self.hass.config_entries.async_entries(DOMAIN)
+                    ):
+                        return self.async_abort(reason="already_configured")
 
                     return self.async_create_entry(
                         title=f"PSE&G ({meter_id})",
@@ -118,6 +132,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             CONF_OKTA_COOKIES: okta_cookies,
                             CONF_PORTAL_COOKIES: portal_cookies,
                             CONF_METER_ID: meter_id,
+                            CONF_KNOWN_METER_IDS: meter_ids,
                             "cookies": client.export_cookies(),
                         },
                     )
@@ -161,7 +176,8 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     okta_cookies, portal_cookies
                 )
                 if not errors and client and meter_id:
-                    if self._reauth_entry.unique_id and self._reauth_entry.unique_id not in meter_ids:
+                    known = _known_meter_ids(self._reauth_entry)
+                    if meter_ids and known.isdisjoint(meter_ids):
                         return self.async_abort(reason="reauth_account_mismatch")
 
                     return self.async_update_reload_and_abort(
@@ -170,6 +186,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             **self._reauth_entry.data,
                             CONF_OKTA_COOKIES: okta_cookies,
                             CONF_PORTAL_COOKIES: portal_cookies,
+                            CONF_KNOWN_METER_IDS: sorted(known.union(meter_ids)),
                             "cookies": client.export_cookies(),
                         },
                     )
@@ -207,7 +224,8 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     okta_cookies, portal_cookies
                 )
                 if not errors and client and meter_id:
-                    if reconfigure_entry.unique_id and reconfigure_entry.unique_id not in meter_ids:
+                    known = _known_meter_ids(reconfigure_entry)
+                    if meter_ids and known.isdisjoint(meter_ids):
                         return self.async_abort(reason="reauth_account_mismatch")
 
                     return self.async_update_reload_and_abort(
@@ -216,6 +234,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             **reconfigure_entry.data,
                             CONF_OKTA_COOKIES: okta_cookies,
                             CONF_PORTAL_COOKIES: portal_cookies,
+                            CONF_KNOWN_METER_IDS: sorted(known.union(meter_ids)),
                             "cookies": client.export_cookies(),
                         },
                     )

@@ -34,6 +34,8 @@ from homeassistant.util import dt as dt_util
 import requests
 
 from .const import (
+    CONF_KNOWN_METER_IDS,
+    CONF_METER_ID,
     CONF_PRICE_PER_KWH,
     DEFAULT_PRICE_PER_KWH,
     DEFAULT_SCAN_INTERVAL_HOURS,
@@ -373,6 +375,19 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
         self._jar_baseline = exported
 
+    def _async_persist_meter_ids(self, meter_ids: list[str]) -> None:
+        """Remember meters seen on this account without reloading the entry."""
+        if not self.config_entry or self._is_stale() or not meter_ids:
+            return
+        known = set(self.config_entry.data.get(CONF_KNOWN_METER_IDS) or [])
+        known.update(
+            filter(None, (self.config_entry.unique_id, self.config_entry.data.get(CONF_METER_ID)))
+        )
+        if not set(meter_ids).issubset(known):
+            new_data = dict(self.config_entry.data)
+            new_data[CONF_KNOWN_METER_IDS] = sorted(known.union(meter_ids))
+            self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+
     def _dismiss_auth_issues(self) -> None:
         """Dismiss persistent notification and repairs issue once authenticated."""
         if not self.config_entry:
@@ -438,6 +453,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.client.fetch_energy_data, 14
                 )
                 await self._async_persist_cookies()
+                self._async_persist_meter_ids(data.get("meter_ids") or [])
 
                 if "history_14d" in data and data["history_14d"]:
                     meter_id = self._get_meter_id(data)

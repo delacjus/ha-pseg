@@ -9,6 +9,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.pseg.const import (
+    CONF_KNOWN_METER_IDS,
     CONF_METER_ID,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
@@ -82,7 +83,10 @@ async def test_user_flow_success_creates_entry(hass: HomeAssistant) -> None:
         ),
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
-            return_value={"meter": "Electric Meter 88776655"},
+            return_value={
+                "meter": "Electric Meter 88776655",
+                "meter_ids": ["88776655", "11223344"],
+            },
         ),
         patch(
             "custom_components.pseg.async_setup_entry",
@@ -103,6 +107,7 @@ async def test_user_flow_success_creates_entry(hass: HomeAssistant) -> None:
         assert result["data"][CONF_METER_ID] == "88776655"
         assert result["data"][CONF_OKTA_COOKIES] == "idx=good_okta_cookie"
         assert result["data"][CONF_PORTAL_COOKIES] == "MM_SID=good_portal_cookie"
+        assert result["data"][CONF_KNOWN_METER_IDS] == ["88776655", "11223344"]
 
 
 async def test_user_flow_duplicate_aborts(hass: HomeAssistant) -> None:
@@ -132,6 +137,37 @@ async def test_user_flow_duplicate_aborts(hass: HomeAssistant) -> None:
         )
         assert result["type"] == FlowResultType.ABORT
         assert result["reason"] == "already_configured"
+
+
+@pytest.mark.parametrize("known_ids", [[], ["000303817579"]])
+async def test_user_flow_aborts_for_any_existing_account_meter(
+    hass: HomeAssistant, known_ids: list[str]
+) -> None:
+    """A successor meter must not create a second entry for the same account."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="000126274191",
+        data={CONF_KNOWN_METER_IDS: known_ids},
+    )
+    entry.add_to_hass(hass)
+    with (
+        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={
+                "meter": "Meter #000303817579 (RS)",
+                "meter_ids": ["000303817579", "000126274191"] if not known_ids else ["000303817579"],
+            },
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+            data={CONF_OKTA_COOKIES: "idx=new_attempt"},
+        )
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
 
 
 async def test_reauth_flow_matching_account(hass: HomeAssistant) -> None:
@@ -240,6 +276,119 @@ async def test_reauth_accepts_replaced_meter_still_on_account(hass: HomeAssistan
         assert result2["type"] == FlowResultType.ABORT
         assert result2["reason"] == "reauth_successful"
     assert entry.data[CONF_OKTA_COOKIES] == "idx=fresh"
+
+
+@pytest.mark.parametrize("source", ["reauth", "reconfigure"])
+async def test_reauthentication_survives_removed_old_meter(
+    hass: HomeAssistant, source: str
+) -> None:
+    """A known successor proves account identity after the unique-id meter vanishes."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="000126274191",
+        data={CONF_KNOWN_METER_IDS: ["000126274191", "000303817579"]},
+    )
+    entry.add_to_hass(hass)
+    if source == "reauth":
+        result = await entry.start_reauth_flow(hass)
+    else:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": source, "entry_id": entry.entry_id}
+        )
+    with (
+        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={
+                "meter": "Meter #000303817579 (RS)",
+                "meter_ids": ["000303817579", "000999999999"],
+            },
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        updated = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_OKTA_COOKIES: "idx=fresh"}
+        )
+    assert updated["type"] == FlowResultType.ABORT
+    assert updated["reason"] == f"{source}_successful"
+    assert entry.unique_id == "000126274191"
+    assert set(entry.data[CONF_KNOWN_METER_IDS]) == {
+        "000126274191", "000303817579", "000999999999"
+    }
+
+
+@pytest.mark.parametrize("source", ["reauth", "reconfigure"])
+async def test_reauthentication_rejects_disjoint_account(
+    hass: HomeAssistant, source: str
+) -> None:
+    """A nonempty meter set with no known id is a different account."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="111",
+        data={CONF_KNOWN_METER_IDS: ["111", "222"]},
+    )
+    entry.add_to_hass(hass)
+    if source == "reauth":
+        result = await entry.start_reauth_flow(hass)
+    else:
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": source, "entry_id": entry.entry_id}
+        )
+    with (
+        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": "Meter #999 (RS)", "meter_ids": ["999"]},
+        ),
+    ):
+        updated = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_OKTA_COOKIES: "idx=other"}
+        )
+    assert updated["type"] == FlowResultType.ABORT
+    assert updated["reason"] == "reauth_account_mismatch"
+
+
+async def test_reauth_legacy_entry_accepts_its_original_meter(hass: HomeAssistant) -> None:
+    """Entries created before known_meter_ids still trust their stored meter id."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="111", data={CONF_METER_ID: "222"}
+    )
+    entry.add_to_hass(hass)
+    result = await entry.start_reauth_flow(hass)
+    with (
+        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": "Meter #222 (RS)", "meter_ids": ["222"]},
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        updated = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_OKTA_COOKIES: "idx=fresh"}
+        )
+    assert updated["reason"] == "reauth_successful"
+    assert set(entry.data[CONF_KNOWN_METER_IDS]) == {"111", "222"}
+
+
+async def test_reauth_with_empty_meter_list_keeps_existing_identity(hass: HomeAssistant) -> None:
+    """An empty meter list is inconclusive and must not strand the entry."""
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id="111", data={})
+    entry.add_to_hass(hass)
+    result = await entry.start_reauth_flow(hass)
+    with (
+        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": "Meter #999 (RS)", "meter_ids": []},
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        updated = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_OKTA_COOKIES: "idx=fresh"}
+        )
+    assert updated["reason"] == "reauth_successful"
+    assert entry.unique_id == "111"
+    assert entry.data[CONF_KNOWN_METER_IDS] == ["111"]
 
 
 async def test_reconfigure_flow_success(hass: HomeAssistant) -> None:
