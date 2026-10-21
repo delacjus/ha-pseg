@@ -29,6 +29,13 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Path fragments that mean "you were sent to sign in" (portal or Okta).
+_SIGNIN_PATH_MARKERS = ("/signin", "/sign-in", "/login")
+# Portal paths that mean the request was bounced into the SSO handshake.
+_LOGIN_PATH_MARKERS = (*_SIGNIN_PATH_MARKERS, "/saml/")
+# Okta Identity Engine sign-in widget markers (case-sensitive JS identifiers).
+_OKTA_WIDGET_MARKERS = ("OktaSignIn", "stateToken")
+
 
 class PsegError(Exception):
     """Base exception for PSE&G errors."""
@@ -165,36 +172,70 @@ class PsegClient:
                 self.session.cookies.set(name, val, domain=domain, path=path)
 
     def _is_login_page(self, resp: requests.Response) -> bool:
-        """Check if response indicates an unauthenticated or login state."""
-        url_lower = resp.url.lower()
-        if "signin" in url_lower or "login" in url_lower:
-            return True
+        """Return True only on a real logged-out signal.
+
+        Signals: the request ended on Okta, on the portal home page (where MyMeter
+        bounces anonymous users), on a sign-in/login/SAML path, got 401/403, or
+        rendered the Okta sign-in widget. Page wording such as "login" or "sign in"
+        is NOT a signal; the logged-in dashboard contains both (Log out link, scripts).
+        """
         parsed = urllib.parse.urlparse(resp.url)
-        if parsed.path.strip("/") == "":
+        path = parsed.path.lower()
+        if parsed.hostname == OKTA_HOST:
             return True
-        text_lower = resp.text.lower()
-        if "oktasignin" in text_lower or "statetoken" in text_lower or "sign in" in text_lower or "login" in text_lower:
+        if path.strip("/") == "":
             return True
-        return False
+        if any(marker in path for marker in _LOGIN_PATH_MARKERS):
+            return True
+        if resp.status_code in (401, 403):
+            return True
+        return self._is_okta_widget(resp)
+
+    @staticmethod
+    def _is_okta_widget(resp: requests.Response) -> bool:
+        """Return True if the response renders the Okta sign-in widget."""
+        return any(marker in resp.text for marker in _OKTA_WIDGET_MARKERS)
+
+    def _mark_session_ok(self) -> None:
+        """Record a confirmed logged-in portal session."""
+        if not self.session_established_at:
+            self.session_established_at = datetime.now(UTC).isoformat()
+        self.okta_session_expired_at = None
+
+    def _mark_okta_expired(self) -> None:
+        self.okta_session_expired_at = datetime.now(UTC).isoformat()
+
+    def _get_dashboard(self, timeout: int = 20) -> requests.Response:
+        """GET /Dashboard; network errors and 5xx are transient."""
+        try:
+            resp = self.session.get(
+                f"{PORTAL_BASE_URL}/Dashboard", allow_redirects=True, timeout=timeout
+            )
+        except requests.RequestException as err:
+            raise PsegTransientError(f"Network error connecting to PSE&G: {err}") from err
+        if resp.status_code >= 500:
+            raise PsegTransientError(f"PSE&G portal returned HTTP {resp.status_code}")
+        return resp
 
     @_locked
     def ensure_session(self) -> bool:
         """Validate whether portal session is active, attempting SSO renewal if expired."""
-        try:
-            resp = self.session.get(f"{PORTAL_BASE_URL}/Dashboard", allow_redirects=True, timeout=20)
-        except requests.RequestException as err:
-            raise PsegTransientError(f"Network error connecting to PSE&G: {err}") from err
-
-        if resp.status_code == 200 and not self._is_login_page(resp):
-            if not self.session_established_at:
-                self.session_established_at = datetime.now(UTC).isoformat()
-            return True
-
-        return self.renew_sso()
+        resp = self._get_dashboard()
+        if self._is_login_page(resp):
+            return self.renew_sso()
+        if resp.status_code != 200:
+            raise PsegTransientError(f"Unexpected HTTP {resp.status_code} from /Dashboard")
+        self._mark_session_ok()
+        return True
 
     @_locked
     def renew_sso(self) -> bool:
-        """Perform SSO renewal using Okta session and SAML auto-post form."""
+        """Perform SSO renewal using Okta session and SAML auto-post form.
+
+        Only the Okta sign-in widget (or landing on an Okta sign-in path) means the Okta
+        session is gone. Server errors, timeouts and unexpected pages are transient so a
+        PSE&G outage never forces the user to re-paste cookies.
+        """
         _LOGGER.debug("Attempting SSO renewal via Okta...")
         try:
             resp = self.session.get(
@@ -205,26 +246,28 @@ class PsegClient:
         except requests.RequestException as err:
             raise PsegTransientError(f"Network error during SSO sign-in: {err}") from err
 
-        html = resp.text
-        if "OktaSignIn" in html or "stateToken" in html or (OKTA_HOST in resp.url and "/signin" in resp.url.lower()):
-            self.okta_session_expired_at = datetime.now(UTC).isoformat()
+        parsed_final = urllib.parse.urlparse(resp.url)
+        on_okta_signin = parsed_final.hostname == OKTA_HOST and any(
+            marker in parsed_final.path.lower() for marker in _SIGNIN_PATH_MARKERS
+        )
+        if self._is_okta_widget(resp) or on_okta_signin:
+            self._mark_okta_expired()
             raise PsegOktaSessionExpired("Okta session expired: sign-in widget returned")
 
+        if resp.status_code != 200:
+            raise PsegTransientError(f"SSO sign-in returned HTTP {resp.status_code}")
+
+        html = resp.text
         soup = BeautifulSoup(html, "html.parser")
         form = soup.find("form")
         saml_input = soup.find("input", attrs={"name": "SAMLResponse"})
 
         if not form or not saml_input:
-            if "sign in" in html.lower() or "login" in html.lower():
-                self.okta_session_expired_at = datetime.now(UTC).isoformat()
-                raise PsegOktaSessionExpired("Okta session expired: unauthenticated login page returned")
-            self.okta_session_expired_at = datetime.now(UTC).isoformat()
-            raise PsegOktaSessionExpired("SAML response form not found in SSO response")
+            raise PsegTransientError("SAML response form not found in SSO response")
 
         action = form.get("action")
         if not action:
-            self.okta_session_expired_at = datetime.now(UTC).isoformat()
-            raise PsegOktaSessionExpired("SAML form missing action attribute")
+            raise PsegTransientError("SAML form missing action attribute")
 
         action_url = urllib.parse.urljoin(resp.url, action)
         parsed_action = urllib.parse.urlparse(action_url)
@@ -246,33 +289,32 @@ class PsegClient:
         except requests.RequestException as err:
             raise PsegTransientError(f"Network error posting SAML response: {err}") from err
 
-        try:
-            dash_resp = self.session.get(f"{PORTAL_BASE_URL}/Dashboard", allow_redirects=True, timeout=20)
-        except requests.RequestException as err:
-            raise PsegTransientError(f"Network error verifying dashboard after SSO: {err}") from err
+        dash_resp = self._get_dashboard()
+        if self._is_login_page(dash_resp):
+            self._mark_okta_expired()
+            raise PsegOktaSessionExpired("Failed to establish portal session after SAML post")
+        if dash_resp.status_code != 200:
+            raise PsegTransientError(
+                f"Unexpected HTTP {dash_resp.status_code} from /Dashboard after SSO"
+            )
 
-        if dash_resp.status_code == 200 and not self._is_login_page(dash_resp):
-            now_iso = datetime.now(UTC).isoformat()
-            self.last_sso_renewal = now_iso
-            self.sso_renewals += 1
-            if not self.session_established_at:
-                self.session_established_at = now_iso
-            _LOGGER.info("SSO renewal successful")
-            return True
-
-        self.okta_session_expired_at = datetime.now(UTC).isoformat()
-        raise PsegOktaSessionExpired("Failed to establish portal session after SAML post")
+        self.last_sso_renewal = datetime.now(UTC).isoformat()
+        self.sso_renewals += 1
+        self._mark_session_ok()
+        _LOGGER.info("SSO renewal successful")
+        return True
 
     @_locked
     def keepalive(self) -> bool:
-        """Cheap keepalive check run every 30 minutes in the executor."""
+        """Cheap keepalive check run every 30 minutes in the executor.
+
+        Returns False on transient errors; raises PsegOktaSessionExpired when the Okta
+        session is gone so the coordinator can start reauth.
+        """
         self.last_keepalive = datetime.now(UTC).isoformat()
         try:
-            resp = self.session.get(f"{PORTAL_BASE_URL}/Dashboard", allow_redirects=True, timeout=15)
-            if resp.status_code == 200 and not self._is_login_page(resp):
-                return True
-            return self.renew_sso()
-        except (PsegTransientError, requests.RequestException) as err:
+            return self.ensure_session()
+        except PsegTransientError as err:
             _LOGGER.debug("Keepalive network check encountered transient error: %s", err)
             return False
 
@@ -284,24 +326,23 @@ class PsegClient:
     @_locked
     def _get_verification_token(self) -> str:
         """Extract __RequestVerificationToken from /Dashboard, renewing session if needed."""
-        try:
-            resp = self.session.get(f"{PORTAL_BASE_URL}/Dashboard", timeout=25)
-        except requests.RequestException as err:
-            raise PsegTransientError(f"Network error fetching /Dashboard: {err}") from err
+        resp = self._get_dashboard(timeout=25)
 
         if self._is_login_page(resp):
             _LOGGER.debug("Portal session expired during token check; attempting renewal")
-            self.ensure_session()
-            try:
-                resp = self.session.get(f"{PORTAL_BASE_URL}/Dashboard", timeout=25)
-            except requests.RequestException as err:
-                raise PsegTransientError(f"Network error fetching /Dashboard after renewal: {err}") from err
+            self.renew_sso()
+            resp = self._get_dashboard(timeout=25)
+            if self._is_login_page(resp):
+                self._mark_okta_expired()
+                raise PsegOktaSessionExpired("Portal still logged out after SSO renewal")
 
-        dash_html = resp.text
-        soup = BeautifulSoup(dash_html, "html.parser")
+        soup = BeautifulSoup(resp.text, "html.parser")
         tag = soup.find("input", attrs={"name": "__RequestVerificationToken"})
         if not tag or not tag.get("value"):
-            raise PsegOktaSessionExpired("Session invalid: __RequestVerificationToken not found on /Dashboard")
+            # Logged in (no redirect to sign-in) but no token: maintenance page or a
+            # layout change. Retry next cycle instead of forcing reauth.
+            raise PsegTransientError("__RequestVerificationToken not found on /Dashboard")
+        self._mark_session_ok()
         return str(tag["value"])
 
     @_locked

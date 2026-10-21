@@ -23,6 +23,10 @@ SAMPLE_AUTOPOST_FORM = f"""
 </html>
 """
 
+# MyMeter bounces anonymous /Dashboard requests to its public home page.
+LOGGED_OUT_REDIRECT = {"status_code": 302, "headers": {"Location": "/"}}
+PORTAL_HOME = "<html><body><a href='/Saml/okta-prod/SignIn'>Sign in</a></body></html>"
+
 SAMPLE_OKTA_WIDGET = """
 <html>
   <head><title>Okta Sign-In</title></head>
@@ -86,8 +90,7 @@ def test_sso_renewal_success() -> None:
     client = PsegClient(okta_cookies="idx=mock_idx")
 
     with requests_mock.Mocker(session=client.session) as m:
-        # First check to /Dashboard returns 302 to login or login page
-        m.get(f"{PORTAL_BASE_URL}/Dashboard", text="Please sign in", status_code=200)
+        m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
 
         # SSO Sign-In URL returns auto-post form
         m.get(
@@ -107,7 +110,7 @@ def test_sso_renewal_success() -> None:
         m.get(
             f"{PORTAL_BASE_URL}/Dashboard",
             [
-                {"text": "Login", "status_code": 200},  # Initial ensure_session check
+                LOGGED_OUT_REDIRECT,  # Initial ensure_session check bounces to home
                 {"text": "<html><head><title>Dashboard</title></head><body><h1>Welcome</h1></body></html>", "status_code": 200},  # Verification after SSO
             ],
         )
@@ -123,7 +126,8 @@ def test_sso_renewal_okta_widget_expired() -> None:
     client = PsegClient(okta_cookies="idx=expired_token")
 
     with requests_mock.Mocker(session=client.session) as m:
-        m.get(f"{PORTAL_BASE_URL}/Dashboard", text="Login", status_code=200)
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
         m.get(
             f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn",
             text=SAMPLE_OKTA_WIDGET,
@@ -148,7 +152,8 @@ def test_sso_renewal_unauthorized_form_action() -> None:
     </body></html>
     """
     with requests_mock.Mocker(session=client.session) as m:
-        m.get(f"{PORTAL_BASE_URL}/Dashboard", text="Login", status_code=200)
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
         m.get(
             f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn",
             text=malicious_form,
@@ -197,3 +202,113 @@ def test_custom_price_per_kwh() -> None:
     parsed = client._parse_chart_data(data)
     assert parsed["latest_kwh"] == 10.0
     assert parsed["latest_cost"] == 3.0  # 10.0 * 0.30
+
+
+# --- Review r1 H4: transient errors must never be classified as an expired Okta session ---
+
+DASHBOARD_WITH_TOKEN = (
+    '<html><input name="__RequestVerificationToken" value="tok"/>'
+    '<a href="/Account/LogOff">Log out</a><script>var loginUrl="/";</script>'
+    "<p>Sign in to see more</p></html>"
+)
+CHART_JSON = {"Data": {"series": [{"name": "Electric Meter 1", "data": [{"y": 1.0, "hs": {"start": "10/20/2026"}}]}]}}
+
+
+def test_sso_signin_5xx_is_transient() -> None:
+    """A 503 from the SSO endpoint is an outage, not an expired session."""
+    client = PsegClient(okta_cookies="idx=abc")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+        m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", status_code=503, text="<html>Service Unavailable</html>")
+        with pytest.raises(PsegTransientError):
+            client.ensure_session()
+    assert client.okta_session_expired_at is None
+
+
+def test_dashboard_5xx_is_transient_without_renewal() -> None:
+    """A 5xx from /Dashboard is transient and must not trigger SSO renewal."""
+    client = PsegClient(portal_cookies="MM_SID=x")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", status_code=502, text="Bad gateway, please login later")
+        sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_OKTA_WIDGET)
+        with pytest.raises(PsegTransientError):
+            client.ensure_session()
+        assert client.keepalive() is False
+    assert sso.called is False
+    assert client.okta_session_expired_at is None
+
+
+def test_logged_in_page_mentioning_login_is_logged_in() -> None:
+    """Dashboard wording ("Log out", loginUrl, "Sign in") is not a logged-out signal."""
+    client = PsegClient(portal_cookies="MM_SID=x")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_OKTA_WIDGET)
+        assert client.ensure_session() is True
+        assert client.keepalive() is True
+    assert sso.called is False
+
+
+def test_missing_token_without_login_redirect_is_transient() -> None:
+    """A maintenance page at /Dashboard (no token, no redirect) is transient."""
+    client = PsegClient(portal_cookies="MM_SID=x")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            text="<html>Scheduled maintenance. Please sign in again later.</html>",
+        )
+        with pytest.raises(PsegTransientError, match="RequestVerificationToken"):
+            client.fetch_energy_data(14)
+    assert client.okta_session_expired_at is None
+
+
+def test_sso_page_without_saml_form_is_transient() -> None:
+    """An unexpected SSO page (no widget, no SAML form) is transient, not expired."""
+    client = PsegClient(okta_cookies="idx=abc")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+        m.get(
+            f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn",
+            text="<html>Something went wrong. Please login again.</html>",
+        )
+        with pytest.raises(PsegTransientError, match="SAML response form not found"):
+            client.ensure_session()
+    assert client.okta_session_expired_at is None
+
+
+def test_redirect_to_okta_signin_path_is_expired() -> None:
+    """Landing on Okta's /signin path (even without widget markers) means logged out."""
+    client = PsegClient(okta_cookies="idx=old")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+        m.get(
+            f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn",
+            status_code=302,
+            headers={"Location": f"https://{OKTA_HOST}/signin?fromURI=%2Fapp"},
+        )
+        m.get(f"https://{OKTA_HOST}/signin", text="<html>Loading...</html>")
+        with pytest.raises(PsegOktaSessionExpired):
+            client.ensure_session()
+    assert client.okta_session_expired_at is not None
+
+
+def test_expired_flag_cleared_after_successful_fetch() -> None:
+    """okta_session_expired_at is cleared once the portal session works again."""
+    client = PsegClient(portal_cookies="MM_SID=x")
+    client.okta_session_expired_at = "2026-10-20T00:00:00+00:00"
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="")
+        m.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=CHART_JSON)
+        data = client.fetch_energy_data(14)
+    assert data["latest_kwh"] == 1.0
+    assert client.okta_session_expired_at is None
+
+    client.okta_session_expired_at = "2026-10-20T00:00:00+00:00"
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        assert client.keepalive() is True
+    assert client.okta_session_expired_at is None
