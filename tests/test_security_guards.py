@@ -72,6 +72,7 @@ def test_guard_no_cookie_values_in_caplog(caplog) -> None:
 
     with requests_mock.Mocker(session=client.session) as m:
         m.get(f"{PORTAL_BASE_URL}/Dashboard", text="<html>Dashboard OK</html>", status_code=200)
+        _mock_sso_ok(m)
         client.ensure_session()
         client.keepalive()
 
@@ -192,3 +193,14 @@ async def test_guard_no_cookie_values_in_caplog_on_error_paths(hass: HomeAssista
     assert len(messages) == len(scenarios)
     _assert_no_secrets("\n".join(messages))
     _assert_no_secrets(caplog.text)
+
+def _mock_sso_ok(m) -> None:
+    """Okta session alive: SignIn returns the SAML auto-post form, ACS accepts it."""
+    m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=_AUTOPOST_FORM)
+    m.post(f"{PORTAL_BASE_URL}/Saml/okta-prod/Acs", status_code=200, text="ok")
+
+
+_AUTOPOST_FORM = (
+    f'<form method="POST" action="{PORTAL_BASE_URL}/Saml/okta-prod/Acs">'
+    '<input type="hidden" name="SAMLResponse" value="assertion"/></form>'
+)

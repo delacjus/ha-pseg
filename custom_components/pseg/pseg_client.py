@@ -340,14 +340,19 @@ class PsegClient:
 
     @_locked
     def keepalive(self) -> bool:
-        """Cheap keepalive check run every 30 minutes in the executor.
+        """Keep the Okta session alive: run a full SSO round trip in the executor.
+
+        Live 2026-10-21: PSE&G's Okta session died ~30 min after the last Okta
+        request, while the old keepalive only touched the portal (whose MM_SID also
+        lapses in under 30 min). Going through Okta every KEEPALIVE_INTERVAL_MINUTES
+        resets the Okta idle timer and leaves a fresh portal session for the poll.
 
         Returns False on transient errors; raises PsegOktaSessionExpired when the Okta
         session is gone so the coordinator can start reauth.
         """
         self.last_keepalive = datetime.now(UTC).isoformat()
         try:
-            return self.ensure_session()
+            return self.renew_sso()
         except PsegTransientError as err:
             _LOGGER.debug("Keepalive network check encountered transient error: %s", err)
             return False

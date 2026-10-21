@@ -18,7 +18,8 @@ DEFAULT_PRICE_PER_KWH = 0.247
 # Placeholder the client reports when the chart has no meter series.
 DEFAULT_METER_NAME = "PSE&G Electric Meter"
 DEFAULT_SCAN_INTERVAL_HOURS = 4
-KEEPALIVE_INTERVAL_MINUTES = 30
+# Must stay below PSE&G's Okta idle timeout (observed ~30 min, 2026-10-21).
+KEEPALIVE_INTERVAL_MINUTES = 10
 
 PORTAL_HOST = "mysmartenergy.nj.pseg.com"
 OKTA_HOST = "id.myaccount.pseg.com"

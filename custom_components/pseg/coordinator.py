@@ -304,7 +304,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     def start_keepalive(self) -> None:
-        """Start recurring 30-minute keepalive."""
+        """Start the recurring Okta keepalive (every KEEPALIVE_INTERVAL_MINUTES)."""
         if self._unsub_keepalive is None:
             self._unsub_keepalive = async_track_time_interval(
                 self.hass,

@@ -183,11 +183,17 @@ def test_keepalive() -> None:
 
     with requests_mock.Mocker(session=client.session) as m:
         m.get(f"{PORTAL_BASE_URL}/Dashboard", text="<h1>Dashboard</h1>", status_code=200)
+        sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_AUTOPOST_FORM)
+        m.post(f"https://{PORTAL_HOST}/Saml/okta-prod/Acs", text="ok")
+        # Keepalive always goes through Okta, even with a live portal session, so the
+        # Okta idle timer (~30 min observed) is reset every interval.
         assert client.keepalive() is True
         assert client.last_keepalive is not None
+        assert sso.called is True
+        assert client.sso_renewals == 1
 
         # Network blip during keepalive returns False, does not raise
-        m.get(f"{PORTAL_BASE_URL}/Dashboard", exc=requests.exceptions.ConnectionError("offline"))
+        m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", exc=requests.exceptions.ConnectionError("offline"))
         assert client.keepalive() is False
 
 
@@ -236,7 +242,6 @@ def test_dashboard_5xx_is_transient_without_renewal() -> None:
         sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_OKTA_WIDGET)
         with pytest.raises(PsegTransientError):
             client.ensure_session()
-        assert client.keepalive() is False
     assert sso.called is False
     assert client.okta_session_expired_at is None
 
@@ -248,7 +253,6 @@ def test_logged_in_page_mentioning_login_is_logged_in() -> None:
         m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
         sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_OKTA_WIDGET)
         assert client.ensure_session() is True
-        assert client.keepalive() is True
     assert sso.called is False
 
 
@@ -312,6 +316,8 @@ def test_expired_flag_cleared_after_successful_fetch() -> None:
     client.okta_session_expired_at = "2026-10-20T00:00:00+00:00"
     with requests_mock.Mocker(session=client.session) as m:
         m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_AUTOPOST_FORM)
+        m.post(f"https://{PORTAL_HOST}/Saml/okta-prod/Acs", text="ok")
         assert client.keepalive() is True
     assert client.okta_session_expired_at is None
 
@@ -653,3 +659,14 @@ def test_merge_skips_missing_usage_and_bad_date(caplog: pytest.LogCaptureFixture
         ("2026-10-20", 3.0)
     ]
     assert "Skipping" in caplog.text
+
+
+def test_keepalive_reports_okta_expiry() -> None:
+    """A keepalive that hits the Okta sign-in widget raises so reauth can start."""
+    client = PsegClient(okta_cookies="idx=x", portal_cookies="MM_SID=x")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_OKTA_WIDGET)
+        with pytest.raises(PsegOktaSessionExpired):
+            client.keepalive()
+    assert client.okta_session_expired_at is not None

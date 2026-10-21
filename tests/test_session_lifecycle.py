@@ -215,6 +215,7 @@ async def test_set_cookie_rotation_persisted_and_restored(hass: HomeAssistant) -
             # Host-only cookie (no Domain attribute), as the ASP.NET portal issues it.
             headers={"Set-Cookie": "MM_SID=ROTATED; Path=/; Secure; HttpOnly"},
         )
+        _mock_sso_ok(m)
         assert client.keepalive() is True
     assert _jar(client, "MM_SID") == ["ROTATED"]
 
@@ -377,3 +378,14 @@ async def test_keepalive_finishing_after_unload_is_ignored(hass: HomeAssistant, 
 
     assert [c["value"] for c in entry.data["cookies"]] == ["OLD"]
     assert _reauth_flows(hass) == []
+
+def _mock_sso_ok(m) -> None:
+    """Okta session alive: SignIn returns the SAML auto-post form, ACS accepts it."""
+    m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=_AUTOPOST_FORM)
+    m.post(f"{PORTAL_BASE_URL}/Saml/okta-prod/Acs", status_code=200, text="ok")
+
+
+_AUTOPOST_FORM = (
+    f'<form method="POST" action="{PORTAL_BASE_URL}/Saml/okta-prod/Acs">'
+    '<input type="hidden" name="SAMLResponse" value="assertion"/></form>'
+)
