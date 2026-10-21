@@ -87,7 +87,9 @@ class AllowlistedSession(requests.Session):
             raise PsegSecurityError(f"Request to {parsed.hostname} blocked: port {port}")
         resp = super().send(request, **kwargs)
         # Diagnostics only: host/path/status of each hop, never queries or cookies.
-        self.trace.append(f"{request.method} {parsed.hostname}{parsed.path} -> {resp.status_code}")
+        # First path segment only: deeper segments could carry ids or tokens.
+        route = "/" + parsed.path.strip("/").split("/", 1)[0]
+        self.trace.append(f"{request.method} {parsed.hostname}{route} -> {resp.status_code}")
         del self.trace[:-20]
         return resp
 
@@ -177,32 +179,31 @@ class PsegClient:
                 self.session.cookies.set(name, val, domain=domain, path="/", secure=True)
 
     def _dedupe_domain_variants(self) -> None:
-        """Drop a host-only cookie superseded by a newer server-set '.host' copy.
+        """Keep one copy when a cookie exists both host-only and as '.host'.
 
-        Pasted cookies are stored host-only. If the portal re-issues one (e.g. a
-        rotated MM_RememberMe) with Domain=.host, both would be sent and persisted,
-        old value first. A host-only copy is dropped only when it still holds the
-        value it was seeded with AND its dotted twin arrived after seeding (absent
-        from the seed, or changed since). A host-only cookie the server set or
-        updated later is never dropped, whatever older dotted copy exists.
+        Pasted cookies are stored host-only; the portal or Okta may later set the
+        same name with Domain=.host (e.g. a rotated MM_RememberMe or idx). Both
+        would be sent and persisted, old value first. "Newer" = changed since
+        construction (_seeded): the copy that changed wins and the other is
+        dropped. If both changed, the dotted (server-set) copy wins. If neither
+        changed, both are left as they were seeded.
         """
         jar = self.session.cookies
         seeded = getattr(self, "_seeded", {})
-        fresh_dotted = {
-            (c.name, c.domain.lstrip("."), c.path)
-            for c in jar
-            if (c.domain or "").startswith(".")
-            and seeded.get((c.name, c.domain, c.path)) != c.value
-        }
-        for c in list(jar):
-            key = (c.name, c.domain, c.path)
-            if (
-                not (c.domain or "").startswith(".")
-                and key in fresh_dotted
-                and key in seeded
-                and seeded[key] == c.value
-            ):
-                jar.clear(c.domain, c.path, c.name)
+        by_key: dict[tuple[str, str, str], dict[bool, Any]] = {}
+        for c in jar:
+            dotted = (c.domain or "").startswith(".")
+            by_key.setdefault((c.name, (c.domain or "").lstrip("."), c.path), {})[dotted] = c
+        for pair in by_key.values():
+            if len(pair) < 2:
+                continue
+            host, dot = pair[False], pair[True]
+            host_changed = seeded.get((host.name, host.domain, host.path)) != host.value
+            dot_changed = seeded.get((dot.name, dot.domain, dot.path)) != dot.value
+            if host_changed and not dot_changed:
+                jar.clear(dot.domain, dot.path, dot.name)
+            elif dot_changed:
+                jar.clear(host.domain, host.path, host.name)
 
     @_locked
     def export_cookies(self) -> list[dict[str, Any]]:
@@ -332,6 +333,9 @@ class PsegClient:
             return self._renew()
         if resp.status_code != 200:
             raise PsegTransientError(f"Unexpected HTTP {resp.status_code} from /Dashboard")
+        if not self._on_dashboard(resp):
+            # e.g. a /Maintenance page: neither signed in nor signed out.
+            raise PsegTransientError("PSE&G portal did not serve /Dashboard (maintenance?)")
         self._mark_session_ok()
         return True
 

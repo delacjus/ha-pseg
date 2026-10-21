@@ -826,5 +826,39 @@ def test_dedupe_keeps_newer_host_only_cookie_over_older_dotted() -> None:
         {"name": "idx", "value": "seed", "domain": OKTA_HOST, "path": "/"},
     ])
     client.session.cookies.set("idx", "fresh", domain=OKTA_HOST, path="/")
-    values = sorted(c["value"] for c in client.export_cookies() if c["name"] == "idx")
-    assert values == ["fresh", "old"]
+    values = [c["value"] for c in client.export_cookies() if c["name"] == "idx"]
+    assert values == ["fresh"]
+
+
+# --- Review 6fcb6d2a (Remember Me r3) ---
+
+
+def test_initial_maintenance_redirect_is_transient_not_success() -> None:
+    client = PsegClient(portal_cookies="MM_SID=x")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", status_code=302, headers={"Location": "/Maintenance"})
+        m.get(f"{PORTAL_BASE_URL}/Maintenance", text="<html>Scheduled maintenance</html>")
+        with pytest.raises(PsegTransientError):
+            client.ensure_session()
+    assert client.session_established_at is None
+
+
+def test_untouched_seed_pair_kept_and_dotted_rotation_wins() -> None:
+    pair = [
+        {"name": "MM_RememberMe", "value": "a", "domain": f".{PORTAL_HOST}", "path": "/"},
+        {"name": "MM_RememberMe", "value": "b", "domain": PORTAL_HOST, "path": "/"},
+    ]
+    untouched = PsegClient(cookie_list=pair)
+    assert sorted(c["value"] for c in untouched.export_cookies() if c["name"] == "MM_RememberMe") == ["a", "b"]
+    rotated = PsegClient(cookie_list=pair)
+    rotated.session.cookies.set("MM_RememberMe", "new", domain=f".{PORTAL_HOST}", path="/")
+    assert [c["value"] for c in rotated.export_cookies() if c["name"] == "MM_RememberMe"] == ["new"]
+
+
+def test_diag_trace_keeps_only_first_path_segment() -> None:
+    client = PsegClient(portal_cookies="MM_SID=x")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard/secret_token_123?x=y", text="ok")
+        client.session.get(f"{PORTAL_BASE_URL}/Dashboard/secret_token_123?x=y")
+    diag = client.auth_diagnostics()
+    assert "secret_token_123" not in diag and "x=y" not in diag and "MM_SID" in diag
