@@ -40,6 +40,8 @@ _SIGNIN_PATH_MARKERS = ("/signin", "/sign-in", "/login")
 _LOGIN_PATH_MARKERS = (*_SIGNIN_PATH_MARKERS, "/saml/")
 # Okta Identity Engine sign-in widget markers (case-sensitive JS identifiers).
 _OKTA_WIDGET_MARKERS = ("OktaSignIn", "stateToken")
+# MyMeter's anonymous home page renders its local login form (live 2026-10-21).
+_PORTAL_LOGIN_FORM_MARKERS = ('name="LoginEmail"', 'id="LoginPassword"')
 
 
 class PsegError(Exception):
@@ -163,9 +165,23 @@ class PsegClient:
             if name:
                 self.session.cookies.set(name, val, domain=domain, path="/", secure=True)
 
+    def _dedupe_domain_variants(self) -> None:
+        """Drop host-only copies shadowed by a server-set '.host' cookie of the same name.
+
+        Pasted cookies are stored host-only. If the portal re-issues one (e.g. a
+        rotated MM_RememberMe) with Domain=.host, both would be sent and persisted,
+        old value first. The dotted copy can only come from the server, so it wins.
+        """
+        jar = self.session.cookies
+        dotted = {(c.name, c.domain.lstrip("."), c.path) for c in jar if (c.domain or "").startswith(".")}
+        for c in list(jar):
+            if not (c.domain or "").startswith(".") and (c.name, c.domain, c.path) in dotted:
+                jar.clear(c.domain, c.path, c.name)
+
     @_locked
     def export_cookies(self) -> list[dict[str, Any]]:
         """Export cookies as a list of dicts for persistence."""
+        self._dedupe_domain_variants()
         cookie_data = []
         for c in self.session.cookies:
             cookie_data.append({
@@ -207,6 +223,12 @@ class PsegClient:
         if any(marker in path for marker in _LOGIN_PATH_MARKERS):
             return True
         if resp.status_code in (401, 403):
+            return True
+        # Not applied on /Dashboard itself: its logged-in markup is unverified and a
+        # false hit there would read every live session as signed out.
+        if not path.rstrip("/").endswith("/dashboard") and any(
+            marker in resp.text for marker in _PORTAL_LOGIN_FORM_MARKERS
+        ):
             return True
         return self._is_okta_widget(resp)
 
@@ -304,11 +326,14 @@ class PsegClient:
             except requests.RequestException as err:
                 raise PsegTransientError(f"Network error during Remember Me sign-in: {err}") from err
             resp = self._get_dashboard()
-        if self._is_login_page(resp):
+        on_dashboard = urllib.parse.urlparse(resp.url).path.lower().rstrip("/").endswith("/dashboard")
+        if self._is_login_page(resp) or (resp.status_code == 200 and not on_dashboard):
+            # Anything but the dashboard (e.g. a bounce to /Home/Index) is not a login.
             self._mark_okta_expired()
             raise PsegOktaSessionExpired("MyMeter Remember Me sign-in expired or was rejected")
         if resp.status_code != 200:
             raise PsegTransientError(f"Unexpected HTTP {resp.status_code} after Remember Me sign-in")
+        self._dedupe_domain_variants()
         self.last_sso_renewal = datetime.now(UTC).isoformat()
         self.sso_renewals += 1
         self._mark_session_ok()
@@ -409,9 +434,10 @@ class PsegClient:
         """
         self.last_keepalive = datetime.now(UTC).isoformat()
         try:
-            if not self.has_okta_session:
-                # Remember Me accounts: no Okta idle timer to feed; just keep the
-                # portal session warm (ensure_session renews from MM_RememberMe).
+            if self.has_remember_me or not self.has_okta_session:
+                # Remember Me accounts: keep the portal session warm; ensure_session
+                # renews from MM_RememberMe. Feeding Okta here would only hit its
+                # ~1 h cap and force a reauth the remember cookie does not need.
                 return self.ensure_session()
             return self.renew_sso()
         except PsegTransientError as err:
@@ -430,7 +456,7 @@ class PsegClient:
 
         if self._is_login_page(resp):
             _LOGGER.debug("Portal session expired during token check; attempting renewal")
-            self.renew_sso()
+            self._renew()
             resp = self._get_dashboard(timeout=25)
             if self._is_login_page(resp):
                 self._raise_post_renewal_logged_out(resp)

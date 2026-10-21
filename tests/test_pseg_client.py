@@ -729,3 +729,65 @@ def test_keepalive_remember_me_only_stays_on_portal() -> None:
         sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_AUTOPOST_FORM)
         assert client.keepalive() is True
     assert sso.called is False
+
+
+# --- Review f73a0c0e (Remember Me FIX-FIRST) ---
+
+ANON_HOME = '<html><form action="/Home/Login"><input name="LoginEmail"/><input id="LoginPassword"/></form></html>'
+
+
+def test_poll_token_renews_via_remember_me_not_okta() -> None:
+    """A poll after MM_SID lapse renews from MM_RememberMe (incl. the / fallback), never Okta."""
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            [LOGGED_OUT_REDIRECT, LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}, {"text": DASHBOARD_WITH_TOKEN}],
+        )
+        home = m.get(f"{PORTAL_BASE_URL}/", text=ANON_HOME)
+        sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_OKTA_WIDGET)
+        assert client._get_verification_token() == "tok"
+    assert sso.called is False
+    assert home.called is True
+    assert client.sso_renewals == 1
+
+
+def test_keepalive_mixed_jar_prefers_remember_me() -> None:
+    """With both cookie types, keepalive stays on the portal (Okta caps at ~1 h)."""
+    client = PsegClient(okta_cookies="idx=x", portal_cookies=REMEMBER_PORTAL)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_AUTOPOST_FORM)
+        assert client.keepalive() is True
+    assert sso.called is False
+
+
+def test_remember_me_bounce_to_anonymous_page_is_rejected() -> None:
+    """A 200 that is not the dashboard (anon /Home/Index) is not a successful renewal."""
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", status_code=302, headers={"Location": "/Home/Index"})
+        m.get(f"{PORTAL_BASE_URL}/Home/Index", text="<html>Welcome</html>")
+        m.get(f"{PORTAL_BASE_URL}/", text=ANON_HOME)
+        with pytest.raises(PsegOktaSessionExpired):
+            client.renew_remember_me()
+    assert client.sso_renewals == 0
+
+
+def test_anonymous_login_form_counts_as_logged_out() -> None:
+    client = PsegClient(portal_cookies="MM_SID=x")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", status_code=302, headers={"Location": "/Home/Index"})
+        m.get(f"{PORTAL_BASE_URL}/Home/Index", text=ANON_HOME)
+        resp = client._get_dashboard()
+    assert client._is_login_page(resp) is True
+
+
+def test_rotated_dotted_cookie_replaces_pasted_host_cookie() -> None:
+    """A server-set .host MM_RememberMe supersedes the pasted host-only copy on export."""
+    client = PsegClient(portal_cookies="MM_RememberMe=old")
+    client.session.cookies.set("MM_RememberMe", "new", domain=f".{PORTAL_HOST}", path="/")
+    exported = [c for c in client.export_cookies() if c["name"] == "MM_RememberMe"]
+    assert [c["value"] for c in exported] == ["new"]
+    restored = PsegClient(cookie_list=client.export_cookies())
+    assert [c.value for c in restored.session.cookies if c.name == "MM_RememberMe"] == ["new"]
