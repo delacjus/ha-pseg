@@ -7,7 +7,12 @@ import re
 from typing import Any
 
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigEntry, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlowResult,
+    OptionsFlow,
+    OptionsFlowWithReload,
+)
 from homeassistant.core import callback
 import requests
 import voluptuous as vol
@@ -225,8 +230,8 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return PsegOptionsFlowHandler()
 
 
-class PsegOptionsFlowHandler(OptionsFlow):
-    """Handle options flow for PSE&G Energy."""
+class PsegOptionsFlowHandler(OptionsFlowWithReload):
+    """Handle options flow for PSE&G Energy (HA reloads the entry on save)."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None

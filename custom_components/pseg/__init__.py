@@ -110,8 +110,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     coordinator.start_keepalive()
 
+    # No update listener: cookie persistence updates entry.data on every rotation and
+    # must not reload. Options reload via OptionsFlowWithReload; reauth/reconfigure via
+    # async_update_reload_and_abort.
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
     return True
 
@@ -150,8 +152,3 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         _LOGGER.info("Migrated PSE&G entry to version 2 (stripped stored credentials and add-on URLs)")
 
     return True
-
-
-async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload config entry after options update."""
-    await hass.config_entries.async_reload(entry.entry_id)
