@@ -5,6 +5,7 @@ from unittest.mock import patch
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.pseg.const import (
@@ -12,6 +13,7 @@ from custom_components.pseg.const import (
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
     CONF_PRICE_PER_KWH,
+    DEFAULT_METER_NAME,
     DOMAIN,
 )
 from custom_components.pseg.pseg_client import (
@@ -266,3 +268,53 @@ async def test_options_flow_rate_update(hass: HomeAssistant) -> None:
     )
     assert result2["type"] == FlowResultType.CREATE_ENTRY
     assert result2["data"][CONF_PRICE_PER_KWH] == 0.325
+
+
+@pytest.mark.parametrize(
+    ("fetch_kwargs", "error"),
+    [
+        ({"side_effect": PsegTransientError("chart 503")}, "cannot_connect"),
+        ({"side_effect": RuntimeError("parse error")}, "cannot_connect"),
+        ({"return_value": {}}, "cannot_connect"),
+        ({"return_value": {"meter": DEFAULT_METER_NAME}}, "cannot_connect"),
+        ({"side_effect": PsegOktaSessionExpired("redirect")}, "okta_session_invalid"),
+    ],
+)
+async def test_user_flow_meter_lookup_failure_creates_no_entry(
+    hass: HomeAssistant, fetch_kwargs, error
+) -> None:
+    """A failed meter lookup must not create an entry pinned to a placeholder unique_id."""
+    with (
+        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch("custom_components.pseg.pseg_client.PsegClient.fetch_energy_data", **fetch_kwargs),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+            data={CONF_OKTA_COOKIES: "idx=valid_token"},
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": error}
+    assert hass.config_entries.async_entries(DOMAIN) == []
+
+
+async def test_reauth_meter_lookup_failure_is_not_account_mismatch(hass: HomeAssistant) -> None:
+    """A transient meter lookup failure during reauth shows cannot_connect, not a mismatch abort."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="11223344", data={CONF_OKTA_COOKIES: "idx=old"}
+    )
+    entry.add_to_hass(hass)
+    result = await entry.start_reauth_flow(hass)
+    with (
+        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            side_effect=PsegTransientError("chart 503"),
+        ),
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"], user_input={CONF_OKTA_COOKIES: "idx=fresh"}
+        )
+    assert result2["type"] == FlowResultType.FORM
+    assert result2["errors"] == {"base": "cannot_connect"}
+    assert entry.data[CONF_OKTA_COOKIES] == "idx=old"

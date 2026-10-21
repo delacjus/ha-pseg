@@ -21,6 +21,7 @@ import requests
 
 from .const import (
     ALLOWED_HOSTS,
+    DEFAULT_METER_NAME,
     DEFAULT_PRICE_PER_KWH,
     OKTA_HOST,
     PORTAL_BASE_URL,
@@ -565,7 +566,7 @@ class PsegClient:
             elif "Temperature" in name:
                 temp_series = s
 
-        meter_name = meter_series.get("name") or "PSE&G Electric Meter"
+        meter_name = meter_series.get("name") or DEFAULT_METER_NAME
         detailed_pts = meter_series.get("data", [])
         temp_pts = temp_series.get("data", [])
 

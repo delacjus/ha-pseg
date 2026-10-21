@@ -14,6 +14,8 @@ CONF_PRICE_PER_KWH = "price_per_kwh"
 CONF_METER_ID = "meter_id"
 
 DEFAULT_PRICE_PER_KWH = 0.247
+# Placeholder the client reports when the chart has no meter series.
+DEFAULT_METER_NAME = "PSE&G Electric Meter"
 DEFAULT_SCAN_INTERVAL_HOURS = 4
 KEEPALIVE_INTERVAL_MINUTES = 30
 

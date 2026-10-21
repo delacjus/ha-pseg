@@ -22,6 +22,7 @@ from .const import (
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
     CONF_PRICE_PER_KWH,
+    DEFAULT_METER_NAME,
     DEFAULT_PRICE_PER_KWH,
     DOMAIN,
 )
@@ -64,19 +65,30 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors["base"] = "unknown"
             return errors, None, None
 
+        # The meter id becomes the entry unique_id (duplicate + reauth account checks),
+        # so a failed lookup must fail the step rather than fall back to a placeholder
+        # that every account would share.
         try:
             data = await self.hass.async_add_executor_job(client.fetch_energy_data, 1)
-            meter_str = str(data.get("meter") or "")
+        except PsegOktaSessionExpired:
+            errors["base"] = "okta_session_invalid"
+            return errors, None, None
+        except Exception as err:
+            _LOGGER.debug("Could not determine meter id during config flow: %s", type(err).__name__)
+            errors["base"] = "cannot_connect"
+            return errors, None, None
+
+        meter_str = str(data.get("meter") or "")
+        if meter_str and meter_str != DEFAULT_METER_NAME:
             match = re.search(r"\d+", meter_str)
             if match:
                 meter_id = match.group(0)
             else:
                 meter_id = re.sub(r"[^a-z0-9_]+", "_", meter_str.lower()).strip("_")
-        except Exception as err:
-            _LOGGER.debug("Could not determine meter id during config flow: %s", err)
 
         if not meter_id:
-            meter_id = "electric_meter"
+            errors["base"] = "cannot_connect"
+            return errors, None, None
 
         return errors, client, meter_id
 
