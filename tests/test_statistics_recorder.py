@@ -366,3 +366,31 @@ async def test_recorder_commit_wait_times_out_and_releases_locks(coord, hass) ->
     assert not coord._stats_lock.locked()
     assert not coord._update_lock.locked()
     never.cancel()
+
+
+async def test_hung_commit_wait_does_not_freeze_poll_or_backfill(hass) -> None:
+    """Even if the whole wait hangs, poll still updates sensors and backfill fails fast."""
+    client = MagicMock()
+    client.price_per_kwh = 0.25
+    client.fetch_energy_data.return_value = {
+        "meter": "Meter 1",
+        "history_14d": _recs("2026-10-01", 2),
+        "latest_kwh": 10.0,
+    }
+    client.fetch_history_range.return_value = _recs("2026-09-01", 5)
+    client.export_cookies.return_value = []
+    coord = PsegDataUpdateCoordinator(hass, client, {})
+
+    async def hang(_hass) -> None:
+        await asyncio.Event().wait()  # never set
+
+    with (
+        patch.object(coord_mod, "RECORDER_COMMIT_TIMEOUT", 0.2),
+        patch.object(coord_mod, "_async_wait_for_recorder_commit", hang),
+    ):
+        data = await asyncio.wait_for(coord._async_update_data(), 5)
+        assert data["latest_kwh"] == 10.0
+        with pytest.raises(coord_mod.PsegStatisticsError):
+            await asyncio.wait_for(coord.async_backfill_history("2026-09-01", "2026-09-05"), 5)
+    assert not coord._update_lock.locked()
+    assert not coord._stats_lock.locked()

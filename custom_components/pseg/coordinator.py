@@ -174,21 +174,13 @@ async def _async_wait_for_recorder_commit(hass: HomeAssistant) -> None:
 
     async_add_external_statistics only queues an import task on the recorder thread;
     the next baseline query runs on a different executor and would otherwise read the
-    pre-import sums.
-
-    Bounded: this runs while the update/stats locks are held, and a broken recorder
-    never runs the synchronize task, which would freeze polls and backfills forever.
+    pre-import sums. The caller bounds it with RECORDER_COMMIT_TIMEOUT: it runs while
+    the update/stats locks are held, and a broken recorder never runs the synchronize
+    task, which would freeze polls and backfills forever.
     """
     instance = hass.data.get(DATA_INSTANCE)
-    if instance is None:
-        return
-    try:
-        async with asyncio.timeout(RECORDER_COMMIT_TIMEOUT):
-            await instance.async_block_till_done()
-    except TimeoutError as err:
-        raise PsegStatisticsError(
-            f"Recorder did not commit the statistics import within {RECORDER_COMMIT_TIMEOUT}s"
-        ) from err
+    if instance is not None:
+        await instance.async_block_till_done()
 
 
 def build_external_statistics(
@@ -541,7 +533,14 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         async_add_external_statistics(self.hass, consumption_metadata, consumption_stats)
         async_add_external_statistics(self.hass, cost_metadata, cost_stats)
-        await _async_wait_for_recorder_commit(self.hass)
+        # Bounded at the call site so nothing inside the wait can hold the locks forever.
+        try:
+            async with asyncio.timeout(RECORDER_COMMIT_TIMEOUT):
+                await _async_wait_for_recorder_commit(self.hass)
+        except TimeoutError as err:
+            raise PsegStatisticsError(
+                f"Recorder did not commit the statistics import within {RECORDER_COMMIT_TIMEOUT}s"
+            ) from err
         _LOGGER.info(
             "Imported %d daily external statistics (range: %s to %s, id: %s)",
             len(sorted_records),
