@@ -52,25 +52,39 @@ does not solve CAPTCHA, read credentials or cookies, or log in for you.
 5. Click the toolbar button once. Nothing is injected before this click.
 
 Expected on a working injection: a panel labelled "PSE&G verification helper
-(experimental)" appears bottom-right, with status "Ready. Waiting for the
-site's Sign In…". The toolbar title reads "injection requested. Look for the
+(experimental)" appears bottom-right, with status "Ready. Click the site's
+Login button…". The toolbar title reads "injection requested. Look for the
 panel on the page" and the badge shows `OK`.
 
 6. Click the toolbar button again: the existing panel is re-opened; the helper
    is not installed twice.
 7. Click **Close helper** in the panel. The panel disappears and the page's own
-   `window.processAjax` is restored, so the site's Sign In behaves normally
+   `window.processAjax` is restored, so the site's Login button behaves normally
    again. Reloading the tab also clears all helper state.
 8. Negative check: open `https://example.com`, click the toolbar button. No
    panel appears, nothing is injected, the title reads "Open the PSE&G MyMeter
    page first" and the badge shows `!`.
 9. To remove the extension: `chrome://extensions` -> **Remove**.
 
+## What success looks like
+
+After you click the site's Login button and complete any challenge yourself, the
+panel reports "Verification captured. The portal login is paused on purpose."
+and the portal stays on its sign-in screen. That page
+looking inert is expected: the helper stopped the site's own login request so the
+proof stays unused for Home Assistant. Press **Copy verification**, paste it into
+the masked **CAPTCHA proof** field in the Home Assistant dialog, and submit before
+the panel's countdown reaches zero (about two minutes). **Close helper** restores
+the portal's login and discards the proof.
+
 ## Verification limits (read before believing a result)
 
-- The only human observation so far is one desktop browser showing **Ready** and
-  closing the panel. Browser name/version was not recorded. Do not describe the
-  helper as browser-verified, portable across browsers, or accepted by PSE&G.
+- One desktop browser showed **Ready**, and **Close helper** removed the panel.
+  The user later reported a captured verification, but the latest screenshot
+  shows **Ready** while they report an unresponsive Login button. Capture on
+  this attempt remains unresolved. Browser name/version was not recorded. Do
+  not describe the helper as browser-verified, portable across browsers, or
+  accepted by PSE&G.
 - Badge `OK` means `chrome.scripting` accepted the request and the injection
   promise resolved. It is **not** evidence the panel rendered, and the toolbar
   wording deliberately does not claim it did. Only your eyes on the page prove

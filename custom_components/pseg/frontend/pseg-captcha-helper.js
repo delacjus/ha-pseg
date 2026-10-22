@@ -2,7 +2,7 @@
  * PSE&G MyMeter verification helper (experimental, user-invoked).
  *
  * Purpose: let a human keep the invisible reCAPTCHA v2 response that
- * MyMeter produces when they press the site's own Sign In button, instead of
+ * MyMeter produces when they press the site's own Login button, instead of
  * letting the site immediately spend it on its own /Home/Login request. The
  * human then copies the response into the masked verification field in Home
  * Assistant's PSE&G config flow.
@@ -217,9 +217,9 @@
   function updateCapturedStatus(msLeft) {
     var seconds = Math.max(0, Math.ceil(msLeft / 1000));
     setStatus(
-      "Verification captured. Press Copy verification, then paste it into the " +
-        "PSE&G verification field in Home Assistant. Nothing was sent to PSE&G. " +
-        "Expires in " +
+      "Verification captured. The portal login is paused on purpose. " +
+        "Press Copy verification, paste into Home Assistant's masked CAPTCHA " +
+        "proof field, then click Submit. Expires in " +
         seconds +
         " s."
     );
@@ -271,7 +271,10 @@
   }
 
   function copySucceeded() {
-    setFeedback("Copied. Paste it into Home Assistant now.");
+    setFeedback(
+      "Copied. Paste it into the masked CAPTCHA proof field in Home Assistant " +
+        "now, before the countdown ends."
+    );
   }
 
   function copyFailed() {
@@ -444,10 +447,10 @@
     var directions = doc.createElement("p");
     directions.setAttribute("id", HOST_ID + "-directions");
     directions.textContent =
-      "Run this before clicking Sign In. Click the site's Sign In button and solve " +
-      "the challenge yourself. Then press Copy verification and paste it into the " +
-      "PSE&G verification field in Home Assistant within 2 minutes. The helper stops " +
-      "the site's own login request so the verification stays unused. Experimental: " +
+      "Click the site's Login button and complete any CAPTCHA yourself. After " +
+      "capture, this page stays here. Press Copy verification, paste into Home " +
+      "Assistant's masked CAPTCHA proof field, and click Submit within 2 minutes. " +
+      "The helper holds the login request so HA can use the verification. Experimental: " +
       "Home Assistant may still reject it.";
     directions.style.margin = "0 0 10px 0";
     directions.style.color = "#424a53";
@@ -514,8 +517,8 @@
   }
 
   var READY_TEXT =
-    "Ready. Waiting for the site's Sign In. The helper will hold the verification " +
-    "and will not send the login request to PSE&G.";
+    "Ready. Click the site's Login button. After capture, finish in Home Assistant; " +
+    "this page will stay on the sign-in screen.";
   var MISSING_TEXT =
     "The site's login call had no verification response, so it was blocked and " +
     "nothing was sent to PSE&G. Press Sign In again and solve the challenge, or " +

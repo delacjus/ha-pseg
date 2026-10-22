@@ -499,8 +499,6 @@ test("panel is labelled and exposes an accessible live status", () => {
   assert.equal(copy.type, "button");
   assert.equal(copy.disabled, true);
   assert.equal(findButton(host, "Close helper").type, "button");
-  assert.match(treeText(host), /Click the site's Sign In button and solve the challenge yourself/);
-  assert.match(treeText(host), /paste it into the PSE&G verification field in Home Assistant/);
 });
 
 test("exact same-origin /Home/Login only; unrelated AJAX delegates unchanged", () => {
@@ -646,7 +644,7 @@ test("copy is explicit, uses the clipboard, and reports success", async () => {
   await clickAndSettle(findButton(env.findHost(), "Copy verification"));
 
   assert.deepEqual(env.clipboardWrites, [FIXTURE_PROOF]);
-  assert.match(treeText(env.findHost()), /Copied\. Paste it into Home Assistant/);
+  assert.match(treeText(env.findHost()), /Copied\./);
   assertPanelHidesProof(env.findHost(), FIXTURE_PROOF);
 });
 

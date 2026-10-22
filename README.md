@@ -80,15 +80,18 @@ browser; Home Assistant never asks you for the proof until it actually needs one
    mode**, choose **Load unpacked**, and select the extracted folder. Pin
    "PSE&G verification helper" if you like.
 4. In another tab, open `https://mysmartenergy.nj.pseg.com`, click the helper's
-   toolbar button (the panel shows **Ready**), then click **Sign In** and solve
+   toolbar button (the panel shows **Ready**), then click **Login** and solve
    the CAPTCHA yourself. While active, the helper blocks the portal's own sign-in
    request so the proof stays unused.
-5. Press **Copy verification** in the panel, then return to the Home Assistant
-   dialog, paste it into the masked **CAPTCHA proof** field, and submit. Google's
-   reCAPTCHA response is only valid for about two minutes, so capture and paste it
-   promptly; Home Assistant drops the pending sign-in after ten minutes without a
-   proof. **Close helper** (or reloading the tab) removes the panel and restores
-   the portal's login.
+5. If the panel says **Verification captured**, the portal staying on its sign-in
+   screen is expected: the helper is holding the proof for Home Assistant.
+   If it still says **Ready**, nothing has been captured yet. Press **Copy
+   verification** in the panel, then return to the Home Assistant dialog, paste it
+   into the masked **CAPTCHA proof** field, and submit. Google's reCAPTCHA response
+   is only valid for about two minutes, so capture and paste it promptly; Home
+   Assistant drops the pending sign-in after ten minutes without a proof. **Close
+   helper** (or reloading the tab) removes the panel and restores the portal's
+   login.
 
 The proof is single-use: Home Assistant sends it once, never saves it, and never
 reuses it after a timeout or a lost reply. Capture a fresh one instead. You can
@@ -102,9 +105,10 @@ the extension (see `docs/captcha-extension-testing.md`).
 > cleanly on one desktop browser (browser name/version not recorded); that is not
 > browser acceptance. Handing a proof solved in your browser to Home Assistant has
 > not been verified against a live PSE&G account, and other browsers, portability
-> and unattended renewal are unverified. PSE&G may bind the proof to the browser
-> that solved it and refuse it. If that happens, the dialog asks for a fresh
-> proof; re-authenticating in the browser remains the fallback.
+> and unattended renewal are unverified. PSE&G may still refuse a proof solved
+> elsewhere than Home Assistant; the reason is not known yet. If that happens, the
+> dialog asks for a fresh proof; re-authenticating in the browser remains the
+> fallback.
 
 A CAPTCHA-assisted sign-in proves the account works *now* and gives the current
 access only. It does not create a permanent renewable session, so a later CAPTCHA
