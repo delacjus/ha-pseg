@@ -317,7 +317,8 @@ class PsegClient:
         names: dict[str, list[str]] = {}
         for c in self.session.cookies:
             names.setdefault(c.domain, []).append(c.name)
-        return f"hops={self.session.trace} cookie_names={names}"
+        login = getattr(self, "last_login_result", None)
+        return f"hops={self.session.trace} cookie_names={names}" + (f" login={login}" if login else "")
 
     @staticmethod
     def _on_dashboard(resp: requests.Response) -> bool:
@@ -410,6 +411,15 @@ class PsegClient:
             body = {}
         result = body.get("Data") if isinstance(body, dict) else None
         result = result if isinstance(result, dict) else {}
+        ajax = body.get("AjaxResults") if isinstance(body, dict) else None
+        # Diagnostics: response shape and MyMeter's own error text, never the password.
+        self.last_login_result = {
+            "status": resp.status_code,
+            "data_keys": sorted(result),
+            "error": str(result.get("LoginErrorMessage") or "")[:120],
+            "ajax_actions": [a.get("Action") for a in ajax if isinstance(a, dict)] if isinstance(ajax, list) else None,
+            "set_cookies": sorted({h.split("=", 1)[0].strip() for h in resp.raw.headers.getlist("Set-Cookie")}) if hasattr(getattr(resp, "raw", None), "headers") and hasattr(resp.raw.headers, "getlist") else [],
+        }
         if result.get("LoginErrorMessage"):
             self._mark_okta_expired()
             raise PsegLoginRejected("MyMeter rejected the email/password")
