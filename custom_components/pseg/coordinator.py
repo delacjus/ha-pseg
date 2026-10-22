@@ -34,6 +34,11 @@ from homeassistant.util import dt as dt_util
 import requests
 
 from .const import (
+    AUTH_REASON_CAPTCHA_REQUIRED,
+    AUTH_REASON_OKTA_SESSION_EXPIRED,
+    AUTH_REASON_PORTAL_SESSION_EXPIRED,
+    AUTH_REASON_REMEMBER_ME_REJECTED,
+    AUTH_REASON_SECURITY_STEP,
     CONF_KNOWN_METER_IDS,
     CONF_METER_ID,
     CONF_PRICE_PER_KWH,
@@ -41,6 +46,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL_HOURS,
     DOMAIN,
     KEEPALIVE_INTERVAL_MINUTES,
+    LOCAL_KEEPALIVE_INTERVAL_MINUTES,
 )
 from .pseg_client import (
     PsegClient,
@@ -303,13 +309,27 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(hours=DEFAULT_SCAN_INTERVAL_HOURS),
         )
 
+    def keepalive_interval(self) -> timedelta:
+        """Return the per-mode keepalive period.
+
+        Okta sessions tolerate a 10-minute SSO round trip; a local portal session's
+        MM_SID lapses on a ~10-minute idle timer (live 2026-10-22), so it is touched
+        every 3 minutes with a GET that carries no credentials.
+        """
+        minutes = (
+            LOCAL_KEEPALIVE_INTERVAL_MINUTES
+            if self.client.is_local_mode
+            else KEEPALIVE_INTERVAL_MINUTES
+        )
+        return timedelta(minutes=minutes)
+
     def start_keepalive(self) -> None:
-        """Start the recurring Okta keepalive (every KEEPALIVE_INTERVAL_MINUTES)."""
+        """Start the recurring, per-mode keepalive (see keepalive_interval)."""
         if self._unsub_keepalive is None:
             self._unsub_keepalive = async_track_time_interval(
                 self.hass,
                 self._async_keepalive,
-                timedelta(minutes=KEEPALIVE_INTERVAL_MINUTES),
+                self.keepalive_interval(),
             )
 
     def stop_keepalive(self) -> None:
@@ -321,7 +341,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_keepalive(self, _now: datetime) -> None:
         """Run keepalive check and persist rotated cookies."""
-        _LOGGER.debug("Running 30-minute PSE&G keepalive")
+        minutes = int(self.keepalive_interval().total_seconds() // 60)
+        mode = "local" if self.client.is_local_mode else "okta"
+        _LOGGER.debug("Running %d-minute PSE&G keepalive (%s mode)", minutes, mode)
         expired = False
         try:
             await self.hass.async_add_executor_job(self.client.keepalive)
@@ -339,7 +361,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if (expired or self.client.okta_session_expired_at) and not self.auth_required:
             self.auth_required = True
             self.status = "auth_required"
-            self._raise_auth_issues("Okta session expired during background keepalive")
+            self._log_auth_failure("keepalive")
+            self._raise_auth_issues("Authentication expired during background keepalive")
             # Same outcome as a poll raising ConfigEntryAuthFailed: ask the user now
             # instead of waiting up to a full poll interval. Guarded by auth_required so
             # it fires once per expiry; HA also refuses a second concurrent reauth flow.
@@ -402,11 +425,68 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             f"reauth_required_{self.config_entry.entry_id}",
         )
 
+    def _auth_failure_reason(self) -> str:
+        """Return the typed reason for the current auth failure.
+
+        The fallback keeps pre-1.4.2 behaviour (no reason recorded) while still
+        telling local portal entries apart from Okta ones.
+        """
+        if self.client.auth_reason:
+            return self.client.auth_reason
+        if self.client.is_local_mode:
+            return AUTH_REASON_PORTAL_SESSION_EXPIRED
+        return AUTH_REASON_OKTA_SESSION_EXPIRED
+
+    def _auth_failure_detail(self) -> str:
+        """One user-facing sentence for the current typed auth failure."""
+        return {
+            AUTH_REASON_PORTAL_SESSION_EXPIRED: "Your PSE&G portal session has expired.",
+            AUTH_REASON_CAPTCHA_REQUIRED: (
+                "PSE&G MyMeter is asking for a CAPTCHA, which Home Assistant cannot solve."
+            ),
+            AUTH_REASON_REMEMBER_ME_REJECTED: (
+                "PSE&G refused the saved MyMeter sign-in."
+            ),
+            AUTH_REASON_SECURITY_STEP: (
+                "PSE&G MyMeter is asking for a security question or password change."
+            ),
+            AUTH_REASON_OKTA_SESSION_EXPIRED: "Your PSE&G Okta session has expired.",
+        }.get(self._auth_failure_reason(), "Your PSE&G session has expired.")
+
+    def _auth_failed_message(self) -> str:
+        """ConfigEntryAuthFailed text for the current typed auth failure (no secrets)."""
+        prefix = {
+            AUTH_REASON_PORTAL_SESSION_EXPIRED: "PSE&G portal session expired",
+            AUTH_REASON_CAPTCHA_REQUIRED: "PSE&G MyMeter requires a solved CAPTCHA",
+            AUTH_REASON_REMEMBER_ME_REJECTED: "PSE&G refused the saved MyMeter sign-in",
+            AUTH_REASON_SECURITY_STEP: "PSE&G MyMeter requires a security step",
+            AUTH_REASON_OKTA_SESSION_EXPIRED: "PSE&G Okta session expired",
+        }.get(self._auth_failure_reason(), "PSE&G session expired")
+        return (
+            f"{prefix}. Please re-authenticate under Settings > Devices & Services > PSE&G."
+        )
+
+    def _log_auth_failure(self, source: str) -> None:
+        """Log one line: typed reason plus idle gap (never a credential or cookie)."""
+        reason = self._auth_failure_reason()
+        gap = self.client.idle_gap_seconds
+        if gap is None:
+            _LOGGER.warning("PSE&G %s authentication failure (%s)", source, reason)
+        else:
+            _LOGGER.warning(
+                "PSE&G %s authentication failure (%s); "
+                "last successful portal request %.0f s ago",
+                source,
+                reason,
+                gap,
+            )
+
     def _raise_auth_issues(self, err_msg: str) -> None:
         """Raise persistent notification and repairs issue when authentication is required."""
         entry_id = self.config_entry.entry_id if self.config_entry else "default"
+        _LOGGER.debug("Raising PSE&G auth issue: %s", err_msg)
         msg = (
-            "Your PSE&G session has expired. "
+            f"{self._auth_failure_detail()} "
             "Please go to **Settings > Devices & Services > PSE&G**, open the entry, "
             "and follow the **Re-authenticate** prompt. If PSE&G asks for a CAPTCHA, "
             "the prompt walks you through solving it in your browser."
@@ -481,10 +561,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 raise UpdateFailed("Ignoring auth failure from a retired PSE&G session") from err
             self.auth_required = True
             self.status = "auth_required"
+            self._log_auth_failure("poll")
             self._raise_auth_issues(str(err))
-            raise ConfigEntryAuthFailed(
-                "PSE&G Okta session expired. Please re-authenticate under Settings > Devices & Services > PSE&G."
-            ) from err
+            raise ConfigEntryAuthFailed(self._auth_failed_message()) from err
         except (PsegTransientError, requests.RequestException) as err:
             self.status = "error"
             raise UpdateFailed(f"Transient error communicating with PSE&G: {err}") from err

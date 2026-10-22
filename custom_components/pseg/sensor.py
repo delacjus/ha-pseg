@@ -20,6 +20,8 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    ATTR_AUTH_IDLE_GAP,
+    ATTR_AUTH_REASON,
     ATTR_HISTORY_14D,
     ATTR_LAST_KEEPALIVE,
     ATTR_LAST_SSO_RENEWAL,
@@ -143,6 +145,8 @@ class PsegConnectionStatusSensor(PsegBaseSensor):
             ATTR_SSO_RENEWALS: client.sso_renewals,
             ATTR_LAST_KEEPALIVE: client.last_keepalive,
             ATTR_OKTA_SESSION_EXPIRED_AT: client.okta_session_expired_at,
+            ATTR_AUTH_REASON: client.auth_reason,
+            ATTR_AUTH_IDLE_GAP: client.idle_gap_seconds,
         }
 
 

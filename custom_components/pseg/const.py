@@ -31,8 +31,30 @@ DEFAULT_PRICE_PER_KWH = 0.247
 # Placeholder the client reports when the chart has no meter series.
 DEFAULT_METER_NAME = "PSE&G Electric Meter"
 DEFAULT_SCAN_INTERVAL_HOURS = 4
-# Must stay below PSE&G's Okta idle timeout (observed ~30 min, 2026-10-21).
+# Okta mode: must stay below PSE&G's Okta idle timeout (observed ~30 min, 2026-10-21).
 KEEPALIVE_INTERVAL_MINUTES = 10
+# Local (portal-only) mode: MM_SID lapses on an idle timer of ~10 min (observed live
+# 2026-10-22). A GET-only touch well under that keeps the session warm without any
+# credential POST, so renewal can stay on the poll path.
+LOCAL_KEEPALIVE_INTERVAL_MINUTES = 3
+
+# Typed authentication failure reasons (client.auth_reason, status sensor attribute).
+# A reason is set wherever authentication fails, so local MyMeter failures are never
+# reported as an Okta session expiry.
+AUTH_REASON_PORTAL_SESSION_EXPIRED = "portal_session_expired"
+AUTH_REASON_CAPTCHA_REQUIRED = "captcha_required"
+# A saved local renewal credential was refused: the Remember Me cookie or the saved
+# MyMeter email/password.
+AUTH_REASON_REMEMBER_ME_REJECTED = "remember_me_rejected"
+AUTH_REASON_SECURITY_STEP = "security_step"
+AUTH_REASON_OKTA_SESSION_EXPIRED = "okta_session_expired"
+AUTH_REASONS = frozenset({
+    AUTH_REASON_PORTAL_SESSION_EXPIRED,
+    AUTH_REASON_CAPTCHA_REQUIRED,
+    AUTH_REASON_REMEMBER_ME_REJECTED,
+    AUTH_REASON_SECURITY_STEP,
+    AUTH_REASON_OKTA_SESSION_EXPIRED,
+})
 
 PORTAL_HOST = "mysmartenergy.nj.pseg.com"
 OKTA_HOST = "id.myaccount.pseg.com"
@@ -56,3 +78,6 @@ ATTR_LAST_SSO_RENEWAL = "last_sso_renewal"
 ATTR_SSO_RENEWALS = "sso_renewals"
 ATTR_LAST_KEEPALIVE = "last_keepalive"
 ATTR_OKTA_SESSION_EXPIRED_AT = "okta_session_expired_at"
+ATTR_AUTH_REASON = "auth_reason"
+# Seconds between the last confirmed portal request and the authentication failure.
+ATTR_AUTH_IDLE_GAP = "idle_gap_seconds"

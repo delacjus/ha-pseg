@@ -23,6 +23,11 @@ import requests
 
 from .const import (
     ALLOWED_HOSTS,
+    AUTH_REASON_CAPTCHA_REQUIRED,
+    AUTH_REASON_OKTA_SESSION_EXPIRED,
+    AUTH_REASON_PORTAL_SESSION_EXPIRED,
+    AUTH_REASON_REMEMBER_ME_REJECTED,
+    AUTH_REASON_SECURITY_STEP,
     DEFAULT_METER_NAME,
     DEFAULT_PRICE_PER_KWH,
     OKTA_HOST,
@@ -205,6 +210,13 @@ class PsegClient:
         self.sso_renewals: int = 0
         self.last_keepalive: str | None = None
         self.okta_session_expired_at: str | None = None
+        # Typed auth failure reason (see AUTH_REASON_* in const); None while healthy.
+        self.auth_reason: str | None = None
+        # Seconds between the last confirmed portal request and the failure; tells an
+        # idle expiry (~10 min) apart from an absolute lifetime next time.
+        self.idle_gap_seconds: float | None = None
+        self.last_portal_success_at: str | None = None
+        self._last_success_monotonic: float | None = None
 
         # The persisted jar (server-rotated cookies) is authoritative. The pasted header
         # strings stay in entry.data unchanged, so applying them on top would restore
@@ -327,12 +339,48 @@ class PsegClient:
 
     def _mark_session_ok(self) -> None:
         """Record a confirmed logged-in portal session."""
+        now = datetime.now(UTC)
         if not self.session_established_at:
-            self.session_established_at = datetime.now(UTC).isoformat()
+            self.session_established_at = now.isoformat()
         self.okta_session_expired_at = None
+        self.auth_reason = None
+        self.idle_gap_seconds = None
+        self.last_portal_success_at = now.isoformat()
+        self._last_success_monotonic = time.monotonic()
 
-    def _mark_okta_expired(self) -> None:
+    def _seconds_since_last_success(self) -> float | None:
+        """Seconds since the last confirmed portal request, or None if unknown."""
+        if self._last_success_monotonic is None:
+            return None
+        return round(time.monotonic() - self._last_success_monotonic, 1)
+
+    def _mark_auth_failure(self, reason: str) -> None:
+        """Record a typed authentication failure, its timestamp and the idle gap.
+
+        Logs the reason and the idle gap only: never a credential, cookie value or
+        page body. ``okta_session_expired_at`` is still stamped for compatibility
+        with existing automations/attributes, even when the reason is not Okta.
+        """
+        self.auth_reason = reason
         self.okta_session_expired_at = datetime.now(UTC).isoformat()
+        self.idle_gap_seconds = self._seconds_since_last_success()
+        if self.idle_gap_seconds is None:
+            _LOGGER.info(
+                "PSE&G authentication failed (%s); no successful portal request yet",
+                reason,
+            )
+        else:
+            _LOGGER.info(
+                "PSE&G authentication failed (%s); last successful portal request %.0f s ago",
+                reason,
+                self.idle_gap_seconds,
+            )
+
+    def _session_expired_reason(self) -> str:
+        """Name a lapsed session truthfully: local portal sessions are not Okta."""
+        if self.is_local_mode:
+            return AUTH_REASON_PORTAL_SESSION_EXPIRED
+        return AUTH_REASON_OKTA_SESSION_EXPIRED
 
     def _raise_post_renewal_logged_out(self, resp: requests.Response) -> None:
         """Classify a still-logged-out /Dashboard right after Okta issued an assertion.
@@ -342,7 +390,7 @@ class PsegClient:
         portal refusing sessions (e.g. maintenance) and is transient.
         """
         if urllib.parse.urlparse(resp.url).hostname == OKTA_HOST or self._is_okta_widget(resp):
-            self._mark_okta_expired()
+            self._mark_auth_failure(AUTH_REASON_OKTA_SESSION_EXPIRED)
             raise PsegOktaSessionExpired("Failed to establish portal session after SAML post")
         raise PsegTransientError("Portal still logged out after SAML post (maintenance?)")
 
@@ -401,6 +449,16 @@ class PsegClient:
     def has_okta_session(self) -> bool:
         """An Okta session cookie is present (SAML SSO renewal is possible)."""
         return any(self._has_cookie(name, OKTA_HOST) for name in ("idx", "sid"))
+
+    @property
+    def is_local_mode(self) -> bool:
+        """True when this entry renews on the portal only, with no Okta session.
+
+        Covers a saved MyMeter email/password, a Remember Me cookie, and a pasted
+        portal-only jar. Those sessions must never be probed through Okta SSO: live
+        2026-10-22 the credentialless case reported a false "Okta session expired".
+        """
+        return not self.has_okta_session
 
     @_locked
     def ensure_session(self) -> bool:
@@ -482,15 +540,15 @@ class PsegClient:
             or _CAPTCHA_ERROR_MARKER in message.lower()
             or body_is_captcha
         ):
-            self._mark_okta_expired()
+            self._mark_auth_failure(AUTH_REASON_CAPTCHA_REQUIRED)
             raise PsegCaptchaRequired("MyMeter requires a solved CAPTCHA")
         if result.get("SecretQuestionError") or result.get("PasswordExpiredModalData"):
-            self._mark_okta_expired()
+            self._mark_auth_failure(AUTH_REASON_SECURITY_STEP)
             raise PsegSecurityStepRequired(
                 "MyMeter wants a security question or password change"
             )
         if message:
-            self._mark_okta_expired()
+            self._mark_auth_failure(AUTH_REASON_REMEMBER_ME_REJECTED)
             raise PsegLoginRejected("MyMeter rejected the email/password")
         return result
 
@@ -498,7 +556,7 @@ class PsegClient:
         """Verify the sign-in reached /Dashboard and record the renewal."""
         dash = self._get_dashboard()
         if self._is_login_page(dash) or not self._on_dashboard(dash):
-            self._mark_okta_expired()
+            self._mark_auth_failure(AUTH_REASON_REMEMBER_ME_REJECTED)
             raise PsegLoginRejected("MyMeter login did not reach the dashboard")
         self.last_sso_renewal = datetime.now(UTC).isoformat()
         self.sso_renewals += 1
@@ -622,7 +680,16 @@ class PsegClient:
         it is tried first; that use is also what re-issues the cookie for the next
         cycle. Only a rejected/expired cookie falls through to the saved email and
         password (once), and only transports/transients keep their own errors.
+
+        A portal-only entry with no renewal credential must not fall through to the
+        Okta SSO probe: there is no Okta session to renew, and live 2026-10-22 that
+        probe reported a misleading "Okta session expired" for a local entry.
         """
+        if self.is_local_mode and not (self.has_login or self.has_remember_me):
+            self._mark_auth_failure(AUTH_REASON_PORTAL_SESSION_EXPIRED)
+            raise PsegOktaSessionExpired(
+                "PSE&G portal session expired and no local sign-in is stored"
+            )
         if self.has_remember_me:
             try:
                 return self.renew_remember_me()
@@ -660,7 +727,7 @@ class PsegClient:
                 raise PsegTransientError(f"Network error during Remember Me sign-in: {err}") from err
             resp = self._get_dashboard()
         if self._is_login_page(resp):
-            self._mark_okta_expired()
+            self._mark_auth_failure(AUTH_REASON_REMEMBER_ME_REJECTED)
             self._drop_remember_me()
             raise PsegOktaSessionExpired("MyMeter Remember Me sign-in expired or was rejected")
         if resp.status_code == 200 and not self._on_dashboard(resp):
@@ -709,7 +776,7 @@ class PsegClient:
                 marker in parsed_final.path.lower() for marker in _SIGNIN_PATH_MARKERS
             )
             if self._is_okta_widget(resp) or on_okta_signin:
-                self._mark_okta_expired()
+                self._mark_auth_failure(AUTH_REASON_OKTA_SESSION_EXPIRED)
                 raise PsegOktaSessionExpired("Okta session expired: sign-in widget returned")
             if resp.status_code != 200:
                 raise PsegTransientError(f"SSO sign-in returned HTTP {resp.status_code}")
@@ -892,7 +959,7 @@ class PsegClient:
                 ajax_results = data.get("AjaxResults") or []
                 for ar in ajax_results:
                     if isinstance(ar, dict) and ar.get("Action") == "Redirect":
-                        self.okta_session_expired_at = datetime.now(UTC).isoformat()
+                        self._mark_auth_failure(self._session_expired_reason())
                         raise PsegOktaSessionExpired("Session expired during history backfill: Redirected to login")
                 _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
                 chunks.append((chunk_start_str, chunk_end_str, False))
@@ -1054,7 +1121,7 @@ class PsegClient:
             ajax_results = data.get("AjaxResults") or []
             for ar in ajax_results:
                 if isinstance(ar, dict) and ar.get("Action") == "Redirect":
-                    self.okta_session_expired_at = datetime.now(UTC).isoformat()
+                    self._mark_auth_failure(self._session_expired_reason())
                     raise PsegOktaSessionExpired("Session expired: Redirected to login portal")
             raise PsegTransientError("No chart data returned from MyMeter.")
 

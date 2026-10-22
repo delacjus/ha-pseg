@@ -61,6 +61,9 @@ async def async_get_config_entry_diagnostics(
             "sso_renewals": client.sso_renewals,
             "last_keepalive": client.last_keepalive,
             "okta_session_expired_at": client.okta_session_expired_at,
+            "auth_reason": client.auth_reason,
+            "idle_gap_seconds": client.idle_gap_seconds,
+            "last_portal_success_at": client.last_portal_success_at,
         },
         "coordinator": {
             "status": coordinator.status,
