@@ -58,6 +58,7 @@
     },
     "abort": {
       "already_configured": "This PSE&G account is already configured.",
+      "login_updated_existing": "The saved sign-in for this PSE&G account was updated.",
       "reauth_successful": "Re-authentication was successful.",
       "reconfigure_successful": "Reconfiguration was successful.",
       "reauth_account_mismatch": "The provided credentials belong to a different account than the one configured.",

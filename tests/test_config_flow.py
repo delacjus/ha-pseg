@@ -4,7 +4,12 @@ import json
 from pathlib import Path
 from unittest.mock import call, patch
 
-from homeassistant.config_entries import SOURCE_USER
+from homeassistant.config_entries import (
+    SOURCE_IGNORE,
+    SOURCE_USER,
+    ConfigEntryDisabler,
+    ConfigEntryState,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 import pytest
@@ -360,6 +365,275 @@ async def test_user_flow_aborts_for_any_existing_account_meter(
     assert result["type"] == FlowResultType.ABORT
     assert result["reason"] == "already_configured"
 
+
+LOCAL_METER = "88776655"
+NEW_EMAIL = "new@example.com"
+NEW_PASSWORD = "new-secret"
+
+
+def _successful_local_login(client: PsegClient) -> bool:
+    """Model a proven MyMeter email/password sign-in."""
+    client.sso_renewals = 1
+    return True
+
+
+def _existing_local_entry(hass: HomeAssistant, **kwargs) -> MockConfigEntry:
+    """Create the entry an earlier successful local sign-in would have stored."""
+    data = {
+        CONF_METER_ID: LOCAL_METER,
+        CONF_KNOWN_METER_IDS: [LOCAL_METER],
+        CONF_MYMETER_EMAIL: "old@example.com",
+        CONF_MYMETER_PASSWORD: "old-secret",
+        CONF_OKTA_COOKIES: "idx=old",
+        CONF_PORTAL_COOKIES: "MM_SID=old",
+    }
+    data.update(kwargs.pop("data", {}))
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id=kwargs.pop("unique_id", LOCAL_METER),
+        title=kwargs.pop("title", f"PSE&G ({LOCAL_METER})"),
+        data=data,
+        options=kwargs.pop("options", {CONF_PRICE_PER_KWH: 0.31}),
+        **kwargs,
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+async def _run_local_add_flow(
+    hass: HomeAssistant, meter: str, meter_ids: list[str] | None = None
+) -> dict:
+    """Submit the Add dialog's email/password form for a proven local sign-in."""
+    fetched: dict = {"meter": f"Electric Meter {meter}"}
+    if meter_ids is not None:
+        fetched["meter_ids"] = meter_ids
+    with (
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.login_local",
+            new=_successful_local_login,
+        ),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value=fetched,
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        return await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+            data={CONF_MYMETER_EMAIL: NEW_EMAIL, CONF_MYMETER_PASSWORD: NEW_PASSWORD},
+        )
+
+
+async def test_local_login_updates_existing_disabled_entry(hass: HomeAssistant) -> None:
+    """A proven local sign-in refreshes the entry that already owns the account.
+
+    Before: the Add flow aborted ``already_configured`` and threw the proven session
+    away, so the user saw a duplicate even though authentication and the meter check
+    had both succeeded.
+    """
+    entry = _existing_local_entry(hass, disabled_by=ConfigEntryDisabler.USER)
+    entry_id = entry.entry_id
+    reloads: list[str] = []
+    with patch.object(hass.config_entries, "async_schedule_reload", reloads.append):
+        result = await _run_local_add_flow(hass, LOCAL_METER, [LOCAL_METER, "11223344"])
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "login_updated_existing"
+    # Exactly one entry, same identity: no duplicate was created.
+    assert hass.config_entries.async_entries(DOMAIN) == [entry]
+    assert entry.entry_id == entry_id
+    assert entry.unique_id == LOCAL_METER
+    assert entry.title == f"PSE&G ({LOCAL_METER})"
+    assert entry.options == {CONF_PRICE_PER_KWH: 0.31}
+    assert entry.disabled_by is ConfigEntryDisabler.USER
+    assert entry.state is ConfigEntryState.NOT_LOADED
+    # The freshly proven sign-in is stored; the meter identity is untouched.
+    assert entry.data[CONF_MYMETER_EMAIL] == NEW_EMAIL
+    assert entry.data[CONF_MYMETER_PASSWORD] == NEW_PASSWORD
+    assert entry.data[CONF_METER_ID] == LOCAL_METER
+    assert set(entry.data[CONF_KNOWN_METER_IDS]) == {LOCAL_METER, "11223344"}
+    assert entry.data[CONF_OKTA_COOKIES] == ""
+    # Updating a disabled entry does not need to schedule a reload.
+    assert reloads == []
+
+
+async def test_local_login_matches_existing_entry_by_known_meter(hass: HomeAssistant) -> None:
+    """Identity can match a previously seen meter, not only the entry's unique_id."""
+    entry = _existing_local_entry(
+        hass,
+        unique_id="000126274191",
+        title="PSE&G (000126274191)",
+        data={
+            CONF_METER_ID: "000126274191",
+            CONF_KNOWN_METER_IDS: ["000126274191", "000303817579"],
+        },
+    )
+    reloads: list[str] = []
+    with patch.object(hass.config_entries, "async_schedule_reload", reloads.append):
+        result = await _run_local_add_flow(hass, "000303817579", ["000303817579"])
+
+    assert result["reason"] == "login_updated_existing"
+    assert hass.config_entries.async_entries(DOMAIN) == [entry]
+    assert entry.unique_id == "000126274191"
+    assert set(entry.data[CONF_KNOWN_METER_IDS]) == {"000126274191", "000303817579"}
+    assert entry.data[CONF_MYMETER_EMAIL] == NEW_EMAIL
+    assert reloads == []
+
+
+async def test_local_login_with_ambiguous_matches_aborts_without_updates(
+    hass: HomeAssistant,
+) -> None:
+    """Two entries claim the account: never guess, keep the plain duplicate abort."""
+    first = _existing_local_entry(hass)
+    second = _existing_local_entry(
+        hass,
+        unique_id="99999999",
+        title="PSE&G (99999999)",
+        data={
+            CONF_METER_ID: "99999999",
+            CONF_KNOWN_METER_IDS: ["99999999", LOCAL_METER],
+        },
+    )
+    before = (dict(first.data), dict(second.data))
+    reloads: list[str] = []
+    with patch.object(hass.config_entries, "async_schedule_reload", reloads.append):
+        result = await _run_local_add_flow(hass, LOCAL_METER, [LOCAL_METER])
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert (dict(first.data), dict(second.data)) == before
+    assert reloads == []
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 2
+
+
+async def test_local_login_does_not_update_an_ignored_entry(hass: HomeAssistant) -> None:
+    """An ignored entry is not a configured account: keep the old duplicate abort."""
+    entry = _existing_local_entry(hass, source=SOURCE_IGNORE)
+    before = dict(entry.data)
+    reloads: list[str] = []
+    with patch.object(hass.config_entries, "async_schedule_reload", reloads.append):
+        result = await _run_local_add_flow(hass, LOCAL_METER, [LOCAL_METER])
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert dict(entry.data) == before
+    assert reloads == []
+    assert hass.config_entries.async_entries(DOMAIN) == [entry]
+
+
+async def test_cookie_only_duplicate_keeps_plain_duplicate_abort(hass: HomeAssistant) -> None:
+    """Only a local email/password proof may refresh an existing entry."""
+    entry = _existing_local_entry(hass)
+    before = dict(entry.data)
+    reloads: list[str] = []
+    with (
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            new=_successful_session,
+        ),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": f"Electric Meter {LOCAL_METER}"},
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+        patch.object(hass.config_entries, "async_schedule_reload", reloads.append),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+            data={CONF_OKTA_COOKIES: "idx=fresh_cookie_only"},
+        )
+
+    assert result["type"] == FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert dict(entry.data) == before
+    assert reloads == []
+
+
+async def test_local_login_for_new_account_still_creates_entry(hass: HomeAssistant) -> None:
+    """No entry claims the account: the Add flow creates one exactly as before."""
+    existing = _existing_local_entry(
+        hass,
+        unique_id="11223344",
+        title="PSE&G (11223344)",
+        data={CONF_METER_ID: "11223344", CONF_KNOWN_METER_IDS: ["11223344"]},
+    )
+    before = dict(existing.data)
+    reloads: list[str] = []
+    with patch.object(hass.config_entries, "async_schedule_reload", reloads.append):
+        result = await _run_local_add_flow(hass, LOCAL_METER, [LOCAL_METER])
+
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert result["result"].unique_id == LOCAL_METER
+    assert result["data"][CONF_MYMETER_EMAIL] == NEW_EMAIL
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 2
+    assert dict(existing.data) == before
+    assert reloads == []
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        ConfigEntryState.LOADED,
+        ConfigEntryState.SETUP_RETRY,
+        ConfigEntryState.SETUP_ERROR,
+    ],
+)
+async def test_local_login_reloads_set_up_entry_once(
+    hass: HomeAssistant, state: ConfigEntryState
+) -> None:
+    """An enabled entry HA already set up is reloaded once to use the new session."""
+    entry = _existing_local_entry(hass)
+    entry.mock_state(hass, state, "test")
+    reloads: list[str] = []
+    with patch.object(hass.config_entries, "async_schedule_reload", reloads.append):
+        result = await _run_local_add_flow(hass, LOCAL_METER, [LOCAL_METER])
+
+    assert result["reason"] == "login_updated_existing"
+    assert reloads == [entry.entry_id]
+    assert entry.data[CONF_MYMETER_PASSWORD] == NEW_PASSWORD
+    assert entry.unique_id == LOCAL_METER
+
+
+async def test_local_login_keeps_enabled_not_loaded_entry_stopped(
+    hass: HomeAssistant,
+) -> None:
+    """Saving a new login must not start an enabled entry that is currently stopped."""
+    entry = _existing_local_entry(hass)
+    reloads: list[str] = []
+    with patch.object(hass.config_entries, "async_schedule_reload", reloads.append):
+        result = await _run_local_add_flow(hass, LOCAL_METER, [LOCAL_METER])
+
+    assert result["reason"] == "login_updated_existing"
+    assert entry.disabled_by is None
+    assert entry.state is ConfigEntryState.NOT_LOADED
+    assert entry.data[CONF_MYMETER_PASSWORD] == NEW_PASSWORD
+    assert reloads == []
+
+
+async def test_local_login_unchanged_data_does_not_reload(hass: HomeAssistant) -> None:
+    """Repeating the same successful sign-in does not reload an unchanged entry."""
+    entry = _existing_local_entry(hass)
+    await _run_local_add_flow(hass, LOCAL_METER, [LOCAL_METER])
+    before = dict(entry.data)
+    entry.mock_state(hass, ConfigEntryState.LOADED, "test")
+    reloads: list[str] = []
+    with patch.object(hass.config_entries, "async_schedule_reload", reloads.append):
+        result = await _run_local_add_flow(hass, LOCAL_METER, [LOCAL_METER])
+
+    assert result["reason"] == "login_updated_existing"
+    assert dict(entry.data) == before
+    assert reloads == []
+
+
+def test_login_update_abort_message_is_shipped_in_both_string_files() -> None:
+    """The new abort reason must exist in strings.json and the English translation."""
+    package = Path(__file__).parent.parent / "custom_components" / "pseg"
+    english = (package / "translations" / "en.json").read_text(encoding="utf-8")
+    assert english == (package / "strings.json").read_text(encoding="utf-8")
+    assert json.loads(english)["config"]["abort"].get("login_updated_existing")
 
 async def test_reauth_flow_matching_account(hass: HomeAssistant) -> None:
     """Test re-authenticating existing entry with matching meter id succeeds."""

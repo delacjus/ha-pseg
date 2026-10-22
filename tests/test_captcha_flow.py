@@ -6,7 +6,11 @@ import json
 import threading
 import urllib.parse
 
-from homeassistant.config_entries import SOURCE_USER, ConfigEntryDisabler
+from homeassistant.config_entries import (
+    SOURCE_USER,
+    ConfigEntryDisabler,
+    ConfigEntryState,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.util import dt as dt_util
@@ -25,6 +29,7 @@ from custom_components.pseg.const import (
     CONF_KNOWN_METER_IDS,
     CONF_MYMETER_EMAIL,
     CONF_MYMETER_PASSWORD,
+    CONF_PRICE_PER_KWH,
     DOMAIN,
     PORTAL_BASE_URL,
 )
@@ -250,6 +255,169 @@ async def test_captcha_step_completes_setup_reauth_and_reconfigure(
 
 async def _async_true(*args, **kwargs) -> bool:
     return True
+
+
+FRESH_EMAIL = "fresh@example.com"
+FRESH_PASSWORD = "fresh-synthetic-password"
+
+
+def _fetch_meter_with_successor(client: PsegClient, days: int) -> dict:
+    """Report the account's active meter plus a successor meter."""
+    return {
+        "meter": "Meter 12345678",
+        "meter_ids": ["12345678", "000303817579"],
+        "history_14d": [],
+    }
+
+
+async def test_captcha_duplicate_sign_in_updates_existing_entry(hass: HomeAssistant) -> None:
+    """A CAPTCHA-completed Add flow refreshes the single entry owning the account."""
+    existing = _entry(
+        hass,
+        disabled_by=ConfigEntryDisabler.USER,
+        options={CONF_PRICE_PER_KWH: 0.3},
+        data={
+            CONF_MYMETER_EMAIL: EMAIL,
+            CONF_MYMETER_PASSWORD: PASSWORD,
+            CONF_KNOWN_METER_IDS: ["12345678"],
+        },
+    )
+    title = existing.title
+    entry_id = existing.entry_id
+    reloads: list[str] = []
+    recorder = _ProofRecorder()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(PsegClient, "login_local", _raise_captcha)
+        mp.setattr(PsegClient, "prepare_login_captcha", _prepare_fn(recorder))
+        mp.setattr(PsegClient, "submit_login_captcha", _submit_fn(recorder))
+        mp.setattr(PsegClient, "fetch_energy_data", _fetch_meter_with_successor)
+        mp.setattr("custom_components.pseg.async_setup_entry", _async_true)
+        mp.setattr(hass.config_entries, "async_schedule_reload", reloads.append)
+        started = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        form = await _configure(
+            hass,
+            started["flow_id"],
+            {CONF_MYMETER_EMAIL: FRESH_EMAIL, CONF_MYMETER_PASSWORD: FRESH_PASSWORD},
+        )
+        assert form["step_id"] == "captcha"
+        done = await _configure(hass, form["flow_id"], {CONF_CAPTCHA_RESPONSE: PROOF})
+
+    assert done["type"] == FlowResultType.ABORT
+    assert done["reason"] == "login_updated_existing"
+    # One entry, same identity: no duplicate and nothing else replaced.
+    assert hass.config_entries.async_entries(DOMAIN) == [existing]
+    assert existing.entry_id == entry_id
+    assert existing.unique_id == "12345678"
+    assert existing.title == title
+    assert existing.options == {CONF_PRICE_PER_KWH: 0.3}
+    assert existing.disabled_by is ConfigEntryDisabler.USER
+    assert existing.state is ConfigEntryState.NOT_LOADED
+    # The proven local login and the union of account meters are stored.
+    assert existing.data[CONF_MYMETER_EMAIL] == FRESH_EMAIL
+    assert existing.data[CONF_MYMETER_PASSWORD] == FRESH_PASSWORD
+    assert set(existing.data[CONF_KNOWN_METER_IDS]) == {"12345678", "000303817579"}
+    assert PROOF not in json.dumps(dict(existing.data))
+    # A disabled entry is updated only: no reload (it would set it up).
+    assert reloads == []
+    assert recorder.proofs == [PROOF]
+
+
+async def test_captcha_ambiguous_duplicates_are_not_updated(hass: HomeAssistant) -> None:
+    """Two entries claim the account: the plain duplicate abort stays, untouched."""
+    first = _entry(hass)
+    second = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="000303817579",
+        data={
+            CONF_MYMETER_EMAIL: "other@example.com",
+            CONF_MYMETER_PASSWORD: "other-secret",
+            CONF_KNOWN_METER_IDS: ["000303817579", "12345678"],
+        },
+    )
+    second.add_to_hass(hass)
+    before = (dict(first.data), dict(second.data))
+    reloads: list[str] = []
+    recorder = _ProofRecorder()
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(PsegClient, "login_local", _raise_captcha)
+        mp.setattr(PsegClient, "prepare_login_captcha", _prepare_fn(recorder))
+        mp.setattr(PsegClient, "submit_login_captcha", _submit_fn(recorder))
+        mp.setattr(PsegClient, "fetch_energy_data", _fetch_meter)
+        mp.setattr("custom_components.pseg.async_setup_entry", _async_true)
+        mp.setattr(hass.config_entries, "async_schedule_reload", reloads.append)
+        started = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        form = await _configure(
+            hass,
+            started["flow_id"],
+            {CONF_MYMETER_EMAIL: EMAIL, CONF_MYMETER_PASSWORD: PASSWORD},
+        )
+        done = await _configure(hass, form["flow_id"], {CONF_CAPTCHA_RESPONSE: PROOF})
+
+    assert done["type"] == FlowResultType.ABORT
+    assert done["reason"] == "already_configured"
+    assert (dict(first.data), dict(second.data)) == before
+    assert reloads == []
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 2
+
+
+async def test_cancel_while_meter_blocked_leaves_existing_entry_unchanged(
+    hass: HomeAssistant,
+) -> None:
+    """Cancelling during the post-proof meter read must not touch a matching entry."""
+    existing = _entry(
+        hass,
+        disabled_by=ConfigEntryDisabler.USER,
+        data={
+            CONF_MYMETER_EMAIL: EMAIL,
+            CONF_MYMETER_PASSWORD: PASSWORD,
+            CONF_KNOWN_METER_IDS: ["12345678"],
+        },
+    )
+    before = dict(existing.data)
+    blocker = _Blocker()
+    recorder = _ProofRecorder()
+    reloads: list[str] = []
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(PsegClient, "login_local", _raise_captcha)
+        mp.setattr(PsegClient, "prepare_login_captcha", _prepare_fn(recorder))
+        mp.setattr(PsegClient, "submit_login_captcha", _submit_fn(recorder))
+        mp.setattr(PsegClient, "fetch_energy_data", blocker.wrap(_fetch_meter))
+        mp.setattr("custom_components.pseg.async_setup_entry", _async_true)
+        mp.setattr(hass.config_entries, "async_schedule_reload", reloads.append)
+        started = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_USER}
+        )
+        form = await _configure(
+            hass,
+            started["flow_id"],
+            {CONF_MYMETER_EMAIL: EMAIL, CONF_MYMETER_PASSWORD: PASSWORD},
+        )
+        assert form["step_id"] == "captcha"
+        task = hass.async_create_task(
+            _configure(hass, form["flow_id"], {CONF_CAPTCHA_RESPONSE: PROOF})
+        )
+        await asyncio.wait_for(blocker.entered.wait(), 5)
+
+        cancelled = await _configure(
+            hass, form["flow_id"], {CONF_CAPTCHA_CANCEL: True}
+        )
+        assert cancelled["type"] == FlowResultType.ABORT
+        assert cancelled["reason"] == "captcha_cancelled"
+
+        blocker.release.set()
+        late = await task
+        assert late["type"] == FlowResultType.ABORT
+        assert late["reason"] in ("captcha_cancelled", "sign_in_cancelled")
+
+    assert dict(existing.data) == before
+    assert reloads == []
+    assert hass.config_entries.async_entries(DOMAIN) == [existing]
+    assert recorder.proofs == [PROOF]
 
 
 async def test_reauth_captcha_keeps_disabled_entry_and_known_meters(hass: HomeAssistant) -> None:

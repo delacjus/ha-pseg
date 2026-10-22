@@ -93,6 +93,11 @@ browser; Home Assistant never asks you for the proof until it actually needs one
    helper** (or reloading the tab) removes the panel and restores the portal's
    login.
 
+When a local MyMeter sign-in succeeds for an account already in Home Assistant,
+the Add integration dialog updates that entry's saved sign-in. It confirms
+**The saved sign-in for this PSE&G account was updated.** An existing disabled
+entry stays disabled; its energy history and settings are preserved.
+
 The proof is single-use: Home Assistant sends it once, never saves it, and never
 reuses it after a timeout or a lost reply. Capture a fresh one instead. You can
 press **Cancel this sign-in** in the dialog to drop the attempt.

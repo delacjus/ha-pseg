@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 import hashlib
 import logging
@@ -11,7 +12,9 @@ from typing import Any
 
 from homeassistant import config_entries
 from homeassistant.config_entries import (
+    SOURCE_IGNORE,
     ConfigEntry,
+    ConfigEntryState,
     ConfigFlowResult,
     OptionsFlow,
     OptionsFlowWithReload,
@@ -59,6 +62,13 @@ _LOGGER = logging.getLogger(__name__)
 # Internal marker: validation wants the human CAPTCHA step, never shown as an error.
 _CAPTCHA_REQUIRED = "captcha_required"
 _CAPTCHA_STEP_ID = "captcha"
+
+# Reload only an enabled entry Home Assistant already tried to set up. Reloading an
+# enabled NOT_LOADED entry would start it; reloading a disabled entry is needless
+# work and can abort a reauth flow even though setup is skipped.
+_RELOADABLE_ENTRY_STATES = frozenset(
+    {ConfigEntryState.LOADED, ConfigEntryState.SETUP_RETRY, ConfigEntryState.SETUP_ERROR}
+)
 
 
 def _normalize_portal_cookies(raw: str) -> str:
@@ -582,6 +592,99 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         finally:
             self._release_attempt(pending, attempt)
 
+    @callback
+    def _entries_claiming(self, meter_ids: set[str]) -> list[ConfigEntry]:
+        """Return every PSE&G entry whose stored identity intersects these meter ids.
+
+        Ignored entries are included here on purpose: they must still block a duplicate,
+        exactly as the old explicit overlap check did.
+        """
+        return [
+            other
+            for other in self.hass.config_entries.async_entries(DOMAIN)
+            if meter_ids & _known_meter_ids(other)
+        ]
+
+    @callback
+    def _async_update_existing_login(
+        self,
+        entry: ConfigEntry,
+        fields: dict[str, Any],
+        meter_ids: set[str],
+    ) -> ConfigFlowResult:
+        """Refresh one existing entry's saved sign-in instead of adding a duplicate.
+
+        Only entry data changes: unique_id (the statistics key), title, options,
+        disabled_by and the registries stay as they are. A disabled entry is updated
+        without scheduling a needless reload. An enabled entry that
+        HA already set up (loaded/retry/error) is reloaded once so the new session is
+        used immediately.
+        """
+        changed = self.hass.config_entries.async_update_entry(
+            entry,
+            data={
+                **entry.data,
+                **fields,
+                CONF_KNOWN_METER_IDS: sorted(_known_meter_ids(entry).union(meter_ids)),
+            },
+        )
+        _LOGGER.info("Updated the saved sign-in of an existing PSE&G entry")
+        if changed and not entry.disabled_by and entry.state in _RELOADABLE_ENTRY_STATES:
+            self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        return self.async_abort(reason="login_updated_existing")
+
+    async def _async_commit_sign_in(
+        self,
+        *,
+        entry: ConfigEntry | None,
+        fields: dict[str, Any],
+        meter_id: str,
+        meter_ids: list[str],
+        local_login: bool,
+        stopped: Callable[[], ConfigFlowResult | None],
+    ) -> ConfigFlowResult:
+        """Write a proven sign-in: update the owning entry or create a new one.
+
+        `stopped` returns an abort result when this attempt may no longer commit; it is
+        checked after every await so an aborted flow never touches an entry.
+        """
+        if entry is not None:
+            known = _known_meter_ids(entry)
+            if meter_ids and known.isdisjoint(meter_ids):
+                return self.async_abort(reason="reauth_account_mismatch")
+            return self.async_update_reload_and_abort(
+                entry,
+                data={
+                    **entry.data,
+                    **fields,
+                    CONF_KNOWN_METER_IDS: sorted(known.union(meter_ids)),
+                },
+            )
+
+        # A local email/password sign-in already proved this account works. If exactly
+        # one existing entry owns a meter on it, that entry IS this account: refresh it
+        # instead of discarding the proven session with an "already configured" abort.
+        authenticated = {meter_id, *meter_ids}
+        matches = self._entries_claiming(authenticated)
+        if local_login and len(matches) == 1 and matches[0].source != SOURCE_IGNORE:
+            return self._async_update_existing_login(matches[0], fields, authenticated)
+
+        await self.async_set_unique_id(meter_id)
+        # async_set_unique_id can abort other flows and yields: re-check that this
+        # attempt is still live, and re-read the entries, before creating anything.
+        stopped_result = stopped()
+        if stopped_result is not None:
+            return stopped_result
+        self._abort_if_unique_id_configured()
+        if matches or self._entries_claiming(authenticated):
+            # Two matches, an ignored entry, or a cookie/Okta-only duplicate keeps the
+            # old behavior: never guess which entry is meant and never create a second.
+            return self.async_abort(reason="already_configured")
+        return self.async_create_entry(
+            title=f"PSE&G ({meter_id})",
+            data={**fields, CONF_METER_ID: meter_id, CONF_KNOWN_METER_IDS: meter_ids},
+        )
+
     async def _async_finish_captcha(
         self,
         pending: dict[str, Any],
@@ -593,7 +696,6 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if self._attempt_lost(pending):
             return self._async_abort_lost_attempt(pending)
 
-        entry: ConfigEntry | None = pending["entry"]
         fields = {
             CONF_OKTA_COOKIES: pending["okta_cookies"],
             CONF_PORTAL_COOKIES: pending["portal_cookies"],
@@ -601,34 +703,17 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_MYMETER_PASSWORD: pending["password"],
             "cookies": client.export_cookies(),
         }
-
-        if entry is None:
-            await self.async_set_unique_id(meter_id)
-            # async_set_unique_id can abort other flows and yields: re-check that
-            # this attempt is still live before creating anything.
-            if self._attempt_lost(pending):
-                return self._async_abort_lost_attempt(pending)
-            self._abort_if_unique_id_configured()
-            if any(
-                set(meter_ids) & _known_meter_ids(other)
-                for other in self.hass.config_entries.async_entries(DOMAIN)
-            ):
-                return self.async_abort(reason="already_configured")
-            return self.async_create_entry(
-                title=f"PSE&G ({meter_id})",
-                data={**fields, CONF_METER_ID: meter_id, CONF_KNOWN_METER_IDS: meter_ids},
-            )
-
-        known = _known_meter_ids(entry)
-        if meter_ids and known.isdisjoint(meter_ids):
-            return self.async_abort(reason="reauth_account_mismatch")
-        return self.async_update_reload_and_abort(
-            entry,
-            data={
-                **entry.data,
-                **fields,
-                CONF_KNOWN_METER_IDS: sorted(known.union(meter_ids)),
-            },
+        return await self._async_commit_sign_in(
+            entry=pending["entry"],
+            fields=fields,
+            meter_id=meter_id,
+            meter_ids=meter_ids,
+            local_login=client.has_login,
+            stopped=lambda: (
+                self._async_abort_lost_attempt(pending)
+                if self._attempt_lost(pending)
+                else None
+            ),
         )
 
     async def _async_guarded_sign_in(
@@ -686,38 +771,13 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_MYMETER_PASSWORD: password,
                     "cookies": client.export_cookies(),
                 }
-                if entry is None:
-                    await self.async_set_unique_id(meter_id)
-                    # async_set_unique_id can abort other flows and yields: re-check
-                    # that this submission is still live before creating anything.
-                    stopped = self._async_sign_in_stopped(operation)
-                    if stopped is not None:
-                        return stopped
-                    self._abort_if_unique_id_configured()
-                    if any(
-                        set(meter_ids) & _known_meter_ids(other)
-                        for other in self.hass.config_entries.async_entries(DOMAIN)
-                    ):
-                        return self.async_abort(reason="already_configured")
-                    return self.async_create_entry(
-                        title=f"PSE&G ({meter_id})",
-                        data={
-                            **fields,
-                            CONF_METER_ID: meter_id,
-                            CONF_KNOWN_METER_IDS: meter_ids,
-                        },
-                    )
-
-                known = _known_meter_ids(entry)
-                if meter_ids and known.isdisjoint(meter_ids):
-                    return self.async_abort(reason="reauth_account_mismatch")
-                return self.async_update_reload_and_abort(
-                    entry,
-                    data={
-                        **entry.data,
-                        **fields,
-                        CONF_KNOWN_METER_IDS: sorted(known.union(meter_ids)),
-                    },
+                return await self._async_commit_sign_in(
+                    entry=entry,
+                    fields=fields,
+                    meter_id=meter_id,
+                    meter_ids=meter_ids,
+                    local_login=client.has_login,
+                    stopped=lambda: self._async_sign_in_stopped(operation),
                 )
         finally:
             self._end_sign_in(operation)
