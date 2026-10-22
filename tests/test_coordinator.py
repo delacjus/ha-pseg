@@ -13,10 +13,12 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 import requests
 
 from custom_components.pseg.const import (
+    AUTH_REASON_OKTA_SESSION_EXPIRED,
     CONF_KNOWN_METER_IDS,
     CONF_METER_ID,
     CONF_OKTA_COOKIES,
     DOMAIN,
+    OKTA_HOST,
 )
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
 from custom_components.pseg.pseg_client import (
@@ -209,6 +211,101 @@ async def test_keepalive_expiry_starts_reauth_once(hass: HomeAssistant) -> None:
     issue = ir.async_get(hass).async_get_issue(DOMAIN, f"reauth_required_{entry.entry_id}")
     assert issue is not None
     assert issue.is_fixable is False
+
+
+async def test_recovered_keepalive_clears_sticky_auth_state(hass: HomeAssistant) -> None:
+    """A keepalive that succeeds again clears auth_required/status and the prompt.
+
+    Before this fix only a successful poll cleared them, so a session that recovered
+    kept showing "auth required" (plus repair/notification) until the next 4-hour poll.
+    """
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345", data={CONF_OKTA_COOKIES: "idx=test"}
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+
+    # A failed poll left the sticky state behind.
+    client._mark_auth_failure(AUTH_REASON_OKTA_SESSION_EXPIRED)
+    coord.auth_required = True
+    coord.status = "auth_required"
+    coord._raise_auth_issues("Authentication expired")
+    await hass.async_block_till_done()
+    notification_id = f"pseg_reauth_{entry.entry_id}"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, f"reauth_required_{entry.entry_id}")
+
+    def recovered() -> bool:
+        client._mark_session_ok()  # the portal served /Dashboard again
+        return True
+
+    with (
+        patch.object(client, "keepalive", side_effect=recovered),
+        patch(
+            "custom_components.pseg.coordinator.persistent_notification.async_dismiss"
+        ) as dismiss,
+    ):
+        await coord._async_keepalive(datetime.now(UTC))
+        await hass.async_block_till_done()
+
+    assert coord.auth_required is False
+    assert coord.status == "connected"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, f"reauth_required_{entry.entry_id}") is None
+    dismiss.assert_called_once_with(hass, notification_id=notification_id)
+
+
+async def test_transient_keepalive_does_not_clear_sticky_auth_state(hass: HomeAssistant) -> None:
+    """A keepalive that only hits a network blip is not proof the session recovered."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345", data={CONF_OKTA_COOKIES: "idx=test"}
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    coord.auth_required = True
+    coord.status = "auth_required"
+    coord._raise_auth_issues("Authentication expired")
+
+    with patch.object(client, "keepalive", return_value=False):
+        await coord._async_keepalive(datetime.now(UTC))
+
+    assert coord.auth_required is True
+    assert coord.status == "auth_required"
+
+
+async def test_stale_keepalive_does_not_clear_auth_state(hass: HomeAssistant) -> None:
+    """A keepalive from a retired coordinator must not clear the fresh entry's state."""
+    old_jar = [{"name": "idx", "value": "OLD", "domain": OKTA_HOST, "path": "/", "secure": True}]
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="12345",
+        data={CONF_OKTA_COOKIES: "idx=test", "cookies": old_jar},
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    coord.auth_required = True
+    coord.status = "auth_required"
+    coord._raise_auth_issues("Authentication expired")
+    # Reauth replaced the jar: this coordinator's session is now stale.
+    hass.config_entries.async_update_entry(
+        entry,
+        data={
+            **entry.data,
+            "cookies": [
+                {"name": "idx", "value": "NEW", "domain": OKTA_HOST, "path": "/", "secure": True}
+            ],
+        },
+    )
+
+    with patch.object(client, "keepalive", return_value=True):
+        await coord._async_keepalive(datetime.now(UTC))
+        await hass.async_block_till_done()
+
+    assert coord.auth_required is True
+    assert coord.status == "auth_required"
+    assert ir.async_get(hass).async_get_issue(DOMAIN, f"reauth_required_{entry.entry_id}") is not None
 
 
 async def test_retired_poll_auth_failure_does_not_start_reauth(hass: HomeAssistant) -> None:

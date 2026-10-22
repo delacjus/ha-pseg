@@ -340,13 +340,14 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._unsub_keepalive = None
 
     async def _async_keepalive(self, _now: datetime) -> None:
-        """Run keepalive check and persist rotated cookies."""
+        """Run keepalive check, persist rotated cookies and settle auth state."""
         minutes = int(self.keepalive_interval().total_seconds() // 60)
         mode = "local" if self.client.is_local_mode else "okta"
         _LOGGER.debug("Running %d-minute PSE&G keepalive (%s mode)", minutes, mode)
         expired = False
+        recovered = False
         try:
-            await self.hass.async_add_executor_job(self.client.keepalive)
+            recovered = bool(await self.hass.async_add_executor_job(self.client.keepalive))
         except PsegOktaSessionExpired:
             expired = True
         except Exception as err:
@@ -358,16 +359,27 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         await self._async_persist_cookies()
 
-        if (expired or self.client.okta_session_expired_at) and not self.auth_required:
-            self.auth_required = True
-            self.status = "auth_required"
-            self._log_auth_failure("keepalive")
-            self._raise_auth_issues("Authentication expired during background keepalive")
-            # Same outcome as a poll raising ConfigEntryAuthFailed: ask the user now
-            # instead of waiting up to a full poll interval. Guarded by auth_required so
-            # it fires once per expiry; HA also refuses a second concurrent reauth flow.
-            if self.config_entry:
-                self.config_entry.async_start_reauth(self.hass)
+        if expired or self.client.okta_session_expired_at:
+            if not self.auth_required:
+                self.auth_required = True
+                self.status = "auth_required"
+                self._log_auth_failure("keepalive")
+                self._raise_auth_issues("Authentication expired during background keepalive")
+                # Same outcome as a poll raising ConfigEntryAuthFailed: ask the user now
+                # instead of waiting up to a full poll interval. Guarded by auth_required so
+                # it fires once per expiry; HA also refuses a second concurrent reauth flow.
+                if self.config_entry:
+                    self.config_entry.async_start_reauth(self.hass)
+                self.async_update_listeners()
+            return
+
+        if recovered and (self.auth_required or self.status == "auth_required"):
+            # A keepalive that succeeds again proves the session works, but only a
+            # successful poll used to clear this: a recovered keepalive left "auth
+            # required" and its repair/notification up to a full 4-hour poll interval.
+            self.auth_required = False
+            self.status = "connected"
+            self._dismiss_auth_issues()
             self.async_update_listeners()
 
     def _is_stale(self) -> bool:
