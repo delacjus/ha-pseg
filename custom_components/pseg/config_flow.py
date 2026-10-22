@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+import hashlib
 import logging
 import re
+import time
 from typing import Any
 
 from homeassistant import config_entries
@@ -13,7 +16,9 @@ from homeassistant.config_entries import (
     OptionsFlow,
     OptionsFlowWithReload,
 )
-from homeassistant.core import callback
+from homeassistant.core import CALLBACK_TYPE, callback
+from homeassistant.data_entry_flow import UnknownFlow
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.selector import (
     TextSelector,
     TextSelectorConfig,
@@ -22,7 +27,11 @@ from homeassistant.helpers.selector import (
 import requests
 import voluptuous as vol
 
+from .captcha_helper import HELPER_URL_PATH, async_ensure_helper_view
 from .const import (
+    CAPTCHA_ATTEMPT_TTL_SECONDS,
+    CONF_CAPTCHA_CANCEL,
+    CONF_CAPTCHA_RESPONSE,
     CONF_KNOWN_METER_IDS,
     CONF_METER_ID,
     CONF_MYMETER_EMAIL,
@@ -36,13 +45,20 @@ from .const import (
     REMEMBER_ME_COOKIE,
 )
 from .pseg_client import (
+    PsegCaptchaRequired,
     PsegClient,
+    PsegLoginRedirected,
     PsegLoginRejected,
     PsegOktaSessionExpired,
+    PsegSecurityStepRequired,
     PsegTransientError,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Internal marker: validation wants the human CAPTCHA step, never shown as an error.
+_CAPTCHA_REQUIRED = "captcha_required"
+_CAPTCHA_STEP_ID = "captcha"
 
 
 def _normalize_portal_cookies(raw: str) -> str:
@@ -89,6 +105,20 @@ def _known_meter_ids(entry: ConfigEntry) -> set[str]:
     return known
 
 
+def _credentials_schema() -> vol.Schema:
+    """Credentials/cookies form shared by setup, reauth and reconfigure."""
+    return vol.Schema(
+        {
+            vol.Optional(CONF_MYMETER_EMAIL, default=""): str,
+            vol.Optional(CONF_MYMETER_PASSWORD, default=""): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.PASSWORD)
+            ),
+            vol.Optional(CONF_OKTA_COOKIES, default=""): str,
+            vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
+        }
+    )
+
+
 class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for PSE&G Energy."""
 
@@ -97,50 +127,43 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         """Initialize the flow."""
         self._reauth_entry: ConfigEntry | None = None
+        # Assisted CAPTCHA state: the same client/jar/antiforgery token, in memory
+        # only, so the human proof posts to the session that issued the challenge.
+        self._captcha_pending: dict[str, Any] | None = None
+        # Active Home Assistant timer that drops the pending sign-in when it idles.
+        self._captcha_cleanup: CALLBACK_TYPE | None = None
+        # The one credential submission allowed to run in this flow, from the first
+        # credential request through CAPTCHA preparation or the entry write. A
+        # second tab or double submit must never start a second MyMeter login.
+        self._sign_in_operation: object | None = None
+        # Set by async_remove(): Home Assistant has taken this flow out of progress,
+        # so any request still in the executor must never commit or transition it.
+        self._flow_removed = False
 
-    async def _async_validate_and_extract_meter(
-        self, okta_cookies: str, portal_cookies: str, email: str = "", password: str = ""
-    ) -> tuple[dict[str, str], PsegClient | None, str | None, list[str]]:
-        """Validate credentials; return the active meter id and every meter id on the account."""
-        errors: dict[str, str] = {}
-        client = PsegClient(
-            okta_cookies=okta_cookies, portal_cookies=portal_cookies, email=email, password=password
-        )
-        meter_id = None
+    @callback
+    def async_remove(self) -> None:
+        """Drop the pending sign-in when HA removes this flow (cancel/abort/finish)."""
+        self._flow_removed = True
+        self._clear_captcha_pending()
 
-        try:
-            await self.hass.async_add_executor_job(client.ensure_session)
-        except PsegLoginRejected:
-            _LOGGER.warning("PSE&G MyMeter login rejected at setup: %s", client.auth_diagnostics())
-            errors["base"] = "login_failed"
-            return errors, None, None, []
-        except PsegOktaSessionExpired:
-            _LOGGER.warning("PSE&G cookies rejected at setup: %s", client.auth_diagnostics())
-            errors["base"] = "okta_session_invalid"
-            return errors, None, None, []
-        except (PsegTransientError, requests.RequestException):
-            errors["base"] = "cannot_connect"
-            return errors, None, None, []
-        except Exception as err:
-            _LOGGER.exception("Unexpected error validating session: %s", err)
-            errors["base"] = "unknown"
-            return errors, None, None, []
-
-        # The meter id becomes the entry unique_id (the stable statistic key),
-        # so a failed lookup must fail the step rather than fall back to a placeholder
-        # that every account would share.
+    async def _async_fetch_meter(
+        self, client: PsegClient
+    ) -> tuple[dict[str, str], str | None, list[str]]:
+        """Read the meter identity from a signed-in client (no second login)."""
         try:
             data = await self.hass.async_add_executor_job(client.fetch_energy_data, 1)
         except PsegOktaSessionExpired:
             _LOGGER.warning("PSE&G cookies rejected at setup: %s", client.auth_diagnostics())
-            errors["base"] = "okta_session_invalid"
-            return errors, None, None, []
+            return {"base": "okta_session_invalid"}, None, []
         except Exception as err:
             _LOGGER.debug("Could not determine meter id during config flow: %s", type(err).__name__)
-            errors["base"] = "cannot_connect"
-            return errors, None, None, []
+            return {"base": "cannot_connect"}, None, []
 
+        # The meter id becomes the entry unique_id (the stable statistic key),
+        # so a failed lookup must fail the step rather than fall back to a placeholder
+        # that every account would share.
         meter_str = str(data.get("meter") or "")
+        meter_id = None
         if meter_str and meter_str != DEFAULT_METER_NAME:
             match = re.search(r"\d+", meter_str)
             if match:
@@ -149,50 +172,561 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 meter_id = re.sub(r"[^a-z0-9_]+", "_", meter_str.lower()).strip("_")
 
         if not meter_id:
-            errors["base"] = "cannot_connect"
-            return errors, None, None, []
+            return {"base": "cannot_connect"}, None, []
 
         meter_ids = list(data.get("meter_ids") or []) if "meter_ids" in data else [meter_id]
+        return {}, meter_id, meter_ids
 
-        # A live MM_SID can mask cookies that cannot renew. Prove renewal on a fresh
-        # throwaway client: via MyMeter Remember Me when the portal header carries
-        # it (PSE&G's Okta session dies ~1 h after login), else via Okta SSO.
+    async def _async_validate_and_extract_meter(
+        self, okta_cookies: str, portal_cookies: str, email: str = "", password: str = ""
+    ) -> tuple[dict[str, str], PsegClient | None, str | None, list[str]]:
+        """Validate credentials; return the active meter id and every meter id on the account."""
+        client = PsegClient(
+            okta_cookies=okta_cookies, portal_cookies=portal_cookies, email=email, password=password
+        )
+
         if client.has_login:
-            # Signing in with the stored email/password IS the renewal path; prove it
-            # explicitly even if a pasted portal session made ensure_session pass.
+            # The saved login is the strongest proof and one sign-in is enough: this
+            # replaces the old ensure_session-then-login_local double sign-in. A
+            # CAPTCHA refusal hands the same client to the human step below.
+            try:
+                await self.hass.async_add_executor_job(client.login_local)
+            except PsegCaptchaRequired:
+                _LOGGER.info("MyMeter wants a CAPTCHA for this sign-in; asking the user")
+                return {"base": _CAPTCHA_REQUIRED}, client, None, []
+            except PsegSecurityStepRequired:
+                _LOGGER.warning(
+                    "MyMeter asked for a security step at setup: %s", client.auth_diagnostics()
+                )
+                return {"base": "security_step_unsupported"}, None, None, []
+            except PsegLoginRedirected:
+                _LOGGER.warning(
+                    "PSE&G redirected the MyMeter login away from the portal; "
+                    "local sign-in stays on the portal"
+                )
+                return {"base": "login_redirected"}, None, None, []
+            except PsegLoginRejected:
+                _LOGGER.warning(
+                    "PSE&G MyMeter login rejected at setup: %s", client.auth_diagnostics()
+                )
+                return {"base": "login_failed"}, None, None, []
+            except (PsegTransientError, requests.RequestException):
+                return {"base": "cannot_connect"}, None, None, []
+            except Exception as err:
+                _LOGGER.exception("Unexpected error signing in to MyMeter: %s", err)
+                return {"base": "unknown"}, None, None, []
             renewal_client = client
-            renew = renewal_client.login_local
+            renewed = True
             no_session_error = "login_failed"
-        elif client.has_remember_me:
-            # Run on the client whose jar gets saved: renew_remember_me drops MM_SID
-            # first (so nothing is masked), and a remember token rotated by this use
-            # must not be left behind in a throwaway jar.
-            renewal_client = client
-            renew = renewal_client.renew_remember_me
-            no_session_error = "remember_me_failed"
         else:
-            renewal_client = PsegClient(okta_cookies=okta_cookies)
-            renew = renewal_client.ensure_session
-            no_session_error = "okta_no_session"
-        try:
-            renewed = await self.hass.async_add_executor_job(renew)
-        except PsegOktaSessionExpired:
-            _LOGGER.warning("PSE&G renewal check failed at setup: %s", renewal_client.auth_diagnostics())
-            errors["base"] = no_session_error
-            return errors, None, None, []
-        except (PsegTransientError, requests.RequestException):
-            errors["base"] = "cannot_connect"
-            return errors, None, None, []
-        except Exception as err:
-            _LOGGER.exception("Unexpected error validating Okta renewal: %s", err)
-            errors["base"] = "unknown"
-            return errors, None, None, []
+            try:
+                await self.hass.async_add_executor_job(client.ensure_session)
+            except PsegLoginRejected:
+                _LOGGER.warning("PSE&G MyMeter login rejected at setup: %s", client.auth_diagnostics())
+                return {"base": "login_failed"}, None, None, []
+            except PsegOktaSessionExpired:
+                _LOGGER.warning("PSE&G cookies rejected at setup: %s", client.auth_diagnostics())
+                return {"base": "okta_session_invalid"}, None, None, []
+            except (PsegTransientError, requests.RequestException):
+                return {"base": "cannot_connect"}, None, None, []
+            except Exception as err:
+                _LOGGER.exception("Unexpected error validating session: %s", err)
+                return {"base": "unknown"}, None, None, []
+
+            # A live MM_SID can mask cookies that cannot renew. Prove renewal on a fresh
+            # throwaway client: via MyMeter Remember Me when the portal header carries
+            # it (PSE&G's Okta session dies ~1 h after login), else via Okta SSO.
+            if client.has_remember_me:
+                # Run on the client whose jar gets saved: renew_remember_me drops MM_SID
+                # first (so nothing is masked), and a remember token rotated by this use
+                # must not be left behind in a throwaway jar.
+                renewal_client = client
+                renew = renewal_client.renew_remember_me
+                no_session_error = "remember_me_failed"
+            else:
+                renewal_client = PsegClient(okta_cookies=okta_cookies)
+                renew = renewal_client.ensure_session
+                no_session_error = "okta_no_session"
+            try:
+                renewed = await self.hass.async_add_executor_job(renew)
+            except PsegOktaSessionExpired:
+                _LOGGER.warning(
+                    "PSE&G renewal check failed at setup: %s", renewal_client.auth_diagnostics()
+                )
+                return {"base": no_session_error}, None, None, []
+            except (PsegTransientError, requests.RequestException):
+                return {"base": "cannot_connect"}, None, None, []
+            except Exception as err:
+                _LOGGER.exception("Unexpected error validating Okta renewal: %s", err)
+                return {"base": "unknown"}, None, None, []
 
         if not renewed or renewal_client.sso_renewals < 1:
-            errors["base"] = no_session_error
-            return errors, None, None, []
+            return {"base": no_session_error}, None, None, []
 
-        return errors, client, meter_id, meter_ids
+        errors, meter_id, meter_ids = await self._async_fetch_meter(client)
+        if errors:
+            return errors, None, None, []
+        return {}, client, meter_id, meter_ids
+
+    async def _async_begin_captcha(
+        self,
+        step_id: str,
+        client: PsegClient,
+        entry: ConfigEntry | None,
+        okta_cookies: str,
+        portal_cookies: str,
+        email: str,
+        password: str,
+    ) -> str | None:
+        """Prepare a fresh antiforgery state and hold the pending sign-in in memory.
+
+        Returns an error key for the sign-in form, or None when the CAPTCHA form can
+        be shown. The pending client/credentials live only in this flow's memory and
+        are dropped on abort, cancellation, completion or the idle timer.
+        """
+        await async_ensure_helper_view(self.hass)
+        try:
+            await self.hass.async_add_executor_job(client.prepare_login_captcha)
+        except (PsegLoginRejected, PsegTransientError, requests.RequestException):
+            return "cannot_connect"
+        except Exception as err:
+            _LOGGER.exception(
+                "Could not prepare the MyMeter CAPTCHA sign-in: %s", type(err).__name__
+            )
+            return "unknown"
+
+        if self._flow_removed:
+            # Aborted while the login form was loading: hold nothing.
+            return "sign_in_cancelled"
+
+        if self._captcha_pending is not None:
+            # Only an idle pending sign-in can be replaced (an in-flight attempt is
+            # refused before this point); cancel its timer so no timer is orphaned.
+            self._clear_captcha_pending()
+
+        self._captcha_pending = {
+            "step_id": step_id,
+            "entry": entry,
+            "client": client,
+            "okta_cookies": okta_cookies,
+            "portal_cookies": portal_cookies,
+            "email": email,
+            "password": password,
+            # The pending window starts now and is not extended by a new challenge.
+            "prepared_at": time.monotonic(),
+            "used_proofs": set(),
+            "in_flight": False,
+            "attempt": None,
+            "cancelled": False,
+            "expired": False,
+        }
+        self._captcha_cleanup = async_call_later(
+            self.hass, CAPTCHA_ATTEMPT_TTL_SECONDS, self._async_captcha_expired
+        )
+        return None
+
+    @callback
+    def _clear_captcha_pending(self) -> None:
+        """Drop the pending sign-in, its timer and any challenge state from memory."""
+        if self._captcha_cleanup is not None:
+            self._captcha_cleanup()
+            self._captcha_cleanup = None
+        pending = self._captcha_pending
+        if pending is not None:
+            # A request may still be in the executor: mark it so every post-await
+            # guard sees that this attempt must not commit anything.
+            pending["cancelled"] = True
+        self._captcha_pending = None
+
+    def _attempt_expired(self, pending: dict[str, Any]) -> bool:
+        """True when the prepared sign-in idled past the pending-window limit."""
+        return (
+            time.monotonic() - pending["prepared_at"] > CAPTCHA_ATTEMPT_TTL_SECONDS
+        )
+
+    @callback
+    def _async_captcha_expired(self, _now: datetime) -> None:
+        """Timer: drop an idle pending sign-in, or mark an in-flight one to abort."""
+        self._captcha_cleanup = None
+        pending = self._captcha_pending
+        if pending is None:
+            return
+        if pending["in_flight"]:
+            # An executor job still holds this client (and its jar/credentials).
+            # Let it come back and abort through the post-await guard instead of
+            # pulling state out from under a running request.
+            pending["expired"] = True
+            _LOGGER.debug("A pending PSE&G CAPTCHA sign-in expired during a request")
+            return
+        _LOGGER.info(
+            "Dropped a pending PSE&G CAPTCHA sign-in after %s seconds without a proof",
+            CAPTCHA_ATTEMPT_TTL_SECONDS,
+        )
+        self._clear_captcha_pending()
+        self._async_abort_flow("captcha_expired")
+
+    @callback
+    def _async_abort_flow(self, reason: str) -> None:
+        """Abort this flow from outside a step (the pending-window timer)."""
+        try:
+            self.hass.config_entries.flow.async_abort(self.flow_id)
+        except UnknownFlow:
+            pass
+
+    def _async_removed_result(self) -> ConfigFlowResult | None:
+        """Return an abort result if HA already removed this flow, else None."""
+        if not self._flow_removed:
+            return None
+        self._clear_captcha_pending()
+        return self.async_abort(reason="sign_in_cancelled")
+
+    def _async_begin_sign_in(self) -> object | None:
+        """Take this flow's one sign-in operation, or None if one is running."""
+        if self._flow_removed or self._sign_in_operation is not None:
+            return None
+        pending = self._captcha_pending
+        if pending is not None and (pending["in_flight"] or pending["attempt"] is not None):
+            # A proof POST and its meter read own that client: never drop them.
+            return None
+        operation: object = object()
+        self._sign_in_operation = operation
+        return operation
+
+    def _end_sign_in(self, operation: object) -> None:
+        """Release the sign-in operation, but only for the operation that owns it."""
+        if self._sign_in_operation is operation:
+            self._sign_in_operation = None
+
+    def _async_sign_in_stopped(self, operation: object) -> ConfigFlowResult | None:
+        """Return an abort result when this sign-in may no longer commit."""
+        if self._flow_removed:
+            return self._async_removed_result()
+        if self._sign_in_operation is not operation:
+            return self.async_abort(reason="sign_in_cancelled")
+        return None
+
+    def _attempt_lost(self, pending: dict[str, Any]) -> bool:
+        """True when this attempt was cancelled, expired or removed while awaiting."""
+        return (
+            self._flow_removed
+            or self._captcha_pending is not pending
+            or pending["cancelled"]
+            or pending["expired"]
+        )
+
+    def _async_abort_lost_attempt(
+        self, pending: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Finish a step whose attempt was cancelled/expired without committing."""
+        expired = bool(pending["expired"])
+        self._clear_captcha_pending()
+        return self.async_abort(
+            reason="captcha_expired" if expired else "sign_in_cancelled"
+        )
+
+    def _release_attempt(self, pending: dict[str, Any], attempt: object) -> None:
+        """Release the exclusive attempt guard, but only for the attempt that owns it."""
+        if self._captcha_pending is pending and pending["attempt"] is attempt:
+            pending["attempt"] = None
+            pending["in_flight"] = False
+
+    def _helper_url(self) -> str:
+        base = self.hass.config.internal_url or self.hass.config.external_url
+        if not base:
+            return HELPER_URL_PATH
+        return f"{base.rstrip('/')}{HELPER_URL_PATH}"
+
+    def _async_show_captcha_form(self, errors: dict[str, str]) -> ConfigFlowResult:
+        return self.async_show_form(
+            step_id=_CAPTCHA_STEP_ID,
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_CAPTCHA_RESPONSE, default=""): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
+                    vol.Optional(CONF_CAPTCHA_CANCEL, default=False): bool,
+                }
+            ),
+            errors=errors,
+            description_placeholders={"helper_url": self._helper_url()},
+        )
+
+    def _async_show_credentials_form(
+        self, step_id: str, error: str
+    ) -> ConfigFlowResult:
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=_credentials_schema(),
+            errors={"base": error},
+        )
+
+    async def _async_refresh_captcha_challenge(self, pending: dict[str, Any]) -> bool:
+        """Fetch a fresh antiforgery token for another attempt on the same jar."""
+        try:
+            await self.hass.async_add_executor_job(pending["client"].prepare_login_captcha)
+        except Exception as err:
+            _LOGGER.debug("Could not refresh the MyMeter login form: %s", type(err).__name__)
+            return False
+        # A new server challenge, but the pending window still runs from the original
+        # preparation: refreshing never extends how long the sign-in is kept.
+        return True
+
+    async def async_step_captcha(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask the user for one human-solved CAPTCHA proof captured by the helper."""
+        pending = self._captcha_pending
+        if pending is None:
+            return self.async_abort(reason="captcha_not_pending")
+
+        step_id: str = pending["step_id"]
+
+        if user_input is None:
+            if self._attempt_expired(pending):
+                self._clear_captcha_pending()
+                return self.async_abort(reason="captcha_expired")
+            return self._async_show_captcha_form({})
+
+        if user_input.get(CONF_CAPTCHA_CANCEL):
+            # Cancelling wins even while a request is in flight: the running
+            # attempt sees the cancelled marker and cannot commit.
+            self._clear_captcha_pending()
+            return self.async_abort(reason="captcha_cancelled")
+
+        proof = str(user_input.get(CONF_CAPTCHA_RESPONSE) or "").strip()
+        if not proof:
+            return self._async_show_captcha_form({"base": "captcha_response_required"})
+
+        if self._attempt_expired(pending):
+            self._clear_captcha_pending()
+            return self.async_abort(reason="captcha_expired")
+
+        # Compare digests so a spent proof is never kept (or logged) verbatim.
+        digest = hashlib.sha256(proof.encode("utf-8")).hexdigest()
+        if digest in pending["used_proofs"]:
+            return self._async_show_captcha_form({"base": "captcha_proof_used"})
+        if pending["in_flight"]:
+            return self._async_show_captcha_form({"base": "captcha_busy"})
+
+        # One attempt owns this client from the proof submit through the meter read
+        # and the entry update: a second submission (another tab, a double click)
+        # is refused instead of posting a second login on the same pending sign-in.
+        # The guard is released only by the attempt that took it.
+        attempt = pending["attempt"] = object()
+        pending["in_flight"] = True
+        # Mark it spent before the request: a proof that reached PSE&G is gone even
+        # if the reply is lost, so it is never resent and never reused.
+        pending["used_proofs"].add(digest)
+        client: PsegClient = pending["client"]
+        try:
+            try:
+                await self.hass.async_add_executor_job(
+                    client.submit_login_captcha, proof
+                )
+            except PsegCaptchaRequired:
+                if self._attempt_lost(pending):
+                    return self._async_abort_lost_attempt(pending)
+                if not await self._async_refresh_captcha_challenge(pending):
+                    if self._attempt_lost(pending):
+                        return self._async_abort_lost_attempt(pending)
+                    return self._async_show_captcha_form({"base": "cannot_connect"})
+                if self._attempt_lost(pending):
+                    return self._async_abort_lost_attempt(pending)
+                return self._async_show_captcha_form({"base": "captcha_rejected"})
+            except PsegSecurityStepRequired:
+                if self._attempt_lost(pending):
+                    return self._async_abort_lost_attempt(pending)
+                self._clear_captcha_pending()
+                return self._async_show_credentials_form(
+                    step_id, "security_step_unsupported"
+                )
+            except PsegLoginRedirected:
+                if self._attempt_lost(pending):
+                    return self._async_abort_lost_attempt(pending)
+                self._clear_captcha_pending()
+                return self._async_show_credentials_form(step_id, "login_redirected")
+            except PsegLoginRejected:
+                if self._attempt_lost(pending):
+                    return self._async_abort_lost_attempt(pending)
+                self._clear_captcha_pending()
+                return self._async_show_credentials_form(step_id, "login_failed")
+            except (PsegTransientError, requests.RequestException):
+                # The proof may already be spent server-side: keep the same sign-in but
+                # require a fresh proof, never an automatic resend.
+                if self._attempt_lost(pending):
+                    return self._async_abort_lost_attempt(pending)
+                return self._async_show_captcha_form({"base": "cannot_connect"})
+            except Exception as err:
+                _LOGGER.exception(
+                    "Unexpected error submitting the CAPTCHA proof: %s", type(err).__name__
+                )
+                if self._attempt_lost(pending):
+                    return self._async_abort_lost_attempt(pending)
+                self._clear_captcha_pending()
+                return self._async_show_credentials_form(step_id, "unknown")
+
+            # The proof was spent and MyMeter issued this session.
+            if self._attempt_lost(pending):
+                return self._async_abort_lost_attempt(pending)
+            errors, meter_id, meter_ids = await self._async_fetch_meter(client)
+            if self._attempt_lost(pending):
+                return self._async_abort_lost_attempt(pending)
+            if errors or not meter_id:
+                self._clear_captcha_pending()
+                return self._async_show_credentials_form(
+                    step_id, errors.get("base", "cannot_connect")
+                )
+            return await self._async_finish_captcha(
+                pending, client, meter_id, meter_ids
+            )
+        finally:
+            self._release_attempt(pending, attempt)
+
+    async def _async_finish_captcha(
+        self,
+        pending: dict[str, Any],
+        client: PsegClient,
+        meter_id: str,
+        meter_ids: list[str],
+    ) -> ConfigFlowResult:
+        """Create or update the entry from a CAPTCHA-assisted sign-in."""
+        if self._attempt_lost(pending):
+            return self._async_abort_lost_attempt(pending)
+
+        entry: ConfigEntry | None = pending["entry"]
+        fields = {
+            CONF_OKTA_COOKIES: pending["okta_cookies"],
+            CONF_PORTAL_COOKIES: pending["portal_cookies"],
+            CONF_MYMETER_EMAIL: pending["email"],
+            CONF_MYMETER_PASSWORD: pending["password"],
+            "cookies": client.export_cookies(),
+        }
+
+        if entry is None:
+            await self.async_set_unique_id(meter_id)
+            # async_set_unique_id can abort other flows and yields: re-check that
+            # this attempt is still live before creating anything.
+            if self._attempt_lost(pending):
+                return self._async_abort_lost_attempt(pending)
+            self._abort_if_unique_id_configured()
+            if any(
+                set(meter_ids) & _known_meter_ids(other)
+                for other in self.hass.config_entries.async_entries(DOMAIN)
+            ):
+                return self.async_abort(reason="already_configured")
+            return self.async_create_entry(
+                title=f"PSE&G ({meter_id})",
+                data={**fields, CONF_METER_ID: meter_id, CONF_KNOWN_METER_IDS: meter_ids},
+            )
+
+        known = _known_meter_ids(entry)
+        if meter_ids and known.isdisjoint(meter_ids):
+            return self.async_abort(reason="reauth_account_mismatch")
+        return self.async_update_reload_and_abort(
+            entry,
+            data={
+                **entry.data,
+                **fields,
+                CONF_KNOWN_METER_IDS: sorted(known.union(meter_ids)),
+            },
+        )
+
+    async def _async_guarded_sign_in(
+        self,
+        step_id: str,
+        entry: ConfigEntry | None,
+        okta_cookies: str,
+        portal_cookies: str,
+        email: str,
+        password: str,
+    ) -> ConfigFlowResult:
+        """Run one credential submission as this flow's only sign-in.
+
+        The guard is taken before the first credential request, so a second tab, a
+        double submit or a late completion cannot start a second MyMeter login,
+        replace the pending CAPTCHA client/timer, or commit over it. It is held
+        through CAPTCHA preparation and the entry write, then released so the human
+        CAPTCHA step continues from the same pending sign-in without a second login.
+        """
+        removed = self._async_removed_result()
+        if removed is not None:
+            return removed
+        operation = self._async_begin_sign_in()
+        if operation is None:
+            # Another submission in this flow is still signing in; refuse instead of
+            # clearing its pending client/timer or posting a second login.
+            return self._async_show_credentials_form(step_id, "sign_in_busy")
+        try:
+            # Safe here: only an idle pending sign-in can be replaced.
+            self._clear_captcha_pending()
+            errors, client, meter_id, meter_ids = await self._async_validate_and_extract_meter(
+                okta_cookies, portal_cookies, email, password
+            )
+            # Every await above may have outlived an abort; check before any commit.
+            stopped = self._async_sign_in_stopped(operation)
+            if stopped is not None:
+                return stopped
+
+            if client is not None and errors.get("base") == _CAPTCHA_REQUIRED:
+                captcha_error = await self._async_begin_captcha(
+                    step_id, client, entry, okta_cookies, portal_cookies, email, password
+                )
+                stopped = self._async_sign_in_stopped(operation)
+                if stopped is not None:
+                    return stopped
+                if captcha_error is None:
+                    return await self.async_step_captcha()
+                errors["base"] = captcha_error
+
+            if not errors and client and meter_id:
+                fields = {
+                    CONF_OKTA_COOKIES: okta_cookies,
+                    CONF_PORTAL_COOKIES: portal_cookies,
+                    CONF_MYMETER_EMAIL: email,
+                    CONF_MYMETER_PASSWORD: password,
+                    "cookies": client.export_cookies(),
+                }
+                if entry is None:
+                    await self.async_set_unique_id(meter_id)
+                    # async_set_unique_id can abort other flows and yields: re-check
+                    # that this submission is still live before creating anything.
+                    stopped = self._async_sign_in_stopped(operation)
+                    if stopped is not None:
+                        return stopped
+                    self._abort_if_unique_id_configured()
+                    if any(
+                        set(meter_ids) & _known_meter_ids(other)
+                        for other in self.hass.config_entries.async_entries(DOMAIN)
+                    ):
+                        return self.async_abort(reason="already_configured")
+                    return self.async_create_entry(
+                        title=f"PSE&G ({meter_id})",
+                        data={
+                            **fields,
+                            CONF_METER_ID: meter_id,
+                            CONF_KNOWN_METER_IDS: meter_ids,
+                        },
+                    )
+
+                known = _known_meter_ids(entry)
+                if meter_ids and known.isdisjoint(meter_ids):
+                    return self.async_abort(reason="reauth_account_mismatch")
+                return self.async_update_reload_and_abort(
+                    entry,
+                    data={
+                        **entry.data,
+                        **fields,
+                        CONF_KNOWN_METER_IDS: sorted(known.union(meter_ids)),
+                    },
+                )
+        finally:
+            self._end_sign_in(operation)
+
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=_credentials_schema(),
+            errors=errors,
+        )
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -209,45 +743,13 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not okta_cookies and not portal_cookies and not (email and password):
                 errors["base"] = "missing_credentials"
             else:
-                errors, client, meter_id, meter_ids = await self._async_validate_and_extract_meter(
-                    okta_cookies, portal_cookies, email, password
+                return await self._async_guarded_sign_in(
+                    "user", None, okta_cookies, portal_cookies, email, password
                 )
-                if not errors and client and meter_id:
-                    await self.async_set_unique_id(meter_id)
-                    self._abort_if_unique_id_configured()
-                    if any(
-                        set(meter_ids) & _known_meter_ids(entry)
-                        for entry in self.hass.config_entries.async_entries(DOMAIN)
-                    ):
-                        return self.async_abort(reason="already_configured")
-
-                    return self.async_create_entry(
-                        title=f"PSE&G ({meter_id})",
-                        data={
-                            CONF_OKTA_COOKIES: okta_cookies,
-                            CONF_PORTAL_COOKIES: portal_cookies,
-                            CONF_MYMETER_EMAIL: email,
-                            CONF_MYMETER_PASSWORD: password,
-                            CONF_METER_ID: meter_id,
-                            CONF_KNOWN_METER_IDS: meter_ids,
-                            "cookies": client.export_cookies(),
-                        },
-                    )
-
-        schema = vol.Schema(
-            {
-                vol.Optional(CONF_MYMETER_EMAIL, default=""): str,
-                vol.Optional(CONF_MYMETER_PASSWORD, default=""): TextSelector(
-                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
-                ),
-                vol.Optional(CONF_OKTA_COOKIES, default=""): str,
-                vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
-            }
-        )
 
         return self.async_show_form(
             step_id="user",
-            data_schema=schema,
+            data_schema=_credentials_schema(),
             errors=errors,
         )
 
@@ -280,41 +782,18 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not okta_cookies and not portal_cookies and not (email and password):
                 errors["base"] = "missing_credentials"
             else:
-                errors, client, meter_id, meter_ids = await self._async_validate_and_extract_meter(
-                    okta_cookies, portal_cookies, email, password
+                return await self._async_guarded_sign_in(
+                    "reauth_confirm",
+                    self._reauth_entry,
+                    okta_cookies,
+                    portal_cookies,
+                    email,
+                    password,
                 )
-                if not errors and client and meter_id:
-                    known = _known_meter_ids(self._reauth_entry)
-                    if meter_ids and known.isdisjoint(meter_ids):
-                        return self.async_abort(reason="reauth_account_mismatch")
-
-                    return self.async_update_reload_and_abort(
-                        self._reauth_entry,
-                        data={
-                            **self._reauth_entry.data,
-                            CONF_OKTA_COOKIES: okta_cookies,
-                            CONF_PORTAL_COOKIES: portal_cookies,
-                            CONF_MYMETER_EMAIL: email,
-                            CONF_MYMETER_PASSWORD: password,
-                            CONF_KNOWN_METER_IDS: sorted(known.union(meter_ids)),
-                            "cookies": client.export_cookies(),
-                        },
-                    )
-
-        schema = vol.Schema(
-            {
-                vol.Optional(CONF_MYMETER_EMAIL, default=""): str,
-                vol.Optional(CONF_MYMETER_PASSWORD, default=""): TextSelector(
-                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
-                ),
-                vol.Optional(CONF_OKTA_COOKIES, default=""): str,
-                vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
-            }
-        )
 
         return self.async_show_form(
             step_id="reauth_confirm",
-            data_schema=schema,
+            data_schema=_credentials_schema(),
             errors=errors,
         )
 
@@ -341,41 +820,18 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if not okta_cookies and not portal_cookies and not (email and password):
                 errors["base"] = "missing_credentials"
             else:
-                errors, client, meter_id, meter_ids = await self._async_validate_and_extract_meter(
-                    okta_cookies, portal_cookies, email, password
+                return await self._async_guarded_sign_in(
+                    "reconfigure",
+                    reconfigure_entry,
+                    okta_cookies,
+                    portal_cookies,
+                    email,
+                    password,
                 )
-                if not errors and client and meter_id:
-                    known = _known_meter_ids(reconfigure_entry)
-                    if meter_ids and known.isdisjoint(meter_ids):
-                        return self.async_abort(reason="reauth_account_mismatch")
-
-                    return self.async_update_reload_and_abort(
-                        reconfigure_entry,
-                        data={
-                            **reconfigure_entry.data,
-                            CONF_OKTA_COOKIES: okta_cookies,
-                            CONF_PORTAL_COOKIES: portal_cookies,
-                            CONF_MYMETER_EMAIL: email,
-                            CONF_MYMETER_PASSWORD: password,
-                            CONF_KNOWN_METER_IDS: sorted(known.union(meter_ids)),
-                            "cookies": client.export_cookies(),
-                        },
-                    )
-
-        schema = vol.Schema(
-            {
-                vol.Optional(CONF_MYMETER_EMAIL, default=""): str,
-                vol.Optional(CONF_MYMETER_PASSWORD, default=""): TextSelector(
-                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
-                ),
-                vol.Optional(CONF_OKTA_COOKIES, default=""): str,
-                vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
-            }
-        )
 
         return self.async_show_form(
             step_id="reconfigure",
-            data_schema=schema,
+            data_schema=_credentials_schema(),
             errors=errors,
         )
 

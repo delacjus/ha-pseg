@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "PSE&G verification helper",
+  "version": "0.1.0",
+  "description": "User-invoked helper that holds a MyMeter reCAPTCHA response on the page for manual copy. Experimental; never submits it.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "action": {
+    "default_title": "PSE&G verification helper: open the MyMeter page, then click"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  }
+}

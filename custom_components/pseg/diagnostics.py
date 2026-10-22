@@ -8,7 +8,13 @@ from homeassistant.components.diagnostics import async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_COOKIE, CONF_OKTA_COOKIES, CONF_PORTAL_COOKIES, DOMAIN
+from .const import (
+    CONF_CAPTCHA_RESPONSE,
+    CONF_COOKIE,
+    CONF_OKTA_COOKIES,
+    CONF_PORTAL_COOKIES,
+    DOMAIN,
+)
 from .coordinator import PsegDataUpdateCoordinator
 
 TO_REDACT = {
@@ -20,6 +26,8 @@ TO_REDACT = {
     "mymeter_email",
     "mymeter_password",
     "token",
+    CONF_CAPTCHA_RESPONSE,
+    "g-recaptcha-response",
     "__RequestVerificationToken",
     "SAMLResponse",
 }

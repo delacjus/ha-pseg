@@ -18,6 +18,14 @@ CONF_MYMETER_EMAIL = "mymeter_email"
 CONF_MYMETER_PASSWORD = "mymeter_password"
 # MyMeter local login 'Remember Me' cookie (~1 year), the long-lived renewal path.
 REMEMBER_ME_COOKIE = "MM_RememberMe"
+# Human CAPTCHA hand-off (config flow only): one-use proof, never persisted.
+CONF_CAPTCHA_RESPONSE = "captcha_response"
+CONF_CAPTCHA_CANCEL = "captcha_cancel"
+# How long a prepared CAPTCHA sign-in (client, cookie jar, antiforgery state) stays
+# pending. This is NOT the proof's lifetime: Google/PSE&G give a reCAPTCHA response
+# about two minutes, and Home Assistant cannot see when the browser captured it, so
+# the provider stays the authority on freshness. HA only bounds its own pending state.
+CAPTCHA_ATTEMPT_TTL_SECONDS = 600
 
 DEFAULT_PRICE_PER_KWH = 0.247
 # Placeholder the client reports when the chart has no meter series.

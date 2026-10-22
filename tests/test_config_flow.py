@@ -1,5 +1,7 @@
 """Tests for PSE&G config flow and options flow."""
 
+import json
+from pathlib import Path
 from unittest.mock import call, patch
 
 from homeassistant.config_entries import SOURCE_USER
@@ -760,7 +762,7 @@ async def test_user_flow_email_password_rejected(hass: HomeAssistant) -> None:
     from custom_components.pseg.pseg_client import PsegLoginRejected
 
     with patch(
-        "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+        "custom_components.pseg.pseg_client.PsegClient.login_local",
         side_effect=PsegLoginRejected("bad"),
     ):
         result = await hass.config_entries.flow.async_init(
@@ -942,3 +944,39 @@ async def test_blank_credentials_without_stored_login_is_missing_credentials(
         )
     assert updated["type"] == FlowResultType.FORM
     assert updated["errors"] == {"base": "missing_credentials"}
+
+
+async def test_user_flow_redirected_local_login_is_not_followed(hass: HomeAssistant) -> None:
+    """A redirect to Okta becomes a clear error, never an entry or an Okta login."""
+    from custom_components.pseg.pseg_client import PsegLoginRedirected
+
+    with patch(
+        "custom_components.pseg.pseg_client.PsegClient.login_local",
+        side_effect=PsegLoginRedirected("redirected"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+            data={"mymeter_email": "me@example.com", "mymeter_password": "pw"},
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "login_redirected"}
+    assert hass.config_entries.async_entries(DOMAIN) == []
+
+
+def test_captcha_step_description_reaches_the_renderer_as_real_newlines() -> None:
+    """R2: the shipped JSON must decode to newlines, not literal backslash-n.
+
+    The step description was double escaped, so HA rendered one run-on paragraph
+    with visible ``\\n`` text instead of the numbered helper steps.
+    """
+    package = Path(__file__).parent.parent / "custom_components" / "pseg"
+    for name in ("strings.json", "translations/en.json"):
+        description = json.loads((package / name).read_text(encoding="utf-8"))[
+            "config"
+        ]["step"]["captcha"]["description"]
+        assert "\\n" not in description
+        assert description.count("\n") == 8
+        assert "\n\n1. " in description
+        assert "\n5. " in description
+        assert "\n\nThe proof " in description

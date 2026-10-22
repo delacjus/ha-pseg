@@ -407,7 +407,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         entry_id = self.config_entry.entry_id if self.config_entry else "default"
         msg = (
             "Your PSE&G session has expired. "
-            "Please go to **Settings > Devices & Services > PSE&G** and click **Reconfigure** to paste a fresh Okta session cookie."
+            "Please go to **Settings > Devices & Services > PSE&G**, open the entry, "
+            "and follow the **Re-authenticate** prompt. If PSE&G asks for a CAPTCHA, "
+            "the prompt walks you through solving it in your browser."
         )
         persistent_notification.async_create(
             self.hass,

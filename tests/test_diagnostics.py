@@ -83,6 +83,27 @@ async def test_diagnostics_redacts_sensitive_data(hass: HomeAssistant) -> None:
     assert telemetry["okta_session_expired_at"] is None
 
 
+async def test_diagnostics_redacts_captcha_proof_fields(hass: HomeAssistant) -> None:
+    """A stray CAPTCHA proof mirrored into entry data is redacted like a password."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="12345",
+        data={
+            "captcha_response": "proof-must-not-leak-6c1f",
+            "g-recaptcha-response": "proof-must-not-leak-6c1f",
+            "mymeter_email": "me@example.com",
+        },
+    )
+    entry.add_to_hass(hass)
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert diag["entry"]["data"]["captcha_response"] == REDACTED
+    assert diag["entry"]["data"]["g-recaptcha-response"] == REDACTED
+    assert "proof-must-not-leak-6c1f" not in str(diag)
+
+
 async def test_diagnostics_for_entry_that_is_not_loaded(hass: HomeAssistant) -> None:
     """A SETUP_RETRY entry has no coordinator; diagnostics still return redacted entry data."""
     entry = MockConfigEntry(

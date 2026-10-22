@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect PSE&G Account",
-        "description": "Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant signs in by itself whenever the session ends. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
+        "description": "Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant stores that login in this integration's config and uses it for MyMeter's own sign-in, not Okta, so Okta's two-factor prompt is not used. How long that keeps working without you is not verified: PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
         "data": {
           "mymeter_email": "MyMeter email",
           "mymeter_password": "MyMeter password",
@@ -13,7 +13,7 @@
       },
       "reauth_confirm": {
         "title": "Re-authenticate PSE&G",
-        "description": "PSE&G needs you to sign in again. Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant signs in by itself whenever the session ends. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
+        "description": "PSE&G needs you to sign in again. Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant stores that login in this integration's config and uses it for MyMeter's own sign-in, not Okta, so Okta's two-factor prompt is not used. How long that keeps working without you is not verified: PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
         "data": {
           "mymeter_email": "MyMeter email",
           "mymeter_password": "MyMeter password",
@@ -23,12 +23,20 @@
       },
       "reconfigure": {
         "title": "Reconfigure PSE&G Connection",
-        "description": "Update how Home Assistant signs in to PSE&G. Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant signs in by itself whenever the session ends. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
+        "description": "Update how Home Assistant signs in to PSE&G. Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant stores that login in this integration's config and uses it for MyMeter's own sign-in, not Okta, so Okta's two-factor prompt is not used. How long that keeps working without you is not verified: PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
         "data": {
           "mymeter_email": "MyMeter email",
           "mymeter_password": "MyMeter password",
           "okta_cookies": "Okta Cookies (optional, old method)",
           "portal_cookies": "Portal Cookies (optional, old method)"
+        }
+      },
+      "captcha": {
+        "title": "PSE&G CAPTCHA Sign-In",
+        "description": "PSE&G wants a CAPTCHA that Home Assistant cannot solve itself. Solve it in a desktop browser and hand back one proof. Google's reCAPTCHA response is only valid for about two minutes, and Home Assistant drops this pending sign-in after ten minutes without a proof.\n\n1. Open {helper_url} in a browser tab and drag the **PSE&G CAPTCHA helper** button to your bookmarks bar.\n2. In another tab, open https://mysmartenergy.nj.pseg.com and wait for the MyMeter Email/Password sign-in page.\n3. Click the **PSE&G CAPTCHA helper** bookmarklet once to arm it (it does not sign you in), then click **Sign In** and solve the CAPTCHA yourself.\n4. The helper holds the proof the page was about to send and stops that login request. Press **Copy verification** (or copy the text yourself).\n5. Paste it into the masked CAPTCHA field below and submit.\n\nThe proof can be used only once and is never saved. This hand-off is new: PSE&G may still reject a proof solved in a different browser, in which case capture a fresh one.",
+        "data": {
+          "captcha_response": "CAPTCHA proof (paste from the helper)",
+          "captcha_cancel": "Cancel this sign-in"
         }
       }
     },
@@ -39,13 +47,24 @@
       "cannot_connect": "Failed to connect to PSE&G. Please check your network connection.",
       "unknown": "An unexpected error occurred while communicating with PSE&G.",
       "remember_me_failed": "The Portal Cookies contain MM_RememberMe, but MyMeter did not sign in with it on its own. Sign out, sign in again with the Email/Password boxes and Remember Me ON, then copy the Cookie header from a Dashboard request.",
-      "login_failed": "MyMeter did not accept that email/password, or it asked for a captcha or security question. Check the login on mysmartenergy.nj.pseg.com in a browser, then try again."
+      "login_failed": "MyMeter did not accept that email/password. Check it on mysmartenergy.nj.pseg.com, then try again.",
+      "security_step_unsupported": "MyMeter asked for a security question or a password change, which Home Assistant cannot answer. Complete it at mysmartenergy.nj.pseg.com, then try again.",
+      "captcha_response_required": "Paste the CAPTCHA proof from the helper page.",
+      "captcha_proof_used": "That CAPTCHA proof was already sent. Capture a fresh one with the helper and paste it here.",
+      "captcha_rejected": "PSE&G did not accept that CAPTCHA proof. Capture a fresh one with the helper and try again.",
+      "captcha_busy": "A CAPTCHA sign-in is already running. Wait for it to finish, then try again.",
+      "sign_in_busy": "A PSE&G sign-in is already running in this dialog. Wait for it to finish, then submit again.",
+      "login_redirected": "PSE&G sent the MyMeter email/password sign-in to its Okta account page. Home Assistant refuses to follow that redirect, so the saved login never goes to Okta; this account may need the Okta cookie method instead."
     },
     "abort": {
       "already_configured": "This PSE&G account is already configured.",
       "reauth_successful": "Re-authentication was successful.",
       "reconfigure_successful": "Reconfiguration was successful.",
-      "reauth_account_mismatch": "The provided credentials belong to a different account than the one configured."
+      "reauth_account_mismatch": "The provided credentials belong to a different account than the one configured.",
+      "captcha_cancelled": "CAPTCHA sign-in cancelled. Start again when you are ready.",
+      "captcha_expired": "This CAPTCHA sign-in expired after ten minutes without a proof. Start again and capture a fresh proof.",
+      "captcha_not_pending": "No CAPTCHA sign-in is waiting for a proof. Start again from the PSE&G sign-in form.",
+      "sign_in_cancelled": "The sign-in attempt was closed before it finished. Nothing was saved."
     }
   },
   "options": {

@@ -42,6 +42,10 @@ _LOGIN_PATH_MARKERS = (*_SIGNIN_PATH_MARKERS, "/saml/")
 _OKTA_WIDGET_MARKERS = ("OktaSignIn", "stateToken")
 # MyMeter's anonymous home page renders its local login form (live 2026-10-21).
 _PORTAL_LOGIN_FORM_MARKERS = ('name="LoginEmail"', 'id="LoginPassword"')
+# The portal names the CAPTCHA in its login error (live 2026-10-22, real account):
+# "Please provide a valid login captcha."
+_CAPTCHA_ERROR_MARKER = "captcha"
+_CAPTCHA_ERROR_PHRASE = "please provide a valid login captcha"
 
 
 class PsegError(Exception):
@@ -61,7 +65,34 @@ class PsegOktaSessionExpired(PsegAuthError):
 
 
 class PsegLoginRejected(PsegOktaSessionExpired):
-    """MyMeter email/password login refused (bad password, captcha, 2FA, security question)."""
+    """MyMeter email/password login refused (bad password or another refused sign-in)."""
+
+
+class PsegLoginRedirected(PsegLoginRejected):
+    """MyMeter answered the local login with a redirect instead of accepting it.
+
+    The saved MyMeter email/password belongs to the portal's own form, so a redirect
+    (in particular to the Okta host) is refused rather than followed: following it
+    would forward the password body to another origin. The message never includes
+    the raw Location header.
+    """
+
+
+class PsegCaptchaRequired(PsegLoginRejected):
+    """MyMeter refused the sign-in because it wants a human-solved CAPTCHA.
+
+    Raised only when the server itself names the CAPTCHA (the ``RecaptchaOnLogin``
+    flag or a "captcha" error message), so a wrong password is never mislabelled.
+    The proof is single-use and only the config flow's human step can supply one.
+    """
+
+
+class PsegSecurityStepRequired(PsegLoginRejected):
+    """MyMeter asked for a security question or a password change.
+
+    Home Assistant cannot answer those, so the user has to finish the sign-in in a
+    browser; this is never treated as a solvable CAPTCHA.
+    """
 
 
 class PsegTransientError(PsegError):
@@ -69,13 +100,19 @@ class PsegTransientError(PsegError):
 
 
 class AllowlistedSession(requests.Session):
-    """Requests session that strictly enforces host allowlist on all requests and redirects."""
+    """Requests session that enforces a host allowlist on every request and redirect."""
+
+    def __init__(self) -> None:
+        """Start with both PSE&G hosts; the client narrows this for local logins."""
+        super().__init__()
+        self.allowed_hosts: frozenset[str] = frozenset(ALLOWED_HOSTS)
+        self.trace: list[str] = []
 
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
         # Runs for the first request and every redirect hop (resolve_redirects calls
         # send), before the cookie-bearing request leaves the process.
         parsed = urllib.parse.urlparse(request.url)
-        if parsed.hostname not in ALLOWED_HOSTS:
+        if parsed.hostname not in self.allowed_hosts:
             raise PsegSecurityError(
                 f"Request to unauthorized host blocked: {parsed.hostname or request.url}"
             )
@@ -83,10 +120,15 @@ class AllowlistedSession(requests.Session):
             raise PsegSecurityError(
                 f"Request to {parsed.hostname} blocked: scheme {parsed.scheme!r} is not https"
             )
+        # Parse the port outside any handler: raising from inside `except ValueError`
+        # would chain the raw URL text as __context__, even with `from None`.
+        invalid_port = False
         try:
             port = parsed.port
-        except ValueError as err:
-            raise PsegSecurityError(f"Request to {parsed.hostname} blocked: bad port") from err
+        except ValueError:
+            invalid_port = True
+        if invalid_port:
+            raise PsegSecurityError(f"Request to {parsed.hostname} blocked: bad port")
         if port not in (None, 443):
             raise PsegSecurityError(f"Request to {parsed.hostname} blocked: port {port}")
         resp = super().send(request, **kwargs)
@@ -100,10 +142,6 @@ class AllowlistedSession(requests.Session):
         )
         del self.trace[:-20]
         return resp
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.trace: list[str] = []
 
 
 def _locked[**P, R](func: Callable[P, R]) -> Callable[P, R]:
@@ -152,6 +190,14 @@ class PsegClient:
         # MyMeter local login. Never logged; only sent to PORTAL_HOST/Home/Login.
         self._email = email.strip()
         self._password = password
+        # Local sign-in mode stays on the portal: a saved MyMeter email/password is
+        # never sent to PSE&G's Okta host, and no local request may follow a redirect
+        # there (no silent SSO fallback, no Okta 2FA). Legacy cookie/SAML clients
+        # keep both hosts for the explicit Okta path.
+        if self.has_login:
+            self.session.allowed_hosts = frozenset({PORTAL_HOST})
+        # Antiforgery token for a human CAPTCHA proof, held in memory only.
+        self._pending_login_token = ""
 
         # Session telemetry
         self.session_established_at: str | None = None
@@ -306,6 +352,14 @@ class PsegClient:
             resp = self.session.get(
                 f"{PORTAL_BASE_URL}/Dashboard", allow_redirects=True, timeout=timeout
             )
+        except PsegSecurityError:
+            if self.has_login:
+                # A local sign-in may only bounce within the portal; the blocked
+                # host is a redirect away from it, so report it as such (host only).
+                raise PsegLoginRedirected(
+                    "PSE&G redirected the local sign-in away from the portal"
+                ) from None
+            raise
         except requests.RequestException as err:
             raise PsegTransientError(f"Network error connecting to PSE&G: {err}") from err
         if resp.status_code >= 500:
@@ -357,17 +411,8 @@ class PsegClient:
         return bool(self._email and self._password)
 
     @_locked
-    def login_local(self) -> bool:
-        """Sign in with the MyMeter email/password (the page's local login form).
-
-        Live 2026-10-21: POST /Home/Login without a reCAPTCHA token was answered with
-        a normal "Invalid email address or password" for fake credentials, so the
-        captcha is not enforced on a first attempt (the page's RecaptchaOnLogin flag
-        suggests it starts after failures). Any refusal raises PsegLoginRejected and
-        is never retried automatically, so a wrong password cannot trigger lockouts.
-        """
-        if not self.has_login:
-            raise PsegLoginRejected("No MyMeter email/password stored")
+    def _login_form_token(self) -> str:
+        """GET the login page and return its antiforgery token ('' if absent)."""
         try:
             home = self.session.get(f"{PORTAL_BASE_URL}/", allow_redirects=True, timeout=20)
         except requests.RequestException as err:
@@ -377,7 +422,19 @@ class PsegClient:
         tag = BeautifulSoup(home.text, "html.parser").find(
             "input", attrs={"name": "__RequestVerificationToken"}
         )
-        token = str(tag["value"]) if tag and tag.get("value") else ""
+        return str(tag["value"]) if tag and tag.get("value") else ""
+
+    def _login_headers(self, token: str) -> dict[str, str]:
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{PORTAL_BASE_URL}/",
+            "Origin": PORTAL_BASE_URL,
+        }
+        if token:
+            headers["RequestVerificationToken"] = token
+        return headers
+
+    def _login_payload(self, token: str, captcha_response: str) -> dict[str, str]:
         data = {
             "RedirectUrl": "",
             "LoginErrorMessage": "",
@@ -388,20 +445,15 @@ class PsegClient:
             "SecretQuestionRendered": "False",
             "RememberMe": "true",
         }
-        headers = {
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{PORTAL_BASE_URL}/",
-            "Origin": PORTAL_BASE_URL,
-        }
         if token:
             data["__RequestVerificationToken"] = token
-            headers["RequestVerificationToken"] = token
-        try:
-            resp = self.session.post(
-                f"{PORTAL_BASE_URL}/Home/Login", data=data, headers=headers, timeout=25
-            )
-        except requests.RequestException as err:
-            raise PsegTransientError(f"Network error during MyMeter login: {err}") from err
+        if captcha_response:
+            # One human-supplied proof, sent once. Never stored, exported or logged.
+            data["g-recaptcha-response"] = captcha_response
+        return data
+
+    def _classify_login_response(self, resp: requests.Response) -> dict[str, Any]:
+        """Raise the precise rejection for a /Home/Login reply, else return its Data."""
         if resp.status_code >= 500:
             raise PsegTransientError(f"MyMeter login returned HTTP {resp.status_code}")
         try:
@@ -410,14 +462,30 @@ class PsegClient:
             body = {}
         result = body.get("Data") if isinstance(body, dict) else None
         result = result if isinstance(result, dict) else {}
-        if result.get("LoginErrorMessage"):
+        message = str(result.get("LoginErrorMessage") or "")
+        # The exact server phrase may arrive outside Data (observed live); the full
+        # phrase plus an unstructured reply keeps a successful login and a wrong
+        # password out of the CAPTCHA path.
+        body_is_captcha = not result and _CAPTCHA_ERROR_PHRASE in (resp.text or "").lower()
+        if (
+            result.get("RecaptchaOnLogin")
+            or _CAPTCHA_ERROR_MARKER in message.lower()
+            or body_is_captcha
+        ):
+            self._mark_okta_expired()
+            raise PsegCaptchaRequired("MyMeter requires a solved CAPTCHA")
+        if result.get("SecretQuestionError") or result.get("PasswordExpiredModalData"):
+            self._mark_okta_expired()
+            raise PsegSecurityStepRequired(
+                "MyMeter wants a security question or password change"
+            )
+        if message:
             self._mark_okta_expired()
             raise PsegLoginRejected("MyMeter rejected the email/password")
-        if any(result.get(k) for k in ("SecretQuestionError", "RecaptchaOnLogin", "PasswordExpiredModalData")):
-            self._mark_okta_expired()
-            raise PsegLoginRejected(
-                "MyMeter wants a manual sign-in (captcha, security question or password change)"
-            )
+        return result
+
+    def _confirm_login_dashboard(self) -> None:
+        """Verify the sign-in reached /Dashboard and record the renewal."""
         dash = self._get_dashboard()
         if self._is_login_page(dash) or not self._on_dashboard(dash):
             self._mark_okta_expired()
@@ -425,20 +493,141 @@ class PsegClient:
         self.last_sso_renewal = datetime.now(UTC).isoformat()
         self.sso_renewals += 1
         self._mark_session_ok()
+
+    @_locked
+    def login_local(self) -> bool:
+        """Sign in with the MyMeter email/password (the page's local login form).
+
+        No CAPTCHA proof is sent: Home Assistant cannot solve one. When MyMeter asks
+        for a CAPTCHA this raises PsegCaptchaRequired and never retries, so a wrong
+        password or an unwanted challenge cannot trigger lockouts. The config flow
+        then lets the user supply one proof for this same jar and antiforgery state.
+        """
+        if not self.has_login:
+            raise PsegLoginRejected("No MyMeter email/password stored")
+        token = self._login_form_token()
+        self._post_login(token, "")
+        self._confirm_login_dashboard()
         _LOGGER.info("MyMeter email/password sign-in successful")
         return True
 
+    @_locked
+    def prepare_login_captcha(self) -> None:
+        """Load a fresh login form and keep its antiforgery token in memory.
+
+        The jar and token stay on this client so a human proof submitted later posts
+        against the same session the challenge belongs to.
+        """
+        if not self.has_login:
+            raise PsegLoginRejected("No MyMeter email/password stored")
+        self._pending_login_token = self._login_form_token()
+
+    @_locked
+    def submit_login_captcha(self, captcha_response: str) -> bool:
+        """POST one human-solved CAPTCHA proof and verify the dashboard.
+
+        The proof is single-use: this method never retries, and the caller must never
+        reuse a proof whose reply was lost (the server may already have spent it).
+        """
+        proof = (captcha_response or "").strip()
+        if not proof:
+            raise ValueError("A CAPTCHA proof is required")
+        if not self.has_login:
+            raise PsegLoginRejected("No MyMeter email/password stored")
+        token = self._pending_login_token or self._login_form_token()
+        self._pending_login_token = ""
+        self._post_login(token, proof)
+        self._confirm_login_dashboard()
+        _LOGGER.info("MyMeter CAPTCHA-assisted sign-in successful")
+        return True
+
+    def _refuse_unexpected_login_redirect(self, resp: requests.Response) -> None:
+        """Refuse a credential-POST redirect without echoing it or resending the body.
+
+        The POST is sent with allow_redirects=False, so neither a 307/308 re-POST nor
+        a method-rewritten replay can carry the MyMeter password or CAPTCHA proof to
+        another origin. A same-origin portal redirect is accepted here and then
+        verified by the caller's plain /Dashboard GET; anything else is a sanitized
+        refusal whose message never contains the raw Location header.
+        """
+        location = resp.headers.get("Location") or ""
+        if not location:
+            raise PsegLoginRedirected("MyMeter login returned a redirect without a target")
+        # Parse the target outside any handler: raising from inside `except ValueError`
+        # would keep the raw URL (which can carry the one-use proof) as __context__,
+        # even with `from None`. Nothing parsed is ever echoed in the message.
+        parsed: urllib.parse.ParseResult | None = None
+        try:
+            parsed = urllib.parse.urlparse(urllib.parse.urljoin(resp.url, location))
+            port = parsed.port
+        except ValueError:
+            parsed = None
+            port = None
+        if parsed is None:
+            raise PsegLoginRedirected("MyMeter login redirect target is invalid")
+        if parsed.scheme != "https" or parsed.hostname != PORTAL_HOST or port not in (None, 443):
+            raise PsegLoginRedirected(
+                "MyMeter redirected the email/password sign-in away from the portal"
+            )
+
+    def _post_login(self, token: str, captcha_response: str) -> None:
+        """POST /Home/Login and classify the reply (raises on any refusal)."""
+        failure: str | None = None
+        malformed_redirect = False
+        try:
+            resp = self.session.post(
+                f"{PORTAL_BASE_URL}/Home/Login",
+                data=self._login_payload(token, captcha_response),
+                headers=self._login_headers(token),
+                timeout=25,
+                # Never let requests replay this credential/proof body on a redirect.
+                allow_redirects=False,
+            )
+        except requests.RequestException as err:
+            # Keep only the exception class. requests puts request state (URL,
+            # headers, and for some failures a partial status line or the body) in
+            # its message and __context__ chain, and this body carries the one-use
+            # CAPTCHA proof. The raise below happens OUTSIDE this handler, so no raw
+            # exception is chained as __context__/__cause__ or printed in a traceback.
+            failure = type(err).__name__
+        except ValueError:
+            # requests 2.34 parses the Location header eagerly even with
+            # allow_redirects=False. A malformed target raises ValueError whose text
+            # carries the raw Location (which can hold the one-use proof); refuse it
+            # as a redirect outside the handler so nothing is chained.
+            malformed_redirect = True
+        if malformed_redirect:
+            raise PsegLoginRedirected("MyMeter login redirect target is invalid")
+        if failure is not None:
+            raise PsegTransientError(f"MyMeter login request failed ({failure})") from None
+        if 300 <= resp.status_code < 400:
+            self._refuse_unexpected_login_redirect(resp)
+            return
+        self._classify_login_response(resp)
+
     def _renew(self) -> bool:
-        """Renew a lapsed portal session: email/password, then Remember Me, then Okta SSO."""
-        if self.has_login:
-            return self.login_local()
+        """Renew a lapsed portal session: Remember Me, saved login, then Okta SSO.
+
+        A Remember Me cookie the portal just rotated is the freshest credential, so
+        it is tried first; that use is also what re-issues the cookie for the next
+        cycle. Only a rejected/expired cookie falls through to the saved email and
+        password (once), and only transports/transients keep their own errors.
+        """
         if self.has_remember_me:
             try:
                 return self.renew_remember_me()
             except PsegOktaSessionExpired:
-                if not self.has_okta_session:
+                if not self.has_login and not self.has_okta_session:
                     raise
+                _LOGGER.info("MyMeter Remember Me cookie expired; trying the saved login")
+        if self.has_login:
+            return self.login_local()
         return self.renew_sso()
+
+    def _drop_remember_me(self) -> None:
+        """Remove a Remember Me cookie the portal refused so it is not retried."""
+        for cookie in [c for c in self.session.cookies if c.name == REMEMBER_ME_COOKIE]:
+            self.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
 
     @_locked
     def renew_remember_me(self) -> bool:
@@ -462,6 +651,7 @@ class PsegClient:
             resp = self._get_dashboard()
         if self._is_login_page(resp):
             self._mark_okta_expired()
+            self._drop_remember_me()
             raise PsegOktaSessionExpired("MyMeter Remember Me sign-in expired or was rejected")
         if resp.status_code == 200 and not self._on_dashboard(resp):
             # Neither signed in nor signed out (e.g. a maintenance page): retry later.

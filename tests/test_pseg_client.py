@@ -1,6 +1,7 @@
 """Unit tests for PSE&G API client."""
 
 from datetime import UTC, datetime
+import json
 import logging
 
 import pytest
@@ -9,7 +10,9 @@ import requests_mock
 
 from custom_components.pseg.const import OKTA_HOST, PORTAL_BASE_URL, PORTAL_HOST
 from custom_components.pseg.pseg_client import (
+    PsegCaptchaRequired,
     PsegClient,
+    PsegLoginRedirected,
     PsegLoginRejected,
     PsegOktaSessionExpired,
     PsegSecurityError,
@@ -917,3 +920,319 @@ def test_keepalive_with_login_stays_on_portal() -> None:
         sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_AUTOPOST_FORM)
         assert client.keepalive() is True
     assert sso.called is False
+
+
+# --- Review r1: renewal must use a rotated RememberMe before the saved password ---
+
+LOGIN_PAGE_WITH_TOKEN = ANON_HOME.replace(
+    "</form>", '<input name="__RequestVerificationToken" value="af"/></form>'
+)
+
+
+def test_renew_tries_remember_me_before_the_saved_login() -> None:
+    """A saved RememberMe renews first; the stored password is not used."""
+    client = PsegClient(
+        portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw"
+    )
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            [LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}],
+        )
+        home = m.get(f"{PORTAL_BASE_URL}/", text=LOGIN_PAGE_WITH_TOKEN)
+        login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)
+
+        assert client._renew() is True
+
+    # requests_mock counts the followed redirect to "/" plus the landing retry.
+    assert home.call_count == 2
+    assert login.call_count == 0
+    assert client.sso_renewals == 1
+
+
+def test_expired_remember_me_falls_back_to_the_saved_login_once() -> None:
+    """A rejected RememberMe is dropped, then the password signs in exactly once."""
+    client = PsegClient(
+        portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw"
+    )
+    assert client.has_remember_me is True
+    with requests_mock.Mocker(session=client.session) as m:
+        dash = m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            [
+                LOGGED_OUT_REDIRECT,  # Remember Me attempt
+                LOGGED_OUT_REDIRECT,  # Remember Me landing retry
+                {"text": DASHBOARD_WITH_TOKEN},  # post-login confirmation
+            ],
+        )
+        home = m.get(f"{PORTAL_BASE_URL}/", text=LOGIN_PAGE_WITH_TOKEN)
+        login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)
+
+        assert client._renew() is True
+
+    assert dash.call_count == 3
+    # Two followed redirects, the Remember Me landing retry, then the login form.
+    assert home.call_count == 4
+    assert login.call_count == 1
+    # The dead cookie is not left in the jar that Home Assistant may persist.
+    assert client.has_remember_me is False
+
+
+def test_expired_remember_me_and_rejected_login_does_not_loop() -> None:
+    """RememberMe expires once, the password is rejected once, and it stops."""
+    client = PsegClient(
+        portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw"
+    )
+    with requests_mock.Mocker(session=client.session) as m:
+        dash = m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            [LOGGED_OUT_REDIRECT, LOGGED_OUT_REDIRECT],
+        )
+        m.get(f"{PORTAL_BASE_URL}/", text=LOGIN_PAGE_WITH_TOKEN)
+        login = m.post(
+            f"{PORTAL_BASE_URL}/Home/Login",
+            json={"AjaxResults": [], "Data": {"LoginErrorMessage": "Invalid email address or password"}},
+        )
+
+        with pytest.raises(PsegLoginRejected):
+            client._renew()
+
+    assert dash.call_count == 2  # one Remember Me attempt, never repeated
+    assert login.call_count == 1
+
+
+def test_remember_me_transient_never_falls_back_to_the_password() -> None:
+    """A portal outage is transient: no password attempt and the cookie is kept."""
+    client = PsegClient(
+        portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw"
+    )
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard",
+            status_code=302,
+            headers={"Location": "/Maintenance"},
+        )
+        m.get(f"{PORTAL_BASE_URL}/Maintenance", text="<html>Scheduled maintenance</html>")
+        login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)
+
+        with pytest.raises(PsegTransientError):
+            client._renew()
+
+    assert login.call_count == 0
+    assert client.has_remember_me is True
+
+
+# --- Review r2: local email/password sign-in stays on the portal (no Okta hop) ---
+
+LOCAL_EMAIL = "fixture@example.invalid"
+LOCAL_PASSWORD = "synthetic-test-only"
+
+
+@pytest.mark.parametrize("status", [307, 308])
+def test_local_login_redirect_to_okta_never_forwards_the_password(status: int) -> None:
+    """A 307/308 after the credential POST must not be replayed onto Okta."""
+    client = PsegClient(email=LOCAL_EMAIL, password=LOCAL_PASSWORD)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/", text=LOGIN_PAGE_WITH_TOKEN)
+        post = m.post(
+            f"{PORTAL_BASE_URL}/Home/Login",
+            status_code=status,
+            headers={"Location": f"https://{OKTA_HOST}/synthetic-local-route-check"},
+        )
+        okta = m.post(
+            f"https://{OKTA_HOST}/synthetic-local-route-check",
+            text="must not receive the password",
+        )
+        with pytest.raises(PsegLoginRedirected) as err:
+            client.login_local()
+
+    assert post.call_count == 1  # the body is sent once, never replayed
+    assert okta.call_count == 0
+    message = str(err.value) + repr(err.value)
+    assert LOCAL_PASSWORD not in message
+    assert "synthetic-local-route-check" not in message  # no raw Location echoed
+
+
+def test_local_login_external_redirect_is_refused_without_a_request(caplog) -> None:
+    """A redirect to an arbitrary host is refused and its URL is never logged."""
+    caplog.set_level(logging.DEBUG)
+    client = PsegClient(email=LOCAL_EMAIL, password=LOCAL_PASSWORD)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/", text=LOGIN_PAGE_WITH_TOKEN)
+        m.post(
+            f"{PORTAL_BASE_URL}/Home/Login",
+            status_code=302,
+            headers={"Location": "https://collector.invalid/synthetic-capture"},
+        )
+        external = m.post("https://collector.invalid/synthetic-capture", text="captured")
+        with pytest.raises(PsegLoginRedirected):
+            client.login_local()
+
+    assert external.call_count == 0
+    assert "collector.invalid" not in caplog.text
+    assert LOCAL_PASSWORD not in caplog.text
+
+
+def test_local_login_portal_redirect_is_verified_without_reposting_the_body() -> None:
+    """A same-portal redirect is accepted; the dashboard GET confirms the session."""
+    client = PsegClient(email=LOCAL_EMAIL, password=LOCAL_PASSWORD)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/", text=LOGIN_PAGE_WITH_TOKEN)
+        post = m.post(
+            f"{PORTAL_BASE_URL}/Home/Login",
+            status_code=302,
+            headers={"Location": "/Dashboard"},
+        )
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        assert client.login_local() is True
+
+    assert post.call_count == 1
+    assert client.sso_renewals == 1
+
+
+def test_local_login_client_cannot_reach_the_okta_host_at_all() -> None:
+    """The saved-login client is restricted to the portal, covering every request."""
+    client = PsegClient(email=LOCAL_EMAIL, password=LOCAL_PASSWORD)
+    assert client.session.allowed_hosts == frozenset({PORTAL_HOST})
+    with pytest.raises(PsegSecurityError):
+        client.session.get(f"https://{OKTA_HOST}/sso/saml")
+    with pytest.raises(PsegSecurityError):
+        client.session.post(f"https://{OKTA_HOST}/synthetic-local-route-check")
+
+
+def test_legacy_okta_cookie_client_keeps_both_hosts() -> None:
+    """Explicit legacy Okta cookie clients retain the original SAML flow."""
+    client = PsegClient(okta_cookies="idx=synthetic")
+    assert client.session.allowed_hosts == frozenset({OKTA_HOST, PORTAL_HOST})
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"https://{OKTA_HOST}/sso/saml", text="ok")
+        assert client.session.get(f"https://{OKTA_HOST}/sso/saml").status_code == 200
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PsegCaptchaRequired("synthetic captcha"),
+        PsegLoginRejected("synthetic rejection"),
+        PsegLoginRedirected("synthetic redirect"),
+    ],
+)
+def test_local_login_refusal_never_falls_back_to_okta(error, monkeypatch) -> None:
+    """A refused local sign-in raises; it never calls renew_sso."""
+    client = PsegClient(email=LOCAL_EMAIL, password=LOCAL_PASSWORD)
+
+    def never_sso(self) -> bool:
+        raise AssertionError("local sign-in must not fall back to Okta SSO")
+
+    def reject(self) -> bool:
+        raise error
+
+    monkeypatch.setattr(PsegClient, "renew_sso", never_sso)
+    monkeypatch.setattr(PsegClient, "login_local", reject)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        m.get(f"{PORTAL_BASE_URL}/", text=LOGIN_PAGE_WITH_TOKEN)
+        with pytest.raises(type(error)):
+            client.ensure_session()
+
+
+class _CannedAdapter(requests.adapters.HTTPAdapter):
+    """Network-only mock that runs under the real AllowlistedSession.send.
+
+    requests_mock replaces Session.send, which would bypass the host check under
+    test; this adapter only answers the canned URLs and records every request that
+    reached the transport layer.
+    """
+
+    def __init__(self, responses: dict) -> None:
+        super().__init__()
+        self.responses = responses
+        self.sent: list[tuple[str, str]] = []
+
+    def send(self, request, **kwargs):
+        self.sent.append((request.method, request.url))
+        spec = self.responses.get(request.url)
+        if spec is None:
+            raise AssertionError(f"unexpected request {request.method} {request.url}")
+        status, headers, body = spec
+        resp = requests.Response()
+        resp.status_code = status
+        resp.headers.update(headers)
+        resp._content = body.encode("utf-8")
+        resp.encoding = "utf-8"
+        resp.url = request.url
+        resp.request = request
+        return resp
+
+
+def test_local_dashboard_redirect_to_okta_is_a_login_rejection() -> None:
+    """Following a post-login redirect would hit Okta; the host check refuses first."""
+    client = PsegClient(email=LOCAL_EMAIL, password=LOCAL_PASSWORD)
+    adapter = _CannedAdapter(
+        {
+            f"{PORTAL_BASE_URL}/": (200, {}, LOGIN_PAGE_WITH_TOKEN),
+            f"{PORTAL_BASE_URL}/Home/Login": (200, {}, json.dumps(LOGIN_OK)),
+            f"{PORTAL_BASE_URL}/Dashboard": (
+                302,
+                {"Location": f"https://{OKTA_HOST}/synthetic-after-login"},
+                "",
+            ),
+        }
+    )
+    client.session.mount("https://", adapter)
+
+    with pytest.raises(PsegLoginRedirected):
+        client.login_local()
+
+    assert adapter.sent
+    assert all(OKTA_HOST not in url for _, url in adapter.sent)
+
+
+@pytest.mark.parametrize("status", [307, 308])
+@pytest.mark.parametrize(
+    "location",
+    [
+        f"https://{PORTAL_HOST}:PROOF-CANARY/x",
+        "https://[PROOF-CANARY",
+    ],
+)
+def test_local_login_unparseable_redirect_has_no_exception_context(
+    status: int, location: str
+) -> None:
+    """R2: a malformed Location must not ride along as __context__/__cause__.
+
+    requests puts the URL in its own ValueError text, so raising the sanitized
+    refusal from inside the parsing handler chained the raw Location (which can
+    carry the one-use proof) as __context__ even with ``from None``.
+    """
+    client = PsegClient(email=LOCAL_EMAIL, password=LOCAL_PASSWORD)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/", text=LOGIN_PAGE_WITH_TOKEN)
+        post = m.post(
+            f"{PORTAL_BASE_URL}/Home/Login",
+            status_code=status,
+            headers={"Location": location},
+        )
+        with pytest.raises(PsegLoginRedirected) as err:
+            client.login_local()
+
+    assert post.call_count == 1
+    assert err.value.__context__ is None
+    assert err.value.__cause__ is None
+    assert "CANARY" not in str(err.value) + repr(err.value)
+
+
+def test_allowlisted_session_bad_port_error_keeps_no_url_context() -> None:
+    """The allowlist's sanitized bad-port refusal must not chain the raw URL."""
+    client = PsegClient(email=LOCAL_EMAIL, password=LOCAL_PASSWORD)
+    request = requests.PreparedRequest()
+    request.method = "GET"
+    request.url = f"{PORTAL_BASE_URL}:99999999999999999999/synthetic-canary"
+    request.headers = {}
+
+    with pytest.raises(PsegSecurityError) as err:
+        client.session.send(request)
+
+    assert err.value.__context__ is None
+    assert err.value.__cause__ is None
+    assert "canary" not in str(err.value)

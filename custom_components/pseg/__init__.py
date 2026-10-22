@@ -12,6 +12,7 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
+from .captcha_helper import async_ensure_helper_view
 from .const import (
     CONF_COOKIE,
     CONF_MYMETER_EMAIL,
@@ -59,6 +60,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             _LOGGER.debug("Registered static paths for PSE&G resources")
         except Exception as err:
             _LOGGER.debug("Could not register static paths: %s", err)
+
+    # Public instructions/bookmarklet page for the human CAPTCHA step; the config
+    # flow also ensures it, so a first-time setup works before this runs.
+    await async_ensure_helper_view(hass)
 
     async def async_backfill_service(call: ServiceCall) -> None:
         """Handle backfill history service call once across all active entries."""
