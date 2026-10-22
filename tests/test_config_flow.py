@@ -204,7 +204,7 @@ async def test_user_flow_proves_okta_only_renewal(hass: HomeAssistant) -> None:
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert clients.call_args_list == [
-        call(okta_cookies="idx=example", portal_cookies="MM_SID=example"),
+        call(okta_cookies="idx=example", portal_cookies="MM_SID=example", email="", password=""),
         call(okta_cookies="idx=example"),
     ]
     assert len(sessions) == 2
@@ -723,3 +723,49 @@ def test_normalize_portal_cookies(raw: str, expected: str) -> None:
     from custom_components.pseg.config_flow import _normalize_portal_cookies
 
     assert _normalize_portal_cookies(raw) == expected
+
+
+async def test_user_flow_email_password_login(hass: HomeAssistant) -> None:
+    """Email/password only: setup proves login_local and stores the login."""
+    calls: list[str] = []
+
+    def login(client: PsegClient) -> bool:
+        calls.append("login")
+        client.sso_renewals = 1
+        return True
+
+    with (
+        patch("custom_components.pseg.pseg_client.PsegClient.ensure_session", return_value=True),
+        patch("custom_components.pseg.pseg_client.PsegClient.login_local", new=login),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": "Meter 66554433"},
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+            data={"mymeter_email": "me@example.com", "mymeter_password": "pw"},
+        )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    assert calls == ["login"]
+    assert result["data"]["mymeter_email"] == "me@example.com"
+    assert result["data"]["mymeter_password"] == "pw"
+
+
+async def test_user_flow_email_password_rejected(hass: HomeAssistant) -> None:
+    from custom_components.pseg.pseg_client import PsegLoginRejected
+
+    with patch(
+        "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+        side_effect=PsegLoginRejected("bad"),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_USER},
+            data={"mymeter_email": "me@example.com", "mymeter_password": "wrong"},
+        )
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"] == {"base": "login_failed"}
+

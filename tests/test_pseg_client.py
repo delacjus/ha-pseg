@@ -1,6 +1,7 @@
 """Unit tests for PSE&G API client."""
 
 from datetime import UTC, datetime
+import logging
 
 import pytest
 import requests
@@ -9,6 +10,7 @@ import requests_mock
 from custom_components.pseg.const import OKTA_HOST, PORTAL_BASE_URL, PORTAL_HOST
 from custom_components.pseg.pseg_client import (
     PsegClient,
+    PsegLoginRejected,
     PsegOktaSessionExpired,
     PsegSecurityError,
     PsegTransientError,
@@ -862,3 +864,56 @@ def test_diag_trace_keeps_only_first_path_segment() -> None:
         client.session.get(f"{PORTAL_BASE_URL}/Dashboard/secret_token_123?x=y")
     diag = client.auth_diagnostics()
     assert "secret_token_123" not in diag and "x=y" not in diag and "MM_SID" in diag
+
+
+# --- MyMeter email/password login (live 2026-10-21: no captcha on first attempt) ---
+
+LOGIN_OK = {"AjaxResults": [], "Data": {}}
+
+
+def test_login_local_success_and_password_never_logged(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    client = PsegClient(email="me@example.com", password="s3cret-pass-998")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/", text=ANON_HOME.replace("</form>", '<input name="__RequestVerificationToken" value="af"/></form>'))
+        login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", [LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}])
+        assert client.ensure_session() is True
+    body = login.last_request.text
+    assert "LoginEmail=me%40example.com" in body and "RememberMe=true" in body
+    assert login.last_request.headers["RequestVerificationToken"] == "af"
+    assert client.sso_renewals == 1
+    assert "s3cret-pass-998" not in caplog.text and "s3cret-pass-998" not in client.auth_diagnostics()
+
+
+@pytest.mark.parametrize(
+    "data", [{"LoginErrorMessage": "Invalid email address or password"}, {"RecaptchaOnLogin": True}, {"SecretQuestionError": "x"}]
+)
+def test_login_local_refusals_raise_without_retry(data: dict) -> None:
+    client = PsegClient(email="me@example.com", password="pw")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/", text=ANON_HOME)
+        login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json={"AjaxResults": [], "Data": data})
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        with pytest.raises(PsegLoginRejected):
+            client.ensure_session()
+    assert login.call_count == 1
+
+
+def test_login_local_that_does_not_reach_dashboard_is_rejected() -> None:
+    client = PsegClient(email="me@example.com", password="pw")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/", text=ANON_HOME)
+        m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        with pytest.raises(PsegLoginRejected, match="did not reach"):
+            client.login_local()
+
+
+def test_keepalive_with_login_stays_on_portal() -> None:
+    client = PsegClient(okta_cookies="idx=x", email="me@example.com", password="pw")
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_AUTOPOST_FORM)
+        assert client.keepalive() is True
+    assert sso.called is False

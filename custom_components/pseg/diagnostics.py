@@ -17,6 +17,8 @@ TO_REDACT = {
     CONF_COOKIE,
     "cookies",
     "password",
+    "mymeter_email",
+    "mymeter_password",
     "token",
     "__RequestVerificationToken",
     "SAMLResponse",

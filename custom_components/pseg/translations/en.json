@@ -3,36 +3,43 @@
     "step": {
       "user": {
         "title": "Connect PSE&G Account",
-        "description": "Paste session cookies from your browser (Developer Tools). Best: sign in on mysmartenergy.nj.pseg.com with the Email/Password boxes and Remember Me ON, then paste the Cookie header from a Dashboard request into Portal Cookies (it must contain MM_RememberMe; the Okta box can stay empty). Alternative: Okta cookies from the id.myaccount.pseg.com /sso/saml request (expire about 1 hour after you sign in).",
+        "description": "Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant signs in by itself whenever the session ends. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
         "data": {
-          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com, optional)",
-          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com)"
+          "mymeter_email": "MyMeter email",
+          "mymeter_password": "MyMeter password",
+          "okta_cookies": "Okta Cookies (optional, old method)",
+          "portal_cookies": "Portal Cookies (optional, old method)"
         }
       },
       "reauth_confirm": {
         "title": "Re-authenticate PSE&G",
-        "description": "Your PSE&G Okta session has expired. Please paste fresh session cookies below to re-authenticate. Paste session cookies from your browser (Developer Tools). Best: sign in on mysmartenergy.nj.pseg.com with the Email/Password boxes and Remember Me ON, then paste the Cookie header from a Dashboard request into Portal Cookies (it must contain MM_RememberMe; the Okta box can stay empty). Alternative: Okta cookies from the id.myaccount.pseg.com /sso/saml request (expire about 1 hour after you sign in).",
+        "description": "PSE&G needs you to sign in again. Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant signs in by itself whenever the session ends. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
         "data": {
-          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com, optional)",
-          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com)"
+          "mymeter_email": "MyMeter email",
+          "mymeter_password": "MyMeter password",
+          "okta_cookies": "Okta Cookies (optional, old method)",
+          "portal_cookies": "Portal Cookies (optional, old method)"
         }
       },
       "reconfigure": {
         "title": "Reconfigure PSE&G Connection",
-        "description": "Update your PSE&G session cookies below. Paste session cookies from your browser (Developer Tools). Best: sign in on mysmartenergy.nj.pseg.com with the Email/Password boxes and Remember Me ON, then paste the Cookie header from a Dashboard request into Portal Cookies (it must contain MM_RememberMe; the Okta box can stay empty). Alternative: Okta cookies from the id.myaccount.pseg.com /sso/saml request (expire about 1 hour after you sign in).",
+        "description": "Update how Home Assistant signs in to PSE&G. Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant signs in by itself whenever the session ends. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
         "data": {
-          "okta_cookies": "Okta Cookies (id.myaccount.pseg.com, optional)",
-          "portal_cookies": "Portal Cookies (mysmartenergy.nj.pseg.com)"
+          "mymeter_email": "MyMeter email",
+          "mymeter_password": "MyMeter password",
+          "okta_cookies": "Okta Cookies (optional, old method)",
+          "portal_cookies": "Portal Cookies (optional, old method)"
         }
       }
     },
     "error": {
-      "missing_credentials": "Paste the Portal Cookies (with MM_RememberMe) or the Okta Cookies.",
+      "missing_credentials": "Enter your MyMeter email and password.",
       "okta_session_invalid": "The Okta session cookies provided are expired or invalid.",
       "okta_no_session": "These Okta cookies cannot sign in on their own. On mysmartenergy.nj.pseg.com, use the 'Sign in Via My Account' link (not the email/password boxes), then copy the Cookie header from the id.myaccount.pseg.com /sso/saml request. It should contain idx=.",
       "cannot_connect": "Failed to connect to PSE&G. Please check your network connection.",
       "unknown": "An unexpected error occurred while communicating with PSE&G.",
-      "remember_me_failed": "The Portal Cookies contain MM_RememberMe, but MyMeter did not sign in with it on its own. Sign out, sign in again with the Email/Password boxes and Remember Me ON, then copy the Cookie header from a Dashboard request."
+      "remember_me_failed": "The Portal Cookies contain MM_RememberMe, but MyMeter did not sign in with it on its own. Sign out, sign in again with the Email/Password boxes and Remember Me ON, then copy the Cookie header from a Dashboard request.",
+      "login_failed": "MyMeter did not accept that email/password, or it asked for a captcha or security question. Check the login on mysmartenergy.nj.pseg.com in a browser, then try again."
     },
     "abort": {
       "already_configured": "This PSE&G account is already configured.",

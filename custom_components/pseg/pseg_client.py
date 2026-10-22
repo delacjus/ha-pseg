@@ -60,6 +60,10 @@ class PsegOktaSessionExpired(PsegAuthError):
     """Exception raised when Okta session is expired and requires user re-authentication."""
 
 
+class PsegLoginRejected(PsegOktaSessionExpired):
+    """MyMeter email/password login refused (bad password, captcha, 2FA, security question)."""
+
+
 class PsegTransientError(PsegError):
     """Exception raised for transient network/server errors (timeouts, 5xx, connection)."""
 
@@ -130,6 +134,8 @@ class PsegClient:
         portal_cookies: str = "",
         cookie_list: list[dict[str, Any]] | None = None,
         price_per_kwh: float = DEFAULT_PRICE_PER_KWH,
+        email: str = "",
+        password: str = "",
     ) -> None:
         """Initialize the client with domain-scoped cookies."""
         self._lock = threading.RLock()
@@ -143,6 +149,9 @@ class PsegClient:
             "Referer": f"{PORTAL_BASE_URL}/Dashboard",
         })
         self.price_per_kwh = price_per_kwh
+        # MyMeter local login. Never logged; only sent to PORTAL_HOST/Home/Login.
+        self._email = email.strip()
+        self._password = password
 
         # Session telemetry
         self.session_established_at: str | None = None
@@ -343,8 +352,86 @@ class PsegClient:
         self._mark_session_ok()
         return True
 
+    @property
+    def has_login(self) -> bool:
+        return bool(self._email and self._password)
+
+    @_locked
+    def login_local(self) -> bool:
+        """Sign in with the MyMeter email/password (the page's local login form).
+
+        Live 2026-10-21: POST /Home/Login without a reCAPTCHA token was answered with
+        a normal "Invalid email address or password" for fake credentials, so the
+        captcha is not enforced on a first attempt (the page's RecaptchaOnLogin flag
+        suggests it starts after failures). Any refusal raises PsegLoginRejected and
+        is never retried automatically, so a wrong password cannot trigger lockouts.
+        """
+        if not self.has_login:
+            raise PsegLoginRejected("No MyMeter email/password stored")
+        try:
+            home = self.session.get(f"{PORTAL_BASE_URL}/", allow_redirects=True, timeout=20)
+        except requests.RequestException as err:
+            raise PsegTransientError(f"Network error loading MyMeter login page: {err}") from err
+        if home.status_code >= 500:
+            raise PsegTransientError(f"MyMeter login page returned HTTP {home.status_code}")
+        tag = BeautifulSoup(home.text, "html.parser").find(
+            "input", attrs={"name": "__RequestVerificationToken"}
+        )
+        token = str(tag["value"]) if tag and tag.get("value") else ""
+        data = {
+            "RedirectUrl": "",
+            "LoginErrorMessage": "",
+            "LoginEmail": self._email,
+            "LoginPassword": self._password,
+            "ExternalLogin": "False",
+            "TwoFactorRendered": "False",
+            "SecretQuestionRendered": "False",
+            "RememberMe": "true",
+        }
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{PORTAL_BASE_URL}/",
+            "Origin": PORTAL_BASE_URL,
+        }
+        if token:
+            data["__RequestVerificationToken"] = token
+            headers["RequestVerificationToken"] = token
+        try:
+            resp = self.session.post(
+                f"{PORTAL_BASE_URL}/Home/Login", data=data, headers=headers, timeout=25
+            )
+        except requests.RequestException as err:
+            raise PsegTransientError(f"Network error during MyMeter login: {err}") from err
+        if resp.status_code >= 500:
+            raise PsegTransientError(f"MyMeter login returned HTTP {resp.status_code}")
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        result = body.get("Data") if isinstance(body, dict) else None
+        result = result if isinstance(result, dict) else {}
+        if result.get("LoginErrorMessage"):
+            self._mark_okta_expired()
+            raise PsegLoginRejected("MyMeter rejected the email/password")
+        if any(result.get(k) for k in ("SecretQuestionError", "RecaptchaOnLogin", "PasswordExpiredModalData")):
+            self._mark_okta_expired()
+            raise PsegLoginRejected(
+                "MyMeter wants a manual sign-in (captcha, security question or password change)"
+            )
+        dash = self._get_dashboard()
+        if self._is_login_page(dash) or not self._on_dashboard(dash):
+            self._mark_okta_expired()
+            raise PsegLoginRejected("MyMeter login did not reach the dashboard")
+        self.last_sso_renewal = datetime.now(UTC).isoformat()
+        self.sso_renewals += 1
+        self._mark_session_ok()
+        _LOGGER.info("MyMeter email/password sign-in successful")
+        return True
+
     def _renew(self) -> bool:
-        """Renew a lapsed portal session: Remember Me first, then Okta SSO."""
+        """Renew a lapsed portal session: email/password, then Remember Me, then Okta SSO."""
+        if self.has_login:
+            return self.login_local()
         if self.has_remember_me:
             try:
                 return self.renew_remember_me()
@@ -482,7 +569,7 @@ class PsegClient:
         """
         self.last_keepalive = datetime.now(UTC).isoformat()
         try:
-            if self.has_remember_me or not self.has_okta_session:
+            if self.has_login or self.has_remember_me or not self.has_okta_session:
                 # Remember Me accounts: keep the portal session warm; ensure_session
                 # renews from MM_RememberMe. Feeding Okta here would only hit its
                 # ~1 h cap and force a reauth the remember cookie does not need.

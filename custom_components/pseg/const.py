@@ -13,6 +13,9 @@ CONF_COOKIE = "cookie"
 CONF_PRICE_PER_KWH = "price_per_kwh"
 CONF_METER_ID = "meter_id"
 CONF_KNOWN_METER_IDS = "known_meter_ids"
+# MyMeter local login (email/password); HA signs in itself when the session lapses.
+CONF_MYMETER_EMAIL = "mymeter_email"
+CONF_MYMETER_PASSWORD = "mymeter_password"
 # MyMeter local login 'Remember Me' cookie (~1 year), the long-lived renewal path.
 REMEMBER_ME_COOKIE = "MM_RememberMe"
 

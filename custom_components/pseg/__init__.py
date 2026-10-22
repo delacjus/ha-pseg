@@ -14,6 +14,8 @@ from homeassistant.helpers.typing import ConfigType
 
 from .const import (
     CONF_COOKIE,
+    CONF_MYMETER_EMAIL,
+    CONF_MYMETER_PASSWORD,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
     CONF_PRICE_PER_KWH,
@@ -97,6 +99,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         portal_cookies=portal_cookies,
         cookie_list=cookie_list,
         price_per_kwh=price_per_kwh,
+        email=entry.data.get(CONF_MYMETER_EMAIL, ""),
+        password=entry.data.get(CONF_MYMETER_PASSWORD, ""),
     )
     coordinator = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
 
