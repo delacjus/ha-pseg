@@ -383,6 +383,14 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Persist rotated session cookies to entry.data without logging values."""
         if not self.config_entry:
             return
+        if self.client.auth_reason is not None:
+            # The jar belongs to a session the portal just refused. A failed Remember
+            # Me renewal drops MM_SID before its GET, so exporting now would overwrite
+            # the entry's last known-good jar with a half-empty one. Live 2026-10-22
+            # that was avoided only because the emptied jar happened to export as empty.
+            # A later confirmed sign-in clears auth_reason and persistence resumes.
+            _LOGGER.debug("Not persisting cookies from an unconfirmed PSE&G session")
+            return
         # Executor: export takes the client's portal lock, which a long backfill may hold.
         exported = await self.hass.async_add_executor_job(self.client.export_cookies)
         if not exported:

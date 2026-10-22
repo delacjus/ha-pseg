@@ -9,7 +9,12 @@ import pytest
 import requests
 import requests_mock
 
-from custom_components.pseg.const import OKTA_HOST, PORTAL_BASE_URL, PORTAL_HOST
+from custom_components.pseg.const import (
+    AUTH_REASON_REMEMBER_ME_REJECTED,
+    OKTA_HOST,
+    PORTAL_BASE_URL,
+    PORTAL_HOST,
+)
 from custom_components.pseg.pseg_client import (
     PsegCaptchaRequired,
     PsegClient,
@@ -713,6 +718,29 @@ def test_remember_me_rejected_without_okta_is_auth_expiry() -> None:
     assert client.okta_session_expired_at is not None
 
 
+def test_rejected_remember_me_keeps_the_cookie_in_the_jar_and_export() -> None:
+    """One unverified GET bounce must not delete the only long-lived renewal cookie.
+
+    Live 2026-10-22 the only datum that bounced was a browser-pasted cookie, so a
+    single refusal is not proof the cookie is dead; a later poll may still use it.
+    """
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL)
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
+        m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+        with pytest.raises(PsegOktaSessionExpired, match="Remember Me"):
+            client.renew_remember_me()
+
+    assert client.has_remember_me is True
+    assert client.auth_reason == AUTH_REASON_REMEMBER_ME_REJECTED
+    assert client.okta_session_expired_at is not None
+    exported = {c["name"]: c["value"] for c in client.export_cookies()}
+    assert exported.get("MM_RememberMe") == "remember_token"
+    # The attempt itself dropped MM_SID, which is why the coordinator must refuse to
+    # persist this jar (tests/test_session_lifecycle.py).
+    assert "MM_SID" not in exported
+
+
 def test_remember_me_rejected_falls_back_to_okta_sso() -> None:
     client = PsegClient(okta_cookies="idx=abc", portal_cookies=REMEMBER_PORTAL)
     with requests_mock.Mocker(session=client.session) as m:
@@ -975,8 +1003,8 @@ def test_expired_remember_me_falls_back_to_the_saved_login_once() -> None:
     # Two followed redirects, the Remember Me landing retry, then the login form.
     assert home.call_count == 4
     assert login.call_count == 1
-    # The dead cookie is not left in the jar that Home Assistant may persist.
-    assert client.has_remember_me is False
+    # The refused cookie is kept: one GET bounce is not proof it is dead (r2 fix).
+    assert client.has_remember_me is True
 
 
 def test_expired_remember_me_and_rejected_login_does_not_loop() -> None:

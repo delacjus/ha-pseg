@@ -737,11 +737,6 @@ class PsegClient:
             return self.login_local()
         return self.renew_sso()
 
-    def _drop_remember_me(self) -> None:
-        """Remove a Remember Me cookie the portal refused so it is not retried."""
-        for cookie in [c for c in self.session.cookies if c.name == REMEMBER_ME_COOKIE]:
-            self.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
-
     @_locked
     def renew_remember_me(self) -> bool:
         """Let MyMeter re-issue MM_SID from its 'Remember Me' cookie.
@@ -751,6 +746,11 @@ class PsegClient:
         session-only MM_SID. PSE&G's Okta sign-in has no 'keep me signed in' and
         dies ~1 h after login, so this is the only long-lived renewal path. The dead
         MM_SID is dropped first so the portal falls back to the remember cookie.
+
+        A refused renewal KEEPS MM_RememberMe: one unverified GET bounce is not
+        proof the cookie is dead (the only live bounce was a browser-pasted copy,
+        and the portal may honour the same cookie later). Dropping it here destroyed
+        the only long-lived renewal credential in the live jar (2026-10-22).
         """
         for cookie in [c for c in self.session.cookies if c.name == "MM_SID"]:
             self.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
@@ -763,8 +763,9 @@ class PsegClient:
                 raise PsegTransientError(f"Network error during Remember Me sign-in: {err}") from err
             resp = self._get_dashboard()
         if self._is_login_page(resp):
+            # Keep the cookie (see docstring): record the rejection and let a later
+            # poll retry it instead of destroying the live jar's renewal credential.
             self._mark_auth_failure(AUTH_REASON_REMEMBER_ME_REJECTED)
-            self._drop_remember_me()
             raise PsegOktaSessionExpired("MyMeter Remember Me sign-in expired or was rejected")
         if resp.status_code == 200 and not self._on_dashboard(resp):
             # Neither signed in nor signed out (e.g. a maintenance page): retry later.

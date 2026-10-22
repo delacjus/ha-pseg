@@ -135,7 +135,8 @@ def test_rejected_remember_me_records_credential_rejection_reason() -> None:
             client.ensure_session()
 
     assert client.auth_reason == AUTH_REASON_REMEMBER_ME_REJECTED
-    assert client.has_remember_me is False
+    # Kept for a later attempt: the live bounce was a browser-pasted cookie only.
+    assert client.has_remember_me is True
 
 
 def test_okta_widget_records_okta_reason() -> None:

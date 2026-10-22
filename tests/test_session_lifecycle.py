@@ -231,6 +231,39 @@ async def test_set_cookie_rotation_persisted_and_restored(hass: HomeAssistant) -
     assert _jar(restarted, "MM_SID") == ["ROTATED"]
 
 
+async def test_failed_remember_renewal_jar_is_never_persisted(hass: HomeAssistant) -> None:
+    """A jar a failed renewal left half-empty must not replace the entry's good jar."""
+    remembered = [
+        {"name": "MM_SID", "value": "OLD_SID", "domain": PORTAL_HOST, "path": "/", "secure": True},
+        {
+            "name": "MM_RememberMe",
+            "value": "REMEMBER",
+            "domain": PORTAL_HOST,
+            "path": "/",
+            "secure": True,
+        },
+    ]
+    entry = _entry(hass, cookies=[dict(c) for c in remembered])
+    client = PsegClient(cookie_list=[dict(c) for c in remembered])
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+
+    with requests_mock.Mocker(session=client.session) as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", status_code=302, headers={"Location": "/"})
+        m.get(f"{PORTAL_BASE_URL}/", text="<html><body>Welcome</body></html>")
+        with pytest.raises(PsegOktaSessionExpired):
+            client._renew()
+
+    # The export is NOT empty (the Remember Me cookie is kept), so without the guard
+    # the entry would be overwritten with a jar that has no MM_SID.
+    exported = {c["name"] for c in client.export_cookies()}
+    assert "MM_RememberMe" in exported
+    assert "MM_SID" not in exported
+
+    await coord._async_persist_cookies()
+
+    assert entry.data["cookies"] == remembered
+
+
 async def test_reauth_replaces_persisted_jar(hass: HomeAssistant, portal) -> None:
     """Reauth pastes fresh cookies; the old persisted jar must not survive the reload."""
     entry = _entry(
