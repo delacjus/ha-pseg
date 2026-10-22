@@ -3,6 +3,7 @@
 from datetime import UTC, datetime
 import json
 import logging
+import traceback
 
 import pytest
 import requests
@@ -1220,6 +1221,34 @@ def test_local_login_unparseable_redirect_has_no_exception_context(
     assert err.value.__context__ is None
     assert err.value.__cause__ is None
     assert "CANARY" not in str(err.value) + repr(err.value)
+
+
+def test_dashboard_malformed_redirect_is_a_sanitized_transient_error() -> None:
+    """R3: a malformed /Dashboard Location must not reach logs or an exception chain.
+
+    requests parses the server's Location eagerly while following redirects. An
+    NFKC-invalid netloc raises ValueError whose text carries the raw Location. The
+    plain dashboard GET carries no proof or credentials, but its error must still be
+    generic and unchained, like the POST path fixed in R2.
+    """
+    canary = "LOCCANARY"
+    malformed = f"https://{canary}\u2100.example/".encode().decode("latin-1")
+    client = PsegClient(email=LOCAL_EMAIL, password=LOCAL_PASSWORD)
+    adapter = _CannedAdapter(
+        {f"{PORTAL_BASE_URL}/Dashboard": (302, {"Location": malformed}, "")}
+    )
+    client.session.mount("https://", adapter)
+
+    with pytest.raises(PsegTransientError) as err:
+        client._get_dashboard()
+
+    assert adapter.sent == [("GET", f"{PORTAL_BASE_URL}/Dashboard")]
+    assert str(err.value) == "PSE&G portal returned an invalid redirect"
+    assert err.value.__context__ is None
+    assert err.value.__cause__ is None
+    rendered = "".join(traceback.format_exception(err.value))
+    assert canary not in rendered
+    assert "\u2100" not in rendered
 
 
 def test_allowlisted_session_bad_port_error_keeps_no_url_context() -> None:

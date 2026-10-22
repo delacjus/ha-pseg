@@ -1,13 +1,18 @@
-# PSE&G helper: Chrome/Edge extension test candidate
+# PSE&G helper: browser extension delivery (experimental)
 
-Status: **test candidate for a manual check, not production-ready.** The
-extension-loading path for the helper has not been observed on the live portal.
-Treat CSP compatibility as **UNVERIFIED** until a human sees the panel on the
-real page in Chrome or Edge.
+Status: **experimental delivery, not production-ready.** The helper extension has
+been seen on one desktop browser: the panel showed **Ready**, and **Close helper**
+removed it. Browser name/version was not recorded. That single observation is not
+browser acceptance, does not cover other browsers, and does not show that PSE&G
+accepts a CAPTCHA proof captured this way. Portability of the proof to Home
+Assistant and unattended renewal are still unverified.
 
 ## What it is
 
-Three files in `custom_components/pseg/frontend/`:
+Home Assistant serves a fixed, public ZIP at
+`/api/pseg/captcha-helper/extension.zip`, linked first from the helper page
+(`/api/pseg/captcha-helper`). The archive is built in memory from exactly three
+files in `custom_components/pseg/frontend/`, flat at the ZIP root:
 
 | File | Role |
 | --- | --- |
@@ -15,26 +20,29 @@ Three files in `custom_components/pseg/frontend/`:
 | `service-worker.js` | On a toolbar click only, checks the tab and its exact origin, then injects the helper. Nothing runs at install, startup, tab update or navigation. |
 | `pseg-captcha-helper.js` | The existing helper, unchanged. It guards the origin again, holds the site's reCAPTCHA response in memory, and blocks the site's own login request until the human closes it. |
 
-Why a wrapper: MyMeter's strict CSP blocked a DOM-triggered `javascript:` link
-in T3's browser. A physical bookmark-bar click has not been tested. This
-candidate offers toolbar-click injection, whose compatibility still needs the
-desktop check below. It does not solve CAPTCHA,
-read credentials or cookies, or log in for you.
+`pseg-energy-card.js` shares the folder but is never part of the archive. The
+endpoint takes no caller-supplied filenames, flow ids or archive paths, ignores
+query data, requires no authentication and reads nothing from the config flow.
+The page and the ZIP are static: no account, cookie, flow or proof data.
+
+Why an extension: MyMeter's strict CSP blocked a DOM-triggered `javascript:` link
+in T3's browser. A physical bookmark-bar click has not been tested, so the page
+keeps the bookmarklet only as an explicitly unverified fallback. The extension
+does not solve CAPTCHA, read credentials or cookies, or log in for you.
 
 ## Prerequisites
 
 - Desktop Chrome or Edge with extensions allowed.
-- The candidate folder, unzipped from `pseg-captcha-extension-candidate.zip`
-  (exactly `manifest.json`, `service-worker.js`, `pseg-captcha-helper.js`).
-  The repo folder also holds an unrelated `pseg-energy-card.js`; the extension
-  never reads it, but the ZIP is the cleaner thing to load.
+- The helper page reachable from Home Assistant, e.g.
+  `http://<your-home-assistant>:8123/api/pseg/captcha-helper`.
 - A tab on the real portal, e.g. `https://mysmartenergy.nj.pseg.com/`.
 - No credentials and no CAPTCHA challenge are needed to test injection. Do not
   type account details for this check.
 
 ## Steps
 
-1. Unzip the candidate so the three files sit directly in one folder.
+1. Open the helper page and click **Download helper extension (ZIP)**. Extract it
+   so the three files sit directly in one folder.
 2. Open `chrome://extensions` (or `edge://extensions`) and enable **Developer
    mode**.
 3. **Load unpacked** and select that folder. The entry "PSE&G verification
@@ -60,21 +68,23 @@ panel on the page" and the badge shows `OK`.
 
 ## Verification limits (read before believing a result)
 
+- The only human observation so far is one desktop browser showing **Ready** and
+  closing the panel. Browser name/version was not recorded. Do not describe the
+  helper as browser-verified, portable across browsers, or accepted by PSE&G.
 - Badge `OK` means `chrome.scripting` accepted the request and the injection
   promise resolved. It is **not** evidence the panel rendered, and the toolbar
   wording deliberately does not claim it did. Only your eyes on the page prove
   the panel appears.
 - **CSP compatibility: UNVERIFIED.** A DOM-triggered `javascript:` link was
   blocked on the public page; a physical bookmark-bar click was not observed.
-  Neither result establishes privileged MAIN-world file injection. This candidate must not be
-  called browser-verified until someone observes the panel on the live portal.
+  Neither result establishes privileged MAIN-world file injection.
 - If the badge shows `OK` but no panel appears, that is the unverified case.
   Record: Chrome/Edge version, whether `chrome://extensions` shows a service
   worker error, and the kind of portal page (login page or another page). Never
   paste credentials, cookies or verification values into a report.
-- This candidate does not log in, does not transfer a session to Home Assistant,
-  and does not change the integration. The Home Assistant PSE&G entry stays
-  disabled with its alert off, and nothing here is deployed to Home Assistant.
+- The helper does not transfer a session to Home Assistant and does not change
+  the integration. A captured proof still has to be accepted by PSE&G, and
+  renewal after that sign-in is not demonstrated.
 
 ## Rollback
 
@@ -83,6 +93,13 @@ PSE&G or Home Assistant. Closing the panel or reloading the tab restores the
 page's own login function.
 
 ## Automated coverage
+
+`tests/test_captcha_helper.py` (Python) checks the extension-first page, the
+ZIP view's public unauthenticated GET, `application/zip` content type, fixed
+`Content-Disposition` filename, exact flat three-file membership and bytes,
+deterministic output, ignored query data, idempotent route registration, and the
+generic 404 when a member is missing. It also checks that the page and archive
+contain no account or flow data.
 
 `node --test tests/test_captcha_extension.js` loads the shipped worker with a
 fake `chrome` object and checks the permission budget, refusal of wrong origins

@@ -73,30 +73,38 @@ browser; Home Assistant never asks you for the proof until it actually needs one
 1. In the Home Assistant dialog, note the helper address it shows
    (`<your-home-assistant>/api/pseg/captcha-helper`) and open it in a **desktop**
    browser.
-2. Drag the **PSE&G CAPTCHA helper** button from that page onto your bookmarks bar.
-   The page contains only instructions and the bookmarklet, never account data.
-   Dragging a bookmarklet has not been verified on every browser: the portal's
-   page policy may block a `javascript:` bookmark there. A toolbar-extension
-   candidate exists for that case, but it is a test candidate only (see
-   `docs/captcha-extension-testing.md`), not a shipped or verified browser path.
-3. In another tab, open `https://mysmartenergy.nj.pseg.com`, then click the
-   bookmarklet once to arm it. It does not sign you in.
-4. Click **Sign In**, solve the CAPTCHA yourself, then press **Copy verification**
-   in the helper popup that holds the proof the page would have sent. The helper
-   stops that one login request so the proof stays unused.
-5. Return to the Home Assistant dialog, paste it into the masked **CAPTCHA proof**
-   field, and submit. Google's reCAPTCHA response is only valid for about two
-   minutes, so capture and paste it promptly; Home Assistant drops the pending
-   sign-in after ten minutes without a proof.
+2. On that page, download the helper extension ZIP and extract it. The ZIP
+   contains exactly `manifest.json`, `service-worker.js` and
+   `pseg-captcha-helper.js`; the page and the ZIP are public and static.
+3. Open `chrome://extensions` (or `edge://extensions`), enable **Developer
+   mode**, choose **Load unpacked**, and select the extracted folder. Pin
+   "PSE&G verification helper" if you like.
+4. In another tab, open `https://mysmartenergy.nj.pseg.com`, click the helper's
+   toolbar button (the panel shows **Ready**), then click **Sign In** and solve
+   the CAPTCHA yourself. While active, the helper blocks the portal's own sign-in
+   request so the proof stays unused.
+5. Press **Copy verification** in the panel, then return to the Home Assistant
+   dialog, paste it into the masked **CAPTCHA proof** field, and submit. Google's
+   reCAPTCHA response is only valid for about two minutes, so capture and paste it
+   promptly; Home Assistant drops the pending sign-in after ten minutes without a
+   proof. **Close helper** (or reloading the tab) removes the panel and restores
+   the portal's login.
 
 The proof is single-use: Home Assistant sends it once, never saves it, and never
 reuses it after a timeout or a lost reply. Capture a fresh one instead. You can
 press **Cancel this sign-in** in the dialog to drop the attempt.
 
-> **Experimental.** Handing a proof solved in your browser to Home Assistant has
-> not been verified against a live PSE&G account yet. PSE&G may bind the proof to
-> the browser that solved it and refuse it. If that happens, the dialog asks for a
-> fresh proof; re-authenticating in the browser remains the fallback.
+The helper page also keeps the older bookmarklet as an explicitly unverified
+fallback. The portal's page policy may block a `javascript:` bookmark, so prefer
+the extension (see `docs/captcha-extension-testing.md`).
+
+> **Experimental.** The extension has been seen showing **Ready** and closing
+> cleanly on one desktop browser (browser name/version not recorded); that is not
+> browser acceptance. Handing a proof solved in your browser to Home Assistant has
+> not been verified against a live PSE&G account, and other browsers, portability
+> and unattended renewal are unverified. PSE&G may bind the proof to the browser
+> that solved it and refuse it. If that happens, the dialog asks for a fresh
+> proof; re-authenticating in the browser remains the fallback.
 
 A CAPTCHA-assisted sign-in proves the account works *now* and gives the current
 access only. It does not create a permanent renewable session, so a later CAPTCHA

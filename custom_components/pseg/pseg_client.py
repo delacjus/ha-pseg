@@ -347,7 +347,8 @@ class PsegClient:
         raise PsegTransientError("Portal still logged out after SAML post (maintenance?)")
 
     def _get_dashboard(self, timeout: int = 20) -> requests.Response:
-        """GET /Dashboard; network errors and 5xx are transient."""
+        """GET /Dashboard; network errors, malformed redirects and 5xx are transient."""
+        malformed_redirect = False
         try:
             resp = self.session.get(
                 f"{PORTAL_BASE_URL}/Dashboard", allow_redirects=True, timeout=timeout
@@ -362,6 +363,15 @@ class PsegClient:
             raise
         except requests.RequestException as err:
             raise PsegTransientError(f"Network error connecting to PSE&G: {err}") from err
+        except ValueError:
+            # requests parses the server's Location even while following redirects.
+            # A malformed target raises ValueError whose text can carry the raw
+            # Location; raise a generic transient error outside the handler so it is
+            # never chained as __context__/__cause__. This GET carries no proof or
+            # credentials, and no retry is attempted here.
+            malformed_redirect = True
+        if malformed_redirect:
+            raise PsegTransientError("PSE&G portal returned an invalid redirect")
         if resp.status_code >= 500:
             raise PsegTransientError(f"PSE&G portal returned HTTP {resp.status_code}")
         return resp
