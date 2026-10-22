@@ -36,36 +36,36 @@ This fork (`delacjus/ha-pseg`, forked from `sidprax/ha-pseg`) hardens the integr
 - **Session Telemetry**: Monitors Okta session lifespan and SSO renewal metrics directly on the Connection Status sensor.
 - **Built-in Lovelace Card**: Bundles `pseg-energy-card` ready to add from the card picker.
 
-## How to Get Your Session Cookies ("Log In Once")
+## Signing In: Your MyMeter Email and Password
 
-There are two sign-in types. Prefer the first: it lasts about a year.
+The recommended way is to let Home Assistant sign in for you with a MyMeter
+email/password. MyMeter is the portal at `https://mysmartenergy.nj.pseg.com`; its
+**Email** and **Password** boxes are a separate login from the "Sign in Via My
+Account" button (that one is PSE&G's Okta account).
 
-### Recommended: MyMeter login with Remember Me (~1 year)
+1. Open `https://mysmartenergy.nj.pseg.com` and create (or use) a MyMeter login in
+   the **Email** / **Password** boxes on that page.
+2. Use a password you don't use anywhere else. Home Assistant has to store it in
+   its config so it can sign in for you.
+3. In Home Assistant, add the integration and enter that same email and password.
+   Home Assistant signs in by itself from then on, whenever the session ends.
 
-PSE&G's Okta sign-in has no "keep me signed in" and ends about one hour after you
-log in, so it cannot stay connected on its own. MyMeter's own email/password
-login with **Remember Me** sets an `MM_RememberMe` cookie that lasts about a year;
-the integration uses it to sign back in whenever the short `MM_SID` session ends.
+If MyMeter ever asks for a captcha, a security question, or a password change, Home
+Assistant cannot answer that. Instead of retrying (which could lock the account),
+it shows a **Re-authenticate** prompt. Answer the question in your browser, then
+submit the Home Assistant prompt with the boxes left empty: it retries the saved
+login.
 
-1. Open `https://mysmartenergy.nj.pseg.com` and sign in with the **Email/Password
-   boxes** on that page with **Remember Me** switched on (this needs a MyMeter
-   login, which is separate from your PSE&G account).
-2. Press **F12** > **Network**, tick **Disable cache**, select the **Doc** filter
-   and press **F5**.
-3. Click the `Dashboard` request > **Headers** > **Request Headers**, right-click
-   the `Cookie:` value > **Copy value**. It must contain `MM_RememberMe=`.
-4. Paste it into **Portal Cookies** and leave **Okta Cookies** empty. Setup checks
-   that MyMeter signs back in from `MM_RememberMe` alone before saving.
+### Older methods
 
-### Alternative: PSE&G (Okta) sign-in (~1 hour)
+Both still work, but they are worse:
 
-1. Open `https://mysmartenergy.nj.pseg.com`, press **F12** > **Network**, enable
-   **Preserve log** and **Disable cache**, and select **Doc**.
-2. Click **Sign in Via My Account** and complete sign-in.
-3. Copy the `Cookie:` value of the request ending in
-   `/app/psegnjb2c_mymeter_1/exktrfl7ruOTPxcyv357/sso/saml` (contains `idx=`) into
-   **Okta Cookies**, and optionally the `Dashboard` request's cookies into
-   **Portal Cookies**. Expect to re-paste after about an hour.
+- **Okta cookies** ("Sign in Via My Account"). PSE&G's Okta session has no "keep me
+  signed in" and ends about an hour after login, so the cookies need re-pasting
+  hourly.
+- **MyMeter cookie paste** (`MM_RememberMe`). The portal ties the session to your
+  browser, so a copy pasted into Home Assistant usually stops working outside the
+  browser. Enter the email/password instead.
 
 ## Installation
 
@@ -89,8 +89,12 @@ the integration uses it to sign back in whenever the short `MM_SID` session ends
 
 1. In Home Assistant, go to **Settings** > **Devices & Services** > **Add Integration**.
 2. Search for **PSE&G Energy (New Jersey)**.
-3. Paste your **Portal Cookies** (with `MM_RememberMe`) or your **Okta Cookies**.
+3. Enter your MyMeter **Email** and **Password** (the ones from
+   `https://mysmartenergy.nj.pseg.com`).
 4. Click **Submit**.
+
+Home Assistant signs in once and renews by itself after that. The optional **Okta
+Cookies** and **Portal Cookies** boxes are only for the older methods above.
 
 ## Home Assistant Energy Dashboard
 
