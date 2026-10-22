@@ -203,6 +203,13 @@ class PsegClient:
             self.session.allowed_hosts = frozenset({PORTAL_HOST})
         # Antiforgery token for a human CAPTCHA proof, held in memory only.
         self._pending_login_token = ""
+        # Set when MyMeter demands a CAPTCHA. No automatic /Home/Login POST may run
+        # again until a human sign-in succeeds (config flow) or a reauth/reconfigure
+        # builds a new client, so a background timer can never hammer the form.
+        self._captcha_latched = False
+        # True only while keepalive() runs: the timer may validate/renew with GETs
+        # but must never POST the saved email/password.
+        self._in_keepalive = False
 
         # Session telemetry
         self.session_established_at: str | None = None
@@ -361,9 +368,12 @@ class PsegClient:
         page body. ``okta_session_expired_at`` is still stamped for compatibility
         with existing automations/attributes, even when the reason is not Okta.
         """
+        previous_reason = self.auth_reason
         self.auth_reason = reason
         self.okta_session_expired_at = datetime.now(UTC).isoformat()
         self.idle_gap_seconds = self._seconds_since_last_success()
+        if reason == previous_reason:
+            return
         if self.idle_gap_seconds is None:
             _LOGGER.info(
                 "PSE&G authentication failed (%s); no successful portal request yet",
@@ -381,6 +391,18 @@ class PsegClient:
         if self.is_local_mode:
             return AUTH_REASON_PORTAL_SESSION_EXPIRED
         return AUTH_REASON_OKTA_SESSION_EXPIRED
+
+    def _latch_captcha(self) -> None:
+        """Stop automatic credential POSTs after MyMeter demands a CAPTCHA."""
+        self._captcha_latched = True
+
+    def _refuse_if_captcha_latched(self) -> None:
+        """Fail fast on a latched CAPTCHA instead of posting the password again."""
+        if self._captcha_latched:
+            self._mark_auth_failure(AUTH_REASON_CAPTCHA_REQUIRED)
+            raise PsegCaptchaRequired(
+                "MyMeter is waiting for a solved CAPTCHA; no sign-in was sent"
+            )
 
     def _raise_post_renewal_logged_out(self, resp: requests.Response) -> None:
         """Classify a still-logged-out /Dashboard right after Okta issued an assertion.
@@ -540,6 +562,7 @@ class PsegClient:
             or _CAPTCHA_ERROR_MARKER in message.lower()
             or body_is_captcha
         ):
+            self._latch_captcha()
             self._mark_auth_failure(AUTH_REASON_CAPTCHA_REQUIRED)
             raise PsegCaptchaRequired("MyMeter requires a solved CAPTCHA")
         if result.get("SecretQuestionError") or result.get("PasswordExpiredModalData"):
@@ -558,6 +581,9 @@ class PsegClient:
         if self._is_login_page(dash) or not self._on_dashboard(dash):
             self._mark_auth_failure(AUTH_REASON_REMEMBER_ME_REJECTED)
             raise PsegLoginRejected("MyMeter login did not reach the dashboard")
+        # A confirmed human/automatic sign-in clears a CAPTCHA latch: the fresh
+        # session replaced whatever the portal was challenging.
+        self._captcha_latched = False
         self.last_sso_renewal = datetime.now(UTC).isoformat()
         self.sso_renewals += 1
         self._mark_session_ok()
@@ -573,6 +599,7 @@ class PsegClient:
         """
         if not self.has_login:
             raise PsegLoginRejected("No MyMeter email/password stored")
+        self._refuse_if_captcha_latched()
         token = self._login_form_token()
         self._post_login(token, "")
         self._confirm_login_dashboard()
@@ -690,6 +717,7 @@ class PsegClient:
             raise PsegOktaSessionExpired(
                 "PSE&G portal session expired and no local sign-in is stored"
             )
+        self._refuse_if_captcha_latched()
         if self.has_remember_me:
             try:
                 return self.renew_remember_me()
@@ -698,6 +726,14 @@ class PsegClient:
                     raise
                 _LOGGER.info("MyMeter Remember Me cookie expired; trying the saved login")
         if self.has_login:
+            if self._in_keepalive:
+                # Hard rule: the background timer never posts the saved password.
+                # A poll may still sign in; a lapsed keepalive asks the user instead.
+                self._mark_auth_failure(AUTH_REASON_PORTAL_SESSION_EXPIRED)
+                raise PsegOktaSessionExpired(
+                    "PSE&G portal session expired; the keepalive never posts the "
+                    "saved sign-in"
+                )
             return self.login_local()
         return self.renew_sso()
 
@@ -824,27 +860,55 @@ class PsegClient:
 
     @_locked
     def keepalive(self) -> bool:
-        """Keep the Okta session alive: run a full SSO round trip in the executor.
+        """Keep the session warm without ever sending credentials from the timer.
 
-        Live 2026-10-21: PSE&G's Okta session died ~30 min after the last Okta
-        request, while the old keepalive only touched the portal (whose MM_SID also
-        lapses in under 30 min). Going through Okta every KEEPALIVE_INTERVAL_MINUTES
-        resets the Okta idle timer and leaves a fresh portal session for the poll.
+        Okta mode keeps the previous behaviour: a full SSO round trip every 10
+        minutes, which resets Okta's idle timer and leaves a fresh portal session
+        for the poll.
 
-        Returns False on transient errors; raises PsegOktaSessionExpired when the Okta
-        session is gone so the coordinator can start reauth.
+        Local (portal-only) mode gets one GET /Dashboard every 3 minutes instead.
+        Live 2026-10-22: a local entry's MM_SID lapsed on roughly a 10-minute idle
+        timer, and the old keepalive answered that by blind-POSTing the saved
+        password, which the portal refused with a CAPTCHA demand. The GET keeps the
+        idle timer from firing; renewal stays on the poll path, so the timer can
+        never post a password or trip a challenge.
+
+        Returns False on transient errors; raises PsegOktaSessionExpired when the
+        session is gone (or a CAPTCHA latch is set) so the coordinator can start
+        reauth.
         """
         self.last_keepalive = datetime.now(UTC).isoformat()
+        self._refuse_if_captcha_latched()
+        self._in_keepalive = True
         try:
-            if self.has_login or self.has_remember_me or not self.has_okta_session:
-                # Remember Me accounts: keep the portal session warm; ensure_session
-                # renews from MM_RememberMe. Feeding Okta here would only hit its
-                # ~1 h cap and force a reauth the remember cookie does not need.
+            if self.is_local_mode:
+                return self._keepalive_local()
+            if self.has_login or self.has_remember_me:
+                # A mixed jar (Okta + Remember Me) still prefers the portal: feeding
+                # Okta here would only hit its ~1 h cap and force a needless reauth.
                 return self.ensure_session()
             return self.renew_sso()
         except PsegTransientError as err:
             _LOGGER.debug("Keepalive network check encountered transient error: %s", err)
             return False
+        finally:
+            self._in_keepalive = False
+
+    @_locked
+    def _keepalive_local(self) -> bool:
+        """GET-only local keepalive: accept only a final /Dashboard page."""
+        resp = self._get_dashboard()
+        if self._is_login_page(resp):
+            self._mark_auth_failure(AUTH_REASON_PORTAL_SESSION_EXPIRED)
+            raise PsegOktaSessionExpired(
+                "PSE&G portal session expired during a local keepalive; "
+                "no credentials were sent"
+            )
+        if resp.status_code != 200 or not self._on_dashboard(resp):
+            # e.g. a /Maintenance page: neither signed in nor signed out.
+            raise PsegTransientError("PSE&G portal did not serve /Dashboard (maintenance?)")
+        self._mark_session_ok()
+        return True
 
     @_locked
     def test_connection(self) -> bool:
