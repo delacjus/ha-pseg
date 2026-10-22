@@ -12,6 +12,8 @@ import requests
 from custom_components.pseg.const import (
     CONF_KNOWN_METER_IDS,
     CONF_METER_ID,
+    CONF_MYMETER_EMAIL,
+    CONF_MYMETER_PASSWORD,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
     CONF_PRICE_PER_KWH,
@@ -769,3 +771,174 @@ async def test_user_flow_email_password_rejected(hass: HomeAssistant) -> None:
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {"base": "login_failed"}
 
+
+
+STORED_EMAIL = "me@example.com"
+STORED_PASSWORD = "stored-secret"
+
+
+def _stored_login_entry(hass: HomeAssistant) -> MockConfigEntry:
+    """Create an entry that already holds a MyMeter email/password login."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="11223344",
+        data={
+            CONF_MYMETER_EMAIL: STORED_EMAIL,
+            CONF_MYMETER_PASSWORD: STORED_PASSWORD,
+        },
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+async def _start_credentials_flow(hass: HomeAssistant, entry, source: str):
+    """Open the reauth or reconfigure form for an entry."""
+    if source == "reauth":
+        return await entry.start_reauth_flow(hass)
+    return await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": source, "entry_id": entry.entry_id}
+    )
+
+
+def _recording_login(seen: dict[str, str]):
+    """Record which email/password the flow asked PsegClient to sign in with."""
+
+    def login(client: PsegClient) -> bool:
+        seen["email"] = client._email
+        seen["password"] = client._password
+        client.sso_renewals = 1
+        return True
+
+    return login
+
+
+@pytest.mark.parametrize("source", ["reauth", "reconfigure"])
+async def test_blank_credentials_reuse_stored_login(
+    hass: HomeAssistant, source: str
+) -> None:
+    """Submitting an empty form re-runs the stored login (one-click retry)."""
+    entry = _stored_login_entry(hass)
+    result = await _start_credentials_flow(hass, entry, source)
+    assert result["type"] == FlowResultType.FORM
+    # The stored password must never be offered back as a form default.
+    assert result["data_schema"]({})[CONF_MYMETER_PASSWORD] == ""
+
+    seen: dict[str, str] = {}
+    with (
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.login_local",
+            new=_recording_login(seen),
+        ),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": "Meter 11223344"},
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        updated = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_MYMETER_EMAIL: "",
+                CONF_MYMETER_PASSWORD: "",
+                CONF_OKTA_COOKIES: "",
+                CONF_PORTAL_COOKIES: "",
+            },
+        )
+    assert updated["type"] == FlowResultType.ABORT
+    assert updated["reason"] == f"{source}_successful"
+    assert seen == {"email": STORED_EMAIL, "password": STORED_PASSWORD}
+    assert entry.data[CONF_MYMETER_EMAIL] == STORED_EMAIL
+    assert entry.data[CONF_MYMETER_PASSWORD] == STORED_PASSWORD
+
+
+@pytest.mark.parametrize("source", ["reauth", "reconfigure"])
+async def test_same_email_blank_password_reuses_stored_password(
+    hass: HomeAssistant, source: str
+) -> None:
+    """Retyping the same email with a blank password keeps the stored password."""
+    entry = _stored_login_entry(hass)
+    result = await _start_credentials_flow(hass, entry, source)
+
+    seen: dict[str, str] = {}
+    with (
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+            return_value=True,
+        ),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.login_local",
+            new=_recording_login(seen),
+        ),
+        patch(
+            "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
+            return_value={"meter": "Meter 11223344"},
+        ),
+        patch("custom_components.pseg.async_setup_entry", return_value=True),
+    ):
+        updated = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_MYMETER_EMAIL: STORED_EMAIL,
+                CONF_MYMETER_PASSWORD: "",
+            },
+        )
+    assert updated["type"] == FlowResultType.ABORT
+    assert updated["reason"] == f"{source}_successful"
+    assert seen == {"email": STORED_EMAIL, "password": STORED_PASSWORD}
+    assert entry.data[CONF_MYMETER_PASSWORD] == STORED_PASSWORD
+
+
+@pytest.mark.parametrize("source", ["reauth", "reconfigure"])
+async def test_different_email_blank_password_is_missing_credentials(
+    hass: HomeAssistant, source: str
+) -> None:
+    """A new email with no password cannot borrow the stored password."""
+    entry = _stored_login_entry(hass)
+    result = await _start_credentials_flow(hass, entry, source)
+
+    with patch(
+        "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+        side_effect=AssertionError("must not validate incomplete credentials"),
+    ):
+        updated = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_MYMETER_EMAIL: "other@example.com",
+                CONF_MYMETER_PASSWORD: "",
+            },
+        )
+    assert updated["type"] == FlowResultType.FORM
+    assert updated["errors"] == {"base": "missing_credentials"}
+    assert entry.data[CONF_MYMETER_PASSWORD] == STORED_PASSWORD
+
+
+@pytest.mark.parametrize("source", ["reauth", "reconfigure"])
+async def test_blank_credentials_without_stored_login_is_missing_credentials(
+    hass: HomeAssistant, source: str
+) -> None:
+    """An entry with no saved login still needs cookies or a login."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="11223344", data={}
+    )
+    entry.add_to_hass(hass)
+    result = await _start_credentials_flow(hass, entry, source)
+    with patch(
+        "custom_components.pseg.pseg_client.PsegClient.ensure_session",
+        side_effect=AssertionError("must not validate incomplete credentials"),
+    ):
+        updated = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_MYMETER_EMAIL: "",
+                CONF_MYMETER_PASSWORD: "",
+                CONF_OKTA_COOKIES: "",
+                CONF_PORTAL_COOKIES: "",
+            },
+        )
+    assert updated["type"] == FlowResultType.FORM
+    assert updated["errors"] == {"base": "missing_credentials"}

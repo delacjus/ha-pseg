@@ -61,6 +61,27 @@ def _normalize_portal_cookies(raw: str) -> str:
     return text
 
 
+def _fill_stored_login(
+    entry: ConfigEntry, email: str, password: str
+) -> tuple[str, str]:
+    """Reuse the entry's saved MyMeter login for fields the user left blank.
+
+    Re-authentication is often just "the captcha/password prompt was for me, try
+    again": submitting the empty form retries the stored login. Retyping the stored
+    email with a blank password reuses the stored password, so the password never
+    has to be echoed back into the form as a default value.
+    """
+    stored_email = str(entry.data.get(CONF_MYMETER_EMAIL) or "").strip()
+    stored_password = str(entry.data.get(CONF_MYMETER_PASSWORD) or "")
+    if not stored_email or not stored_password:
+        return email, password
+    if not email and not password:
+        return stored_email, stored_password
+    if email and not password and email == stored_email:
+        return email, stored_password
+    return email, password
+
+
 def _known_meter_ids(entry: ConfigEntry) -> set[str]:
     """Return all meter ids previously associated with this entry."""
     known = set(entry.data.get(CONF_KNOWN_METER_IDS) or [])
@@ -242,7 +263,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_reauth_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Confirm re-authentication with fresh session cookies."""
+        """Confirm re-authentication with fresh session cookies or the saved login."""
         errors: dict[str, str] = {}
 
         if user_input is not None and self._reauth_entry:
@@ -250,6 +271,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             portal_cookies = _normalize_portal_cookies(user_input.get(CONF_PORTAL_COOKIES, ""))
             email = user_input.get(CONF_MYMETER_EMAIL, "").strip()
             password = user_input.get(CONF_MYMETER_PASSWORD, "")
+
+            if not okta_cookies and not portal_cookies:
+                email, password = _fill_stored_login(
+                    self._reauth_entry, email, password
+                )
 
             if not okta_cookies and not portal_cookies and not (email and password):
                 errors["base"] = "missing_credentials"
@@ -306,6 +332,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             portal_cookies = _normalize_portal_cookies(user_input.get(CONF_PORTAL_COOKIES, ""))
             email = user_input.get(CONF_MYMETER_EMAIL, "").strip()
             password = user_input.get(CONF_MYMETER_PASSWORD, "")
+
+            if not okta_cookies and not portal_cookies:
+                email, password = _fill_stored_login(
+                    reconfigure_entry, email, password
+                )
 
             if not okta_cookies and not portal_cookies and not (email and password):
                 errors["base"] = "missing_credentials"
