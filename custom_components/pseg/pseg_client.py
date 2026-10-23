@@ -283,9 +283,8 @@ class PsegClient:
             elif dot_changed:
                 jar.clear(host.domain, host.path, host.name)
 
-    @_locked
-    def export_cookies(self) -> list[dict[str, Any]]:
-        """Export cookies as a list of dicts for persistence."""
+    def _export_cookies_unlocked(self) -> list[dict[str, Any]]:
+        """Build the persistence snapshot; caller must hold the client lock."""
         self._dedupe_domain_variants()
         cookie_data = []
         for c in self.session.cookies:
@@ -297,6 +296,25 @@ class PsegClient:
                 "secure": c.secure,
             })
         return cookie_data
+
+    @_locked
+    def export_cookies(self) -> list[dict[str, Any]]:
+        """Export cookies as a list of dicts for persistence."""
+        return self._export_cookies_unlocked()
+
+    @_locked
+    def export_cookies_and_auth_reason(
+        self,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Export the jar and the auth reason from one consistent snapshot.
+
+        The coordinator must never judge a jar with an auth_reason read taken
+        before awaiting the export: an overlapping renewal can drop MM_SID and
+        set the reason while the export is still queued, and the half-empty jar
+        then overwrites the last known-good one. Reading both inside this one
+        locked call makes the reason describe exactly the jar returned.
+        """
+        return self._export_cookies_unlocked(), self.auth_reason
 
     @_locked
     def import_cookies(self, cookie_list: list[dict[str, Any]]) -> None:
@@ -476,11 +494,16 @@ class PsegClient:
     def is_local_mode(self) -> bool:
         """True when this entry renews on the portal only, with no Okta session.
 
-        Covers a saved MyMeter email/password, a Remember Me cookie, and a pasted
-        portal-only jar. Those sessions must never be probed through Okta SSO: live
-        2026-10-22 the credentialless case reported a false "Okta session expired".
+        The USABLE renewal path decides, not the presence of Okta cookies: a saved
+        MyMeter email/password or a Remember Me cookie means the portal is the
+        authority, and such a client is narrowed to the portal host, so only a
+        credential-free portal GET can keep it alive. A jar holding both an Okta
+        session cookie and a saved local login (or MM_RememberMe) is therefore
+        local: it needs the 3-minute GET, not a 10-minute SSO round trip it cannot
+        perform. Okta mode is only for a jar with no local renewal credential,
+        including a pasted portal-only jar (no Okta session at all).
         """
-        return not self.has_okta_session
+        return self.has_login or self.has_remember_me or not self.has_okta_session
 
     @_locked
     def ensure_session(self) -> bool:
@@ -868,11 +891,13 @@ class PsegClient:
         for the poll.
 
         Local (portal-only) mode gets one GET /Dashboard every 3 minutes instead.
-        Live 2026-10-22: a local entry's MM_SID lapsed on roughly a 10-minute idle
-        timer, and the old keepalive answered that by blind-POSTing the saved
-        password, which the portal refused with a CAPTCHA demand. The GET keeps the
-        idle timer from firing; renewal stays on the poll path, so the timer can
-        never post a password or trip a challenge.
+        That includes a mixed jar (Okta cookie plus a saved login or MM_RememberMe):
+        its usable renewal path is the portal, and it is host-restricted to it, so
+        an SSO keepalive could only fail. Live 2026-10-22: a local entry's MM_SID
+        lapsed on roughly a 10-minute idle timer, and the old keepalive answered
+        that by blind-POSTing the saved password, which the portal refused with a
+        CAPTCHA demand. The GET keeps the idle timer from firing; renewal stays on
+        the poll path, so the timer can never post a password or trip a challenge.
 
         Returns False on transient errors; raises PsegOktaSessionExpired when the
         session is gone (or a CAPTCHA latch is set) so the coordinator can start
@@ -884,10 +909,6 @@ class PsegClient:
         try:
             if self.is_local_mode:
                 return self._keepalive_local()
-            if self.has_login or self.has_remember_me:
-                # A mixed jar (Okta + Remember Me) still prefers the portal: feeding
-                # Okta here would only hit its ~1 h cap and force a needless reauth.
-                return self.ensure_session()
             return self.renew_sso()
         except PsegTransientError as err:
             _LOGGER.debug("Keepalive network check encountered transient error: %s", err)

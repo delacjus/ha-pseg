@@ -19,6 +19,7 @@ from custom_components.pseg.const import (
     CONF_MYMETER_EMAIL,
     CONF_MYMETER_PASSWORD,
     DOMAIN,
+    LOCAL_KEEPALIVE_INTERVAL_MINUTES,
     PORTAL_BASE_URL,
 )
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
@@ -49,9 +50,12 @@ SAML_AUTOPOST = (
 
 
 def test_keepalive_never_posts_a_saved_login_even_in_a_mixed_jar() -> None:
-    """The timer is GET-only for every mode; the poll path owns credential POSTs."""
+    """A mixed Okta+local jar renews on the portal, so its timer is GET-only."""
     client = PsegClient(okta_cookies="idx=x", email=EMAIL, password=PASSWORD)
-    assert client.is_local_mode is False
+    # The saved login is the usable renewal path: classify it as local even
+    # though an Okta session cookie is still in the jar (review r1 finding 1).
+    assert client.has_okta_session is True
+    assert client.is_local_mode is True
     with requests_mock.Mocker(session=client.session) as m:
         m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
         m.get(f"{PORTAL_BASE_URL}/", text="<html>home</html>")
@@ -103,6 +107,67 @@ def test_three_minute_get_keepalive_keeps_local_session_alive() -> None:
     assert sso.call_count == 0
     assert client.auth_reason == AUTH_REASON_PORTAL_SESSION_EXPIRED
     assert client.idle_gap_seconds == 601.0
+
+
+def test_mixed_jar_uses_the_three_minute_get_keepalive() -> None:
+    """Okta cookie + saved MyMeter login is portal-only: 3-min GET, never SSO.
+
+    The client is host-restricted to the portal, so the old 10-minute SSO cadence
+    let MM_SID lapse and then reauthed instead of warming the portal session.
+    """
+    client = PsegClient(
+        okta_cookies="idx=okta-session",
+        email=EMAIL,
+        password=PASSWORD,
+        portal_cookies=PORTAL_COOKIE,
+    )
+    assert client.has_okta_session is True
+    assert client.has_login is True
+    assert client.is_local_mode is True
+    portal = {"now": 0.0, "last_seen": 0.0}
+
+    def dashboard(_request, context):
+        if portal["now"] - portal["last_seen"] > 600:
+            context.status_code = 302
+            context.headers["Location"] = "/"
+            return ""
+        portal["last_seen"] = portal["now"]
+        return DASHBOARD
+
+    with (
+        freeze_time("2026-10-22 12:00:00") as frozen,
+        requests_mock.Mocker(session=client.session) as m,
+    ):
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", text=dashboard)
+        m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+        login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)
+        sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAML_AUTOPOST)
+
+        for _ in range(20):  # one hour at the coordinator's 3-minute cadence
+            frozen.tick(timedelta(minutes=3))
+            portal["now"] += 180
+            assert client.keepalive() is True
+
+        # Stop touching the portal: the ~10-minute idle expiry the old timer hit.
+        frozen.tick(timedelta(seconds=601))
+        portal["now"] += 601
+        with pytest.raises(PsegOktaSessionExpired):
+            client.keepalive()
+
+    assert login.call_count == 0
+    assert sso.call_count == 0
+    assert client.auth_reason == AUTH_REASON_PORTAL_SESSION_EXPIRED
+    assert client.idle_gap_seconds == 601.0
+
+
+def test_keepalive_cadence_is_local_for_a_mixed_jar(hass: HomeAssistant) -> None:
+    """A mixed Okta+local jar is scheduled on the 3-minute local interval."""
+    mixed = PsegClient(okta_cookies="idx=x", email=EMAIL, password=PASSWORD)
+    coord = PsegDataUpdateCoordinator(hass, mixed, {}, config_entry=None)
+
+    assert coord.keepalive_interval() == timedelta(
+        minutes=LOCAL_KEEPALIVE_INTERVAL_MINUTES
+    )
 
 
 def test_local_keepalive_is_get_only() -> None:
