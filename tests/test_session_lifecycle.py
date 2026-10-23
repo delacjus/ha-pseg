@@ -18,6 +18,7 @@ import requests_mock
 
 import custom_components.pseg as pkg
 from custom_components.pseg.const import (
+    AUTH_REASON_REMEMBER_ME_REJECTED,
     CONF_METER_ID,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
@@ -107,17 +108,20 @@ async def test_cookie_rotation_does_not_reload_entry(
 
     def export(self):
         rotation["n"] += 1
-        return [
-            {
-                "name": "MM_SID",
-                "value": f"v{rotation['n']}",
-                "domain": PORTAL_HOST,
-                "path": "/",
-                "secure": True,
-            }
-        ]
+        return (
+            [
+                {
+                    "name": "MM_SID",
+                    "value": f"v{rotation['n']}",
+                    "domain": PORTAL_HOST,
+                    "path": "/",
+                    "secure": True,
+                }
+            ],
+            None,
+        )
 
-    with patch.object(PsegClient, "export_cookies", export):
+    with patch.object(PsegClient, "export_cookies_and_auth_reason", export):
         assert await hass.config_entries.async_setup(entry.entry_id)
         await hass.async_block_till_done()
         coord = hass.data[DOMAIN][entry.entry_id]
@@ -258,6 +262,102 @@ async def test_failed_remember_renewal_jar_is_never_persisted(hass: HomeAssistan
     exported = {c["name"] for c in client.export_cookies()}
     assert "MM_RememberMe" in exported
     assert "MM_SID" not in exported
+
+    await coord._async_persist_cookies()
+
+    assert entry.data["cookies"] == remembered
+
+
+async def test_overlapping_failed_renewal_cannot_persist_a_partial_jar(
+    hass: HomeAssistant,
+) -> None:
+    """Jar and auth_reason are one snapshot: a racing renewal cannot half-write it.
+
+    The export waits on the client lock while a renewal drops MM_SID and then
+    records its rejection. Reading auth_reason before awaiting the export (the
+    pre-fix order) queued this write anyway and replaced the good jar.
+    """
+    remembered = [
+        {"name": "MM_SID", "value": "OLD_SID", "domain": PORTAL_HOST, "path": "/", "secure": True},
+        {
+            "name": "MM_RememberMe",
+            "value": "REMEMBER",
+            "domain": PORTAL_HOST,
+            "path": "/",
+            "secure": True,
+        },
+    ]
+    entry = _entry(hass, cookies=[dict(c) for c in remembered])
+    client = PsegClient(cookie_list=[dict(c) for c in remembered])
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+
+    renewal_started = threading.Event()
+    release_renewal = threading.Event()
+    renewed: dict[str, object] = {}
+
+    def bounce(_request, context):
+        renewal_started.set()
+        assert release_renewal.wait(5)
+        context.status_code = 302
+        context.headers["Location"] = "/"
+        return ""
+
+    def renew() -> None:
+        with requests_mock.Mocker(session=client.session) as m:
+            m.get(f"{PORTAL_BASE_URL}/Dashboard", text=bounce)
+            m.get(f"{PORTAL_BASE_URL}/", text="<html><body>Welcome</body></html>")
+            try:
+                client.renew_remember_me()
+            except PsegOktaSessionExpired as err:
+                renewed["error"] = err
+
+    thread = threading.Thread(target=renew)
+    thread.start()
+    try:
+        assert renewal_started.wait(5)
+        # The failed renewal already dropped MM_SID and still holds the client lock;
+        # this snapshot must wait for it and then see its auth_reason.
+        persist = asyncio.create_task(coord._async_persist_cookies())
+        await asyncio.sleep(0.05)
+        release_renewal.set()
+        await asyncio.wait_for(persist, 10)
+    finally:
+        release_renewal.set()
+        thread.join(10)
+
+    assert "error" in renewed
+    assert client.auth_reason == AUTH_REASON_REMEMBER_ME_REJECTED
+    exported = {c["name"] for c in client.export_cookies()}
+    assert "MM_RememberMe" in exported
+    assert "MM_SID" not in exported
+
+    assert entry.data["cookies"] == remembered
+    assert "MM_SID" in coord._persisted_session_cookies
+
+
+async def test_partial_jar_is_not_persisted_even_when_the_reason_cleared(
+    hass: HomeAssistant,
+) -> None:
+    """A jar missing the session cookie of the last good persist is never written."""
+    remembered = [
+        {"name": "MM_SID", "value": "OLD_SID", "domain": PORTAL_HOST, "path": "/", "secure": True},
+        {
+            "name": "MM_RememberMe",
+            "value": "REMEMBER",
+            "domain": PORTAL_HOST,
+            "path": "/",
+            "secure": True,
+        },
+    ]
+    entry = _entry(hass, cookies=[dict(c) for c in remembered])
+    client = PsegClient(cookie_list=[dict(c) for c in remembered])
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+
+    # A parallel GET after the failed renewal can clear auth_reason while the jar
+    # still lacks the session cookie that renewal removed.
+    for cookie in [c for c in client.session.cookies if c.name == "MM_SID"]:
+        client.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
+    assert client.auth_reason is None
 
     await coord._async_persist_cookies()
 

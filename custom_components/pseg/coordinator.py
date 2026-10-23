@@ -47,6 +47,7 @@ from .const import (
     DOMAIN,
     KEEPALIVE_INTERVAL_MINUTES,
     LOCAL_KEEPALIVE_INTERVAL_MINUTES,
+    SESSION_COOKIE_NAMES,
 )
 from .pseg_client import (
     PsegClient,
@@ -76,6 +77,17 @@ def _row_start(stat: Any) -> datetime | None:
     if isinstance(stat_start, datetime):
         return dt_util.as_utc(stat_start)
     return None
+
+
+def _session_cookie_names(cookies: Any) -> frozenset[str]:
+    """Return the session-cookie names in a persisted jar snapshot."""
+    if not isinstance(cookies, list):
+        return frozenset()
+    return frozenset(
+        cookie["name"]
+        for cookie in cookies
+        if isinstance(cookie, dict) and cookie.get("name") in SESSION_COOKIE_NAMES
+    )
 
 
 async def _async_get_last_stat_before(
@@ -296,6 +308,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # The jar this coordinator loaded or last wrote. If entry.data["cookies"]
         # differs, reauth/reconfigure replaced it and our in-memory jar is stale.
         self._jar_baseline = config_entry.data.get("cookies") if config_entry else None
+        # Session-cookie names the last persist (or the loaded jar) carried. A jar
+        # that loses one of them is a half-empty jar from a failed renewal.
+        self._persisted_session_cookies = _session_cookie_names(self._jar_baseline)
         # Serializes portal fetch + statistics import for poll, refresh and backfill.
         self._update_lock = asyncio.Lock()
         # Serializes baseline read -> import -> commit so concurrent imports chain.
@@ -392,20 +407,36 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     async def _async_persist_cookies(self) -> None:
-        """Persist rotated session cookies to entry.data without logging values."""
+        """Persist rotated session cookies to entry.data without logging values.
+
+        The jar and the auth reason come from ONE locked client snapshot. Checking
+        auth_reason before awaiting the export let an overlapping renewal drop MM_SID
+        and set the reason while the export was queued; that half-empty jar then
+        overwrote the entry's last known-good one (review r1, reproduced 2026-10-22
+        as auth_reason=remember_me_rejected with only MM_RememberMe persisted).
+        """
         if not self.config_entry:
             return
-        if self.client.auth_reason is not None:
-            # The jar belongs to a session the portal just refused. A failed Remember
-            # Me renewal drops MM_SID before its GET, so exporting now would overwrite
-            # the entry's last known-good jar with a half-empty one. Live 2026-10-22
-            # that was avoided only because the emptied jar happened to export as empty.
-            # A later confirmed sign-in clears auth_reason and persistence resumes.
+        # Executor: the snapshot takes the client's portal lock, which a long
+        # backfill may hold.
+        exported, auth_reason = await self.hass.async_add_executor_job(
+            self.client.export_cookies_and_auth_reason
+        )
+        if auth_reason is not None:
+            # The snapshot belongs to a session the portal just refused. A failed
+            # Remember Me renewal drops MM_SID before its GET, so persisting now
+            # would replace the last known-good jar with a half-empty one. A later
+            # confirmed sign-in clears auth_reason and persistence resumes.
             _LOGGER.debug("Not persisting cookies from an unconfirmed PSE&G session")
             return
-        # Executor: export takes the client's portal lock, which a long backfill may hold.
-        exported = await self.hass.async_add_executor_job(self.client.export_cookies)
         if not exported:
+            return
+        session_cookies = _session_cookie_names(exported)
+        if not self._persisted_session_cookies <= session_cookies:
+            # auth_reason can be clear again (a parallel GET succeeded) while the
+            # jar still lacks the session cookie a failed renewal removed. Never
+            # trade the good jar for a partial one.
+            _LOGGER.debug("Not persisting a partial PSE&G cookie jar")
             return
         if self._is_stale():
             _LOGGER.debug("Not persisting cookies from a retired PSE&G session")
@@ -417,6 +448,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             new_data["cookies"] = exported
             self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
         self._jar_baseline = exported
+        self._persisted_session_cookies = session_cookies
 
     def _async_persist_meter_ids(self, meter_ids: list[str]) -> None:
         """Remember meters seen on this account without reloading the entry."""

@@ -18,6 +18,9 @@ CONF_MYMETER_EMAIL = "mymeter_email"
 CONF_MYMETER_PASSWORD = "mymeter_password"
 # MyMeter local login 'Remember Me' cookie (~1 year), the long-lived renewal path.
 REMEMBER_ME_COOKIE = "MM_RememberMe"
+# Cookies that carry the signed-in session itself. A persisted jar that loses one
+# of these is a half-empty jar from a failed renewal, not a rotated one.
+SESSION_COOKIE_NAMES = frozenset({"MM_SID", "idx", "sid"})
 # Human CAPTCHA hand-off (config flow only): one-use proof, never persisted.
 CONF_CAPTCHA_RESPONSE = "captcha_response"
 CONF_CAPTCHA_CANCEL = "captcha_cancel"

@@ -152,7 +152,7 @@ async def test_poll_survives_statistics_failure(hass) -> None:
         "history_14d": _recs("2026-10-01", 2),
         "latest_kwh": 10.0,
     }
-    client.export_cookies.return_value = []
+    client.export_cookies_and_auth_reason.return_value = ([], None)
     coord = PsegDataUpdateCoordinator(hass, client, {})
 
     def boom(*args, **kwargs):
@@ -378,7 +378,7 @@ async def test_hung_commit_wait_does_not_freeze_poll_or_backfill(hass) -> None:
         "latest_kwh": 10.0,
     }
     client.fetch_history_range.return_value = _recs("2026-09-01", 5)
-    client.export_cookies.return_value = []
+    client.export_cookies_and_auth_reason.return_value = ([], None)
     coord = PsegDataUpdateCoordinator(hass, client, {})
 
     async def hang(_hass) -> None:
