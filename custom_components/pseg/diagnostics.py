@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.diagnostics import async_redact_data
+from homeassistant.components.diagnostics import REDACTED, async_redact_data
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .const import (
     CONF_CAPTCHA_RESPONSE,
     CONF_COOKIE,
+    CONF_KNOWN_METER_IDS,
+    CONF_METER_ID,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
     DOMAIN,
@@ -30,17 +32,49 @@ TO_REDACT = {
     "g-recaptcha-response",
     "__RequestVerificationToken",
     "SAMLResponse",
+    # Meter identity is account data: the unique_id is the meter id, and poll data
+    # carries the meter name and every meter id on the account.
+    CONF_METER_ID,
+    CONF_KNOWN_METER_IDS,
+    "meter",
+    "meter_ids",
 }
+
+
+def _meter_values(entry: ConfigEntry) -> set[str]:
+    """Every meter identifier this entry knows, as strings."""
+    values: set[str] = set()
+    known = entry.data.get(CONF_KNOWN_METER_IDS)
+    candidates: list[Any] = [entry.unique_id, entry.data.get(CONF_METER_ID)]
+    if isinstance(known, (list, tuple, set, frozenset)):
+        candidates.extend(known)
+    for value in candidates:
+        if value:
+            values.add(str(value))
+    return values
+
+
+def _title_contains_meter(title: str, meters: set[str]) -> bool:
+    return any(meter in title for meter in meters)
 
 
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
+    meters = _meter_values(entry)
+    title = entry.title
     entry_info = {
         "entry_id": entry.entry_id,
         "version": entry.version,
-        "unique_id": entry.unique_id,
+        # The unique_id is the meter id (the stable statistics key) for every entry
+        # this integration creates.
+        "unique_id": REDACTED,
+        "title": (
+            REDACTED
+            if title and _title_contains_meter(title, meters)
+            else title
+        ),
         "state": entry.state.value,
         "data": async_redact_data(dict(entry.data), TO_REDACT),
         "options": dict(entry.options),

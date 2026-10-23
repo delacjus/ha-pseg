@@ -104,6 +104,44 @@ async def test_diagnostics_redacts_captcha_proof_fields(hass: HomeAssistant) -> 
     assert "proof-must-not-leak-6c1f" not in str(diag)
 
 
+async def test_diagnostics_never_exposes_meter_ids(hass: HomeAssistant) -> None:
+    """Meter identity is account data: no meter id may appear anywhere in diagnostics."""
+    meter = "88776655"
+    other = "88776666"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id=meter,
+        title=f"PSE&G ({meter})",
+        data={
+            "meter_id": meter,
+            "known_meter_ids": [meter, other],
+            "cookies": [],
+        },
+    )
+    entry.add_to_hass(hass)
+
+    client = PsegClient(portal_cookies="MM_SID=session")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    coord.data = {
+        "meter": f"Electric Meter {meter}",
+        "meter_ids": [meter, other],
+        "latest_kwh": 12.5,
+    }
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert meter not in str(diag)
+    assert other not in str(diag)
+    assert diag["entry"]["unique_id"] == REDACTED
+    assert diag["entry"]["title"] == REDACTED
+    assert diag["entry"]["data"]["meter_id"] == REDACTED
+    assert diag["entry"]["data"]["known_meter_ids"] == REDACTED
+    assert diag["coordinator"]["data"]["meter"] == REDACTED
+    assert diag["coordinator"]["data"]["meter_ids"] == REDACTED
+
+
 async def test_diagnostics_for_entry_that_is_not_loaded(hass: HomeAssistant) -> None:
     """A SETUP_RETRY entry has no coordinator; diagnostics still return redacted entry data."""
     entry = MockConfigEntry(
