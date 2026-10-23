@@ -165,6 +165,16 @@ async def test_coordinator_async_record_statistics_integration(hass: HomeAssista
         {"date": "2026-10-11", "kwh": 16.0, "cost": 3.95},
     ]
 
+    captured: dict[str, list[tuple]] = {}
+
+    def fake_add(_hass, metadata, stats) -> None:
+        captured[metadata["statistic_id"]] = [
+            (row["start"], row["state"], row["sum"]) for row in stats
+        ]
+
+    async def fake_series(_hass, statistic_id, _from_dt):
+        return captured.get(statistic_id, [])
+
     with (
         patch(
             "custom_components.pseg.coordinator._async_get_last_stat_before",
@@ -177,7 +187,12 @@ async def test_coordinator_async_record_statistics_integration(hass: HomeAssista
             return_value=[],
         ),
         patch(
-            "custom_components.pseg.coordinator.async_add_external_statistics"
+            "custom_components.pseg.coordinator._async_get_series_with_sums",
+            side_effect=fake_series,
+        ),
+        patch(
+            "custom_components.pseg.coordinator.async_add_external_statistics",
+            side_effect=fake_add,
         ) as mock_add_ext,
     ):
         await coord.async_record_statistics(records, meter_id="999888")
@@ -186,7 +201,27 @@ async def test_coordinator_async_record_statistics_integration(hass: HomeAssista
         assert mock_add_ext.call_count == 2
 
         # First call was consumption
-        c_meta_call, c_data_call = mock_add_ext.call_args_list[0][0][1], mock_add_ext.call_args_list[0][0][2]
+        c_meta_call = mock_add_ext.call_args_list[0][0][1]
+        c_data_call = captured["pseg:999888_energy_consumption"]
         assert c_meta_call["statistic_id"] == "pseg:999888_energy_consumption"
-        assert c_data_call[0]["sum"] == 114.0
-        assert c_data_call[1]["sum"] == 130.0
+        assert c_data_call[0][2] == 114.0
+        assert c_data_call[1][2] == 130.0
+
+
+def test_builder_skips_invalid_daily_records() -> None:
+    """Malformed or non-finite daily rows are skipped, not turned into zeroes."""
+    _, consumption, _, cost = build_external_statistics(
+        records=[
+            {"date": "not-a-date", "kwh": 1.0},
+            {"date": "2026-10-20", "kwh": float("nan")},
+            {"date": "2026-10-21", "kwh": 2.0, "cost": 0.5},
+        ],
+        meter_id="meter1",
+    )
+
+    assert len(consumption) == 1
+    assert consumption[0]["start"] == datetime(2026, 10, 21, 4, 0, tzinfo=UTC)
+    assert consumption[0]["state"] == 2.0
+    assert consumption[0]["sum"] == 2.0
+    assert len(cost) == 1
+    assert cost[0]["state"] == 0.5

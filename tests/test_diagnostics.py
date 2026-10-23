@@ -8,6 +8,7 @@ from custom_components.pseg.const import (
     CONF_COOKIE,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
+    CONF_STATISTICS_IMPORT_ENABLED,
     DOMAIN,
 )
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
@@ -157,4 +158,102 @@ async def test_diagnostics_for_entry_that_is_not_loaded(hass: HomeAssistant) -> 
     assert diag["entry"]["data"][CONF_OKTA_COOKIES] == REDACTED
     assert diag["coordinator"] is None
     assert diag["session_telemetry"] is None
+    assert diag["statistics"] is None
     assert "secret_okta_token_123" not in str(diag)
+
+
+async def test_diagnostics_statistics_summary_is_value_free(hass: HomeAssistant) -> None:
+    """Hourly diagnostics expose counts, fixed reasons and booleans only."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="12345",
+        data={},
+        options={CONF_STATISTICS_IMPORT_ENABLED: False},
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(portal_cookies="MM_SID=session")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    coord.data = {
+        "statistics_granularity": "mixed",
+        "hourly_complete_days": 2,
+        "hourly_incomplete_days": 1,
+        "hourly_records": [
+            {"start": "2026-10-20T04:00:00+00:00", "kwh": 99.9}
+        ],
+        "daily_records": [{"date": "2026-10-20", "kwh": 88.8}],
+    }
+    coord._hourly_summary = {
+        "complete_days": 2,
+        "incomplete_days": 1,
+        "promoted_last_run": 2,
+        "reason_counts": {"missing_hours": 1, "raw_secret_value": 5},
+    }
+    coord.last_statistics_import = "2026-10-22T05:00:00+00:00"
+
+    await coord._stats_state.async_load()
+    await coord._stats_state.async_begin(
+        {
+            "created_at": "2026-10-22T05:00:00+00:00",
+            "first_start": "2026-10-20T04:00:00+00:00",
+            "series": {
+                "pseg:12345_energy_consumption": [
+                    ["2026-10-20T04:00:00+00:00", 1.0, 1.0]
+                ],
+                "pseg:12345_energy_cost": [
+                    ["2026-10-20T04:00:00+00:00", 0.25, 0.25]
+                ],
+            },
+            "promoted": {
+                "pseg:12345_energy_consumption": {
+                    "2026-10-20": {"total_kwh": 1.0, "total_cost": 0.25}
+                },
+                "pseg:12345_energy_cost": {
+                    "2026-10-20": {"total_kwh": 1.0, "total_cost": 0.25}
+                },
+            },
+        }
+    )
+    committed_id = await coord._stats_state.async_begin(
+        {
+            "created_at": "2026-10-22T05:00:00+00:00",
+            "first_start": "2026-10-19T04:00:00+00:00",
+            "series": {
+                "pseg:12345_energy_consumption": [
+                    ["2026-10-19T04:00:00+00:00", 1.0, 1.0]
+                ],
+                "pseg:12345_energy_cost": [
+                    ["2026-10-19T04:00:00+00:00", 0.25, 0.25]
+                ],
+            },
+            "promoted": {
+                "pseg:12345_energy_consumption": {
+                    "2026-10-19": {"total_kwh": 1.0, "total_cost": 0.25}
+                },
+                "pseg:12345_energy_cost": {
+                    "2026-10-19": {"total_kwh": 1.0, "total_cost": 0.25}
+                },
+            },
+        }
+    )
+    await coord._stats_state.async_commit(committed_id)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    summary = diag["statistics"]
+
+    assert summary["paused"] is True
+    assert summary["granularity"] == "mixed"
+    assert summary["complete_days"] == 2
+    assert summary["incomplete_days"] == 1
+    assert summary["promoted_days"] == 1
+    assert summary["promoted_last_run"] == 2
+    assert summary["reason_counts"] == {"missing_hours": 1}
+    assert summary["pending_recovery"] is True
+    assert summary["last_import"] == "2026-10-22T05:00:00+00:00"
+
+    assert diag["coordinator"]["data"]["hourly_records"] == REDACTED
+    assert diag["coordinator"]["data"]["daily_records"] == REDACTED
+    assert "99.9" not in str(diag)
+    assert "88.8" not in str(diag)
+    assert "raw_secret_value" not in str(diag)

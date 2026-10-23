@@ -13,6 +13,10 @@ CONF_COOKIE = "cookie"
 CONF_PRICE_PER_KWH = "price_per_kwh"
 CONF_METER_ID = "meter_id"
 CONF_KNOWN_METER_IDS = "known_meter_ids"
+# Kill switch for every statistics import (automatic poll, deferred startup import and
+# the manual backfill action). Authentication and keepalive are never affected.
+CONF_STATISTICS_IMPORT_ENABLED = "statistics_import_enabled"
+DEFAULT_STATISTICS_IMPORT_ENABLED = True
 # MyMeter local login (email/password); HA signs in itself when the session lapses.
 CONF_MYMETER_EMAIL = "mymeter_email"
 CONF_MYMETER_PASSWORD = "mymeter_password"
@@ -31,6 +35,12 @@ CONF_CAPTCHA_CANCEL = "captcha_cancel"
 CAPTCHA_ATTEMPT_TTL_SECONDS = 600
 
 DEFAULT_PRICE_PER_KWH = 0.247
+# MyMeter /Dashboard/Chart UsageInterval values (live contract, 2026-10-23).
+USAGE_INTERVAL_HOURLY = "5"
+USAGE_INTERVAL_DAILY = "6"
+# Cumulative sums and hourly cost states keep six decimals: rounding each hour to
+# cents accumulates a visible error over a day (24 x $0.005 worst case).
+STATISTICS_PRECISION = 6
 # Placeholder the client reports when the chart has no meter series.
 DEFAULT_METER_NAME = "PSE&G Electric Meter"
 DEFAULT_SCAN_INTERVAL_HOURS = 4

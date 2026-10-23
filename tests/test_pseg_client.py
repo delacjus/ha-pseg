@@ -1,15 +1,19 @@
 """Unit tests for PSE&G API client."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 import json
 import logging
 import traceback
+from unittest.mock import patch
+import urllib.parse
 
 import pytest
 import requests
 import requests_mock
 
 from custom_components.pseg.const import (
+    AUTH_REASON_OKTA_SESSION_EXPIRED,
+    AUTH_REASON_PORTAL_SESSION_EXPIRED,
     AUTH_REASON_REMEMBER_ME_REJECTED,
     OKTA_HOST,
     PORTAL_BASE_URL,
@@ -23,6 +27,12 @@ from custom_components.pseg.pseg_client import (
     PsegOktaSessionExpired,
     PsegSecurityError,
     PsegTransientError,
+)
+from custom_components.pseg.statistics_hourly import (
+    NY_TZ,
+    expected_hour_starts,
+    ny_midnight_utc,
+    validate_hourly_day,
 )
 
 SAMPLE_AUTOPOST_FORM = f"""
@@ -1293,3 +1303,452 @@ def test_allowlisted_session_bad_port_error_keeps_no_url_context() -> None:
     assert err.value.__context__ is None
     assert err.value.__cause__ is None
     assert "canary" not in str(err.value)
+
+
+# --- Hourly chart leg: defensive parsing, daily authority and explicit fallback ---
+
+
+def _hourly_chart(
+    day: date,
+    kwh: float = 1.0,
+    *,
+    date_only_labels: bool = False,
+) -> dict:
+    """Build a synthetic hourly payload (the real vendor contract is still unverified)."""
+    points = []
+    for start in expected_hour_starts(day):
+        local = start.astimezone(NY_TZ)
+        if date_only_labels:
+            label = local.strftime("%m/%d/%Y")
+            end_label = label
+        else:
+            label = start.isoformat().replace("+00:00", "Z")
+            end_label = (start + timedelta(hours=1)).isoformat().replace(
+                "+00:00", "Z"
+            )
+        points.append(
+            {
+                "x": int(start.timestamp() * 1000),
+                "y": kwh,
+                "hs": {"start": label, "end": end_label},
+            }
+        )
+    return {"Data": {"series": [{"name": "Meter #12345 (RS)", "data": points}]}}
+
+
+def _daily_chart(day: date, kwh: float) -> dict:
+    return {
+        "Data": {
+            "series": [
+                {
+                    "name": "Meter #12345 (RS)",
+                    "data": [
+                        {
+                            "x": int(ny_midnight_utc(day).timestamp() * 1000),
+                            "y": kwh,
+                            "hs": {
+                                "start": day.strftime("%m/%d/%Y"),
+                                "end": day.strftime("%m/%d/%Y"),
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+
+
+def test_fetch_energy_data_requests_hourly_and_keeps_daily_authority() -> None:
+    """The poll asks daily then hourly; hourly history is used only when validated."""
+    client = PsegClient(portal_cookies="MM_SID=x", price_per_kwh=0.25)
+    day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
+    daily = _daily_chart(day, 24.04)
+    hourly = _hourly_chart(day, 1.0)
+    intervals: list[str] = []
+
+    with requests_mock.Mocker(session=client.session) as mock:
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+
+        def chart(request, context):
+            interval = urllib.parse.parse_qs(request.text)["UsageInterval"][0]
+            intervals.append(interval)
+            return "ok"
+
+        def chart_data(request, context):
+            return hourly if intervals[-1] == "5" else daily
+
+        mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
+        parsed = client.fetch_energy_data(14)
+
+    assert intervals == ["6", "5"]
+    assert parsed["daily_records"][0]["kwh"] == 24.04
+    assert parsed["history_14d"][0]["kwh"] == 24.04  # authoritative daily history
+    assert parsed["latest_kwh"] == 24.04
+    assert parsed["latest_cost"] == 6.01
+    assert parsed["hourly_granularity"] == "hourly"
+    assert parsed["hourly_complete_days"] == 1
+    assert parsed["statistics_granularity"] == "hourly"
+    assert parsed["hourly_records"][0]["start"] == expected_hour_starts(day)[0]
+    assert parsed["hourly_records"][-1]["start"] == expected_hour_starts(day)[-1]
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_hourly_chart_failure_keeps_daily_statistics(status) -> None:
+    """A 5xx on the optional hourly leg must not fail an otherwise good poll."""
+    client = PsegClient(portal_cookies="MM_SID=x", price_per_kwh=0.25)
+    day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
+    daily = _daily_chart(day, 24.02)
+    intervals: list[str] = []
+
+    with requests_mock.Mocker(session=client.session) as mock:
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+
+        def chart(request, context):
+            intervals.append(urllib.parse.parse_qs(request.text)["UsageInterval"][0])
+            return "ok"
+
+        def chart_data(request, context):
+            if intervals[-1] == "5":
+                context.status_code = status
+                return {"error": "unavailable"}
+            return daily
+
+        mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
+        parsed = client.fetch_energy_data(14)
+
+    assert intervals == ["6", "5"]
+    assert parsed["hourly_records"] == []
+    assert parsed["hourly_granularity"] == "unavailable"
+    assert parsed["statistics_granularity"] == "daily"
+    assert parsed["history_14d"][0]["kwh"] == 24.02
+
+
+def test_hourly_chart_redirect_is_an_auth_failure() -> None:
+    """A login redirect on the hourly leg is auth loss, not a silent fallback."""
+    client = PsegClient(portal_cookies="MM_SID=x")
+    day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
+    daily = _daily_chart(day, 24.0)
+    intervals: list[str] = []
+
+    with requests_mock.Mocker(session=client.session) as mock:
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+
+        def chart(request, context):
+            intervals.append(urllib.parse.parse_qs(request.text)["UsageInterval"][0])
+            return "ok"
+
+        def chart_data(request, context):
+            if intervals[-1] == "5":
+                return {"AjaxResults": [{"Action": "Redirect"}]}
+            return daily
+
+        mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
+        with pytest.raises(PsegOktaSessionExpired):
+            client.fetch_energy_data(14)
+
+
+def test_hourly_parser_keeps_zero_and_rejects_invalid_points() -> None:
+    """Zero is data; missing x, negative usage and off-hour points are not."""
+    client = PsegClient()
+    day = date(2026, 10, 20)
+    starts = expected_hour_starts(day)
+    points = [
+        {
+            "x": int(starts[0].timestamp() * 1000),
+            "y": 0.0,
+            "hs": {"start": "10/20/2026 12:00 AM"},
+        },
+        {
+            "x": int(starts[1].timestamp() * 1000),
+            "y": 2.0,
+            "hs": {"start": "10/20/2026 01:00 AM"},
+        },
+        {
+            "x": int(starts[2].timestamp() * 1000),
+            "y": 3.0,
+            "hs": {"start": "10/20/2026 02:00 AM"},
+        },
+        {"x": None, "y": 1.0, "hs": {"start": "10/20/2026 03:00 AM"}},
+        {"x": int(starts[3].timestamp() * 1000), "y": -1.0},
+        {"x": int(starts[4].timestamp() * 1000) + 1_800_000, "y": 1.0},
+    ]
+    payload = {
+        "Data": {
+            "series": [
+                {"name": "Meter #1 (RS)", "data": points},
+                {
+                    "name": "Meter #1 - Previous Year",
+                    "data": [{"x": int(starts[5].timestamp() * 1000), "y": 99.0}],
+                },
+            ]
+        }
+    }
+
+    parsed = client._parse_hourly_chart(payload)
+
+    assert [record["kwh"] for record in parsed["hourly_records"]] == [0.0, 2.0, 3.0]
+    assert parsed["hourly_invalid_points"] == 3
+    assert parsed["hourly_granularity"] == "hourly"
+
+
+def test_hourly_label_mismatch_blocks_promotion() -> None:
+    """A label that contradicts the UTC hour makes the day ineligible."""
+    day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
+    payload = _hourly_chart(day)
+    for point in payload["Data"]["series"][0]["data"]:
+        shifted = (
+            datetime.fromtimestamp(point["x"] / 1000, tz=UTC).astimezone(NY_TZ)
+            + timedelta(hours=2)
+        )
+        point["hs"]["start"] = shifted.strftime("%m/%d/%Y %I:%M %p")
+
+    parsed = PsegClient()._parse_hourly_chart(payload)
+    assert all(record["label_ok"] is False for record in parsed["hourly_records"])
+
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        float(len(parsed["hourly_records"])),
+        datetime.now(UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "label_mismatch"
+
+
+def test_date_only_labels_do_not_prove_interval_start() -> None:
+    """Date-only labels are unverified timestamp semantics, not promotion evidence."""
+    day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
+    parsed = PsegClient()._parse_hourly_chart(
+        _hourly_chart(day, date_only_labels=True)
+    )
+    assert all(record["interval_ok"] is False for record in parsed["hourly_records"])
+    assert all(
+        record["interval_reason"] == "timestamp_semantics_unverified"
+        for record in parsed["hourly_records"]
+    )
+
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        float(len(parsed["hourly_records"])),
+        datetime.now(UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "timestamp_semantics_unverified"
+
+
+def test_history_range_still_requests_the_daily_interval() -> None:
+    """Manual backfill remains daily: hourly promotion only comes from the poll."""
+    client = PsegClient(portal_cookies="MM_SID=x")
+    day = date(2026, 10, 18)
+    intervals: list[str] = []
+
+    with requests_mock.Mocker(session=client.session) as mock:
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+
+        def chart(request, context):
+            intervals.append(urllib.parse.parse_qs(request.text)["UsageInterval"][0])
+            return "ok"
+
+        mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=_daily_chart(day, 17.5))
+        records = client.fetch_history_range("2026-10-18", "2026-10-18")
+
+    assert intervals == ["6"]
+    assert records == [{"date": "2026-10-18", "kwh": 17.5, "cost": 4.32}]
+
+
+def test_mixed_granularity_when_one_closed_day_is_incomplete() -> None:
+    """Granularity is explicit about partial hourly coverage, not just hourly>0."""
+    client = PsegClient(portal_cookies="MM_SID=x", price_per_kwh=0.25)
+    yesterday = (datetime.now(NY_TZ) - timedelta(days=1)).date()
+    day_before = yesterday - timedelta(days=1)
+    daily = {
+        "Data": {
+            "series": [
+                {
+                    "name": "Meter #12345 (RS)",
+                    "data": [
+                        {
+                            "x": int(ny_midnight_utc(day).timestamp() * 1000),
+                            "y": kwh,
+                            "hs": {
+                                "start": day.strftime("%m/%d/%Y"),
+                                "end": day.strftime("%m/%d/%Y"),
+                            },
+                        }
+                        for day, kwh in ((day_before, 24.0), (yesterday, 2.0))
+                    ],
+                }
+            ]
+        }
+    }
+    hourly = _hourly_chart(day_before, 1.0)
+    hourly["Data"]["series"][0]["data"] += _hourly_chart(yesterday, 1.0)["Data"][
+        "series"
+    ][0]["data"][:2]
+    intervals: list[str] = []
+
+    with requests_mock.Mocker(session=client.session) as mock:
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+
+        def chart(request, context):
+            intervals.append(urllib.parse.parse_qs(request.text)["UsageInterval"][0])
+            return "ok"
+
+        def chart_data(request, context):
+            return hourly if intervals[-1] == "5" else daily
+
+        mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
+        parsed = client.fetch_energy_data(14)
+
+    assert parsed["hourly_complete_days"] == 1
+    assert parsed["hourly_incomplete_days"] == 1
+    assert parsed["statistics_granularity"] == "mixed"
+    assert parsed["history_14d"][0]["kwh"] == 24.0
+    assert parsed["history_14d"][1]["kwh"] == 2.0
+
+
+def test_hourly_http401_raises_mode_specific_auth_expiry() -> None:
+    """A 401 on the optional hourly leg is auth loss, not a silent fallback."""
+    day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
+    daily = _daily_chart(day, 24.0)
+    for client, expected in (
+        (
+            PsegClient(portal_cookies="MM_SID=x"),
+            AUTH_REASON_PORTAL_SESSION_EXPIRED,
+        ),
+        (PsegClient(okta_cookies="idx=x"), AUTH_REASON_OKTA_SESSION_EXPIRED),
+    ):
+        with (
+            requests_mock.Mocker() as mock,
+            patch.object(client, "_get_verification_token", return_value="token"),
+        ):
+            mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", status_code=200)
+            mock.get(
+                f"{PORTAL_BASE_URL}/Dashboard/ChartData",
+                [
+                    {"json": daily},
+                    {"status_code": 401, "text": "Unauthorized"},
+                ],
+            )
+            with pytest.raises(PsegOktaSessionExpired):
+                client.fetch_energy_data(14)
+        assert client.auth_reason == expected
+
+
+def test_end_stamped_payload_is_not_promoted() -> None:
+    """Exact coverage and a daily total do not prove x is the interval start."""
+    day = date(2026, 10, 2)
+    starts = expected_hour_starts(day)
+    points = [
+        {
+            "x": start.timestamp() * 1000,
+            "y": 24 if index == 0 else index,
+            "hs": {"start": "10/01/2026" if index == 0 else "10/02/2026"},
+        }
+        for index, start in enumerate(starts)
+    ]
+    parsed = PsegClient(price_per_kwh=0.25)._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert all(record["interval_ok"] is False for record in parsed["hourly_records"])
+
+    check = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        300.0,
+        datetime(2026, 10, 4, tzinfo=UTC),
+        granularity=parsed["hourly_granularity"],
+    )
+    assert check.complete is False
+    assert check.reason == "timestamp_semantics_unverified"
+
+
+def test_aware_start_and_end_labels_are_positive_evidence() -> None:
+    """Explicit aware [start, start+1h) labels are the only accepted proof."""
+    day = date(2026, 10, 2)
+    parsed = PsegClient()._parse_hourly_chart(_hourly_chart(day))
+    assert all(record["interval_ok"] is True for record in parsed["hourly_records"])
+
+    check = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        float(len(parsed["hourly_records"])),
+        datetime(2026, 10, 4, tzinfo=UTC),
+        granularity=parsed["hourly_granularity"],
+    )
+    assert check.complete is True
+
+
+def test_bare_clock_labels_are_not_positive_evidence() -> None:
+    """A naked wall-clock label matching x could still be an end timestamp."""
+    day = date(2026, 10, 2)
+    points = []
+    for start in expected_hour_starts(day):
+        local = start.astimezone(NY_TZ)
+        label = local.strftime("%m/%d/%Y %I:%M %p")
+        points.append(
+            {
+                "x": start.timestamp() * 1000,
+                "y": 1.0,
+                "hs": {"start": label, "end": label},
+            }
+        )
+    parsed = PsegClient()._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert all(record["interval_ok"] is False for record in parsed["hourly_records"])
+
+    check = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        24.0,
+        datetime(2026, 10, 4, tzinfo=UTC),
+        granularity=parsed["hourly_granularity"],
+    )
+    assert check.complete is False
+    assert check.reason == "timestamp_semantics_unverified"
+
+
+@pytest.mark.parametrize("mode", ["portal", "okta"])
+@pytest.mark.parametrize("leg", ["setup", "data"])
+def test_hourly_login_redirect_is_typed_auth_loss(mode, leg) -> None:
+    """A 302 to the anonymous portal home must not become a daily fallback."""
+    day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
+    daily = _daily_chart(day, 24.0)
+    client = PsegClient(
+        portal_cookies="MM_SID=x" if mode == "portal" else "",
+        okta_cookies="idx=x" if mode == "okta" else "",
+    )
+    login = f"{PORTAL_BASE_URL}/"
+    posts = (
+        [{"text": "ok"}, {"status_code": 302, "headers": {"Location": login}}]
+        if leg == "setup"
+        else [{"text": "ok"}, {"text": "ok"}]
+    )
+    gets = (
+        [{"json": daily}]
+        if leg == "setup"
+        else [{"json": daily}, {"status_code": 302, "headers": {"Location": login}}]
+    )
+    with (
+        requests_mock.Mocker(session=client.session) as mock,
+        patch.object(client, "_get_verification_token", return_value="token"),
+    ):
+        mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", posts)
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", gets)
+        mock.get(login, text="<html>anonymous portal page</html>")
+        with pytest.raises(PsegOktaSessionExpired):
+            client.fetch_energy_data(14)
+
+    expected = (
+        AUTH_REASON_OKTA_SESSION_EXPIRED
+        if mode == "okta"
+        else AUTH_REASON_PORTAL_SESSION_EXPIRED
+    )
+    assert client.auth_reason == expected

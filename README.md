@@ -19,13 +19,16 @@ This fork (`delacjus/ha-pseg`, forked from `sidprax/ha-pseg`) hardens the integr
 - **Strict Host Allowlist**: Every HTTP request, redirect, and form submission is strictly restricted to `{mysmartenergy.nj.pseg.com, id.myaccount.pseg.com}`. With a saved MyMeter email/password, the client is narrowed further to `mysmartenergy.nj.pseg.com` only, so local sign-in never sends anything to Okta.
 - **Background Renewal**: Uses a domain-scoped cookie jar. With a saved MyMeter login or `MM_RememberMe` cookie, Home Assistant renews the portal session itself and does not use Okta; the background check for those portal-only sessions is a credential-free `GET /Dashboard` every 3 minutes, because MyMeter's session cookie idles out in about 10 minutes. Okta-only setups renew through standard SAML auto-post flows, with a 10-minute keepalive check. When MyMeter asks for a CAPTCHA, automatic sign-in stops until you re-authenticate: the integration never posts the saved password again on a timer. How long unattended renewal keeps working is not verified, and PSE&G can still ask for a CAPTCHA or another human step.
 - **Statistics Corruption Fix**: Uses Home Assistant External Statistics (`pseg:<meter_id>_energy_consumption` and `pseg:<meter_id>_energy_cost`) with strict cumulative sum preservation across rolling windows and backfills.
+- **Hourly Statistics with a Daily Gate**: Recent closed New York days are promoted to hourly External Statistics only when all 23/24/25 expected hours are present and their sum agrees with the independently fetched daily total. Incomplete days keep their current daily row.
 - **Transparent Cost Estimation**: Accurately describes cost calculations as estimates based on a configurable electric rate ($0.247/kWh default), adjustable at any time via integration Options.
+- **Statistics Kill Switch**: One option stops automatic, deferred and manual statistics imports while sign-in and keepalive keep running.
 - **HA Entity Best Practices**: Removed hardcoded `entity_id` overrides and entity registry hacks. Fully leverages `_attr_has_entity_name` and translation keys.
 - **Frontend XSS Protection**: Sanitizes dynamic data and error messages rendered inside `pseg-energy-card`.
 
 ## Features
 
 - **Daily Smart Meter Readings**: Captures daily electricity usage (`sensor.pseg_electricity_consumption`).
+- **Hourly Statistics**: Promotes complete recent days to hourly External Statistics, with an explicit daily fallback and per-day provenance.
 - **Cost Estimation**: Estimates daily electricity costs in USD (`sensor.pseg_electricity_cost`).
 - **Home Assistant Energy Dashboard**: External Long-Term Statistics (LTS) support for both consumption and cost.
 - **Historical Backfill**: Built-in action (`pseg.backfill_history`) to backfill up to 2 years of historical daily usage and cost directly into Home Assistant Energy statistics.
@@ -173,6 +176,65 @@ The integration imports external long-term statistics for both electricity consu
 
 The Energy Dashboard will reflect daily consumption and costs seamlessly.
 
+### Hourly and daily statistics
+
+Recent usage is requested at hourly resolution on each poll, but the integration
+keeps the existing daily rows unless an hourly day can be proven complete. PSE&G's
+real hourly start/end and zero semantics are not yet verified against a live
+account, so the rules are deliberately conservative:
+
+- A day is a **New York calendar day** (America/New_York), never the Home Assistant
+  host time zone. A normal day has 24 expected UTC hourly starts; the spring DST
+  day has 23 and the fall DST day 25.
+- A closed day is promoted only when it has **exactly** those starts, every value is
+  finite (an explicit zero counts as data), **both** raw labels carry an explicit
+  timezone/offset and name `[x, x+1h)`, and its sum matches the separately fetched
+  **daily** total within rounding tolerance. Date-only or bare wall-clock labels are
+  `timestamp_semantics_unverified`; they never promote. Point count alone never
+  promotes a day.
+- The first hourly value overwrites the existing New York-midnight daily row in the
+  same statistic id; the rest of the day is replaced by its full hourly set. An
+  incomplete or sparse day keeps its stored contribution unchanged.
+- `pseg.backfill_history` remains daily-only. A daily retry of an already promoted
+  day keeps the hourly rows. If a daily total contradicts a promoted day and no
+  complete hourly replacement is available, the whole import is rejected **before
+  any write** and logged; nothing is silently skipped.
+- The journal is written durably before any recorder write. The exact snapshot is
+  read back from the Store path, because Home Assistant's Store can swallow a real
+  write error. While a physical save is outstanding, failed, stale or unreadable,
+  recovery refuses rather than replaying in-memory state; it retries after the bytes
+  persist. A chart login redirect is an authentication
+  failure, not a daily fallback.
+- Cost remains an estimate: `kWh × configured rate`. Hourly cost states keep six
+  decimals, so a day of hours never accumulates cent rounding. The Energy Dashboard
+  cost is still an estimate, not a bill.
+- Sensor history and `latest_*` values remain the authoritative **daily** series;
+  hourly rows are used only for long-term statistics and provenance. A promoted
+  day never changes the values the card or daily sensors show.
+
+The consumption sensor reports `statistics_granularity` (`hourly`, `mixed` or
+`daily`), `statistics_hourly_complete_days` and `statistics_hourly_incomplete_days`
+for the last poll. Until the first normal poll after an approved deployment proves
+the vendor's hourly contract, `daily` is the expected, safe result. See
+[`docs/hourly-statistics.md`](docs/hourly-statistics.md) for the full migration,
+verification and rollback runbook.
+
+## Stopping Statistics Imports (Rollback)
+
+After hourly data exists, reinstalling the old 1.4.2 daily importer is **not** a
+safe rollback: it would add a daily row beside the hourly rows or overwrite the
+first hour, double-counting or corrupting the day. The supported stop is the
+integration option:
+
+1. Open **Settings** > **Devices & Services** > **PSE&G** > **Configure**.
+2. Turn off **Import Long-Term Statistics** and save.
+3. The entry reloads. Sign-in, cookie renewal and the keepalive continue; automatic,
+   startup-deferred and manual statistics imports stop.
+
+The choice is stored in the config entry and survives restarts. Restoring recorder
+data is outside this integration: export it first with your own recorder/statistics
+backup. Never clear statistics or run a history reset as a rollback.
+
 ## Historical Backfill
 
 To backfill historical usage data from the PSE&G portal into Home Assistant Long-Term Statistics:
@@ -190,6 +252,13 @@ data:
   start_date: "2024-01-01"
   end_date: "2026-10-19"
 ```
+
+The backfill action stays daily. It uses the same reconciliation as the poll: older
+and newer stored rows are re-chained, gaps are kept, and an existing promoted hourly
+day is never downgraded. If the requested daily range contradicts a promoted day and
+there is no complete hourly replacement, the action logs an explicit rejection and
+writes nothing for that entry. While **Import Long-Term Statistics** is off, the
+action returns `0` without contacting the portal.
 
 ## Lovelace Card
 
@@ -219,7 +288,7 @@ Entity ids below are for the first configured account (device name `PSEG`). A se
 gets the same ids with a `_2` suffix; point the card's `entity`, `next_update_entity` and
 `connection_status_entity` options at those.
 
-- `sensor.pseg_electricity_consumption`: Latest daily electric usage in kWh (contains `history_14d` and daily stats)
+- `sensor.pseg_electricity_consumption`: Latest daily electric usage in kWh (contains `history_14d`, `statistics_granularity`, and hourly completeness attributes)
 - `sensor.pseg_electricity_cost`: Latest daily estimated cost in USD
 - `sensor.pseg_meter_id`: Meter serial number / identification
 - `sensor.pseg_latest_reading_date`: Date of the most recent recorded reading

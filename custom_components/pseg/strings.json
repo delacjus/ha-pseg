@@ -72,9 +72,10 @@
     "step": {
       "init": {
         "title": "PSE&G Energy Options",
-        "description": "Configure settings for PSE&G Energy.",
+        "description": "Configure settings for PSE&G Energy. Turning off statistics imports stops automatic, deferred and manual recorder writes; sign-in and keepalive keep running.",
         "data": {
-          "price_per_kwh": "Estimated Electricity Rate ($/kWh)"
+          "price_per_kwh": "Estimated Electricity Rate ($/kWh)",
+          "statistics_import_enabled": "Import Long-Term Statistics"
         }
       }
     }

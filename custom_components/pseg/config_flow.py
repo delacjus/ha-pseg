@@ -42,8 +42,10 @@ from .const import (
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
     CONF_PRICE_PER_KWH,
+    CONF_STATISTICS_IMPORT_ENABLED,
     DEFAULT_METER_NAME,
     DEFAULT_PRICE_PER_KWH,
+    DEFAULT_STATISTICS_IMPORT_ENABLED,
     DOMAIN,
     REMEMBER_ME_COOKIE,
 )
@@ -922,6 +924,13 @@ class PsegOptionsFlowHandler(OptionsFlowWithReload):
                         CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH
                     ),
                 ): vol.Coerce(float),
+                vol.Optional(
+                    CONF_STATISTICS_IMPORT_ENABLED,
+                    default=self.config_entry.options.get(
+                        CONF_STATISTICS_IMPORT_ENABLED,
+                        DEFAULT_STATISTICS_IMPORT_ENABLED,
+                    ),
+                ): bool,
             }
         )
 

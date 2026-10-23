@@ -38,6 +38,9 @@ TO_REDACT = {
     CONF_KNOWN_METER_IDS,
     "meter",
     "meter_ids",
+    # Raw hourly/daily chart arrays: diagnostics reports only the small summary.
+    "hourly_records",
+    "daily_records",
 }
 
 
@@ -84,7 +87,12 @@ async def async_get_config_entry_diagnostics(
         entry.entry_id
     )
     if coordinator is None:
-        return {"entry": entry_info, "session_telemetry": None, "coordinator": None}
+        return {
+            "entry": entry_info,
+            "session_telemetry": None,
+            "coordinator": None,
+            "statistics": None,
+        }
     client = coordinator.client
 
     return {
@@ -105,4 +113,6 @@ async def async_get_config_entry_diagnostics(
             "last_successful_update": coordinator.last_successful_update,
             "data": async_redact_data(dict(coordinator.data or {}), TO_REDACT),
         },
+        # Counts, fixed reason codes and booleans only: no raw points or meter ids.
+        "statistics": await coordinator.async_statistics_summary(),
     }

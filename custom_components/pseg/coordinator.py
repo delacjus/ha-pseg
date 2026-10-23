@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import logging
+import math
 import re
 from typing import Any
-import zoneinfo
 
 from homeassistant.components import persistent_notification
 from homeassistant.components.recorder import get_instance
@@ -42,24 +42,48 @@ from .const import (
     CONF_KNOWN_METER_IDS,
     CONF_METER_ID,
     CONF_PRICE_PER_KWH,
+    CONF_STATISTICS_IMPORT_ENABLED,
     DEFAULT_PRICE_PER_KWH,
     DEFAULT_SCAN_INTERVAL_HOURS,
+    DEFAULT_STATISTICS_IMPORT_ENABLED,
     DOMAIN,
     KEEPALIVE_INTERVAL_MINUTES,
     LOCAL_KEEPALIVE_INTERVAL_MINUTES,
     SESSION_COOKIE_NAMES,
+    STATISTICS_PRECISION,
 )
 from .pseg_client import (
     PsegClient,
     PsegOktaSessionExpired,
     PsegTransientError,
 )
+from .statistics_hourly import (
+    COST_REL_TOLERANCE,
+    PROMOTION_ABS_TOLERANCE_KWH,
+    PROMOTION_REL_TOLERANCE,
+    STATISTICS_INCOMPLETE_REASONS,
+    chain_rows,
+    cost_tolerance,
+    day_records_match,
+    detect_hourly_days,
+    merge_series_rows,
+    ny_midnight_utc,
+    parse_day,
+    rows_by_day,
+    validate_hourly_days,
+    values_close,
+)
+from .statistics_state import StatisticsEntryRuntime
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class PsegStatisticsError(HomeAssistantError):
     """Recorder query failed; the import is aborted to keep the sum chain intact."""
+
+
+class PsegStatisticsConflictError(PsegStatisticsError):
+    """A daily total contradicts a promoted hourly day; nothing was written."""
 
 
 # Upper bound on waiting for the recorder to commit an import (seconds).
@@ -165,29 +189,72 @@ async def _async_get_stats_from(
     return rows
 
 
-def _merge_and_chain(
-    existing: list[tuple[datetime, float | None]],
-    new: list[StatisticData],
-    prior_sum: float | None,
-) -> list[StatisticData]:
-    """Merge stored daily values with newly fetched ones and recompute every sum.
+async def _async_get_series_with_sums(
+    hass: HomeAssistant,
+    statistic_id: str,
+    from_dt: datetime,
+) -> list[tuple[datetime, float, float]]:
+    """Return (start, state, sum) for verification after a recorder write."""
+    try:
+        stats = await get_instance(hass).async_add_executor_job(
+            statistics_during_period,
+            hass,
+            from_dt,
+            None,
+            {statistic_id},
+            "hour",
+            None,
+            {"state", "sum"},
+        )
+    except Exception as err:
+        raise PsegStatisticsError(
+            f"Could not verify statistics for {statistic_id}: {err}"
+        ) from err
 
-    Every stored row from the window start onward is rewritten: fetched days replace
-    the stored value, days the fetch did not return (a missing day inside the window,
-    or newer rows after it) keep their stored value. One chain over the union means a
-    partial fetch can never leave a row whose sum was built on a different baseline.
-    """
-    by_start: dict[datetime, float | None] = dict(existing)
-    for stat in new:
-        by_start[stat["start"]] = stat["state"]
+    rows: list[tuple[datetime, float, float]] = []
+    for stat in stats.get(statistic_id, []):
+        start = _row_start(stat)
+        state = stat.get("state")
+        total = stat.get("sum")
+        if start is None or state is None or total is None:
+            continue
+        if start >= from_dt:
+            rows.append((start, float(state), float(total)))
+    rows.sort(key=lambda row: row[0])
+    return rows
 
-    running = float(prior_sum or 0.0)
-    out: list[StatisticData] = []
-    for start in sorted(by_start):
-        state = by_start[start]
-        running += state or 0.0
-        out.append(StatisticData(start=start, state=state, sum=round(running, 2)))
-    return out
+
+def _series_rows_match(
+    live: list[tuple[datetime, float, float]],
+    intended: list[tuple[datetime, float, float]],
+    *,
+    abs_tol: float = 1e-6,
+) -> bool:
+    """Return True when the recorder holds the exact intended rows and sums."""
+    if len(live) != len(intended):
+        return False
+    for (start, state, total), (want_start, want_state, want_total) in zip(
+        live, intended
+    ):
+        if start != want_start:
+            return False
+        if not values_close(state, want_state, abs_tol=abs_tol):
+            return False
+        if not values_close(total, want_total, abs_tol=abs_tol, rel_tol=1e-9):
+            return False
+    return True
+
+
+def _statistics_runtime_for(
+    hass: HomeAssistant, entry_id: str
+) -> StatisticsEntryRuntime:
+    """Return the one statistics runtime shared by every coordinator of an entry."""
+    registry = hass.data.setdefault(f"{DOMAIN}_statistics_runtimes", {})
+    runtime = registry.get(entry_id)
+    if runtime is None:
+        runtime = StatisticsEntryRuntime(hass, entry_id)
+        registry[entry_id] = runtime
+    return runtime
 
 
 async def _async_wait_for_recorder_commit(hass: HomeAssistant) -> None:
@@ -204,6 +271,112 @@ async def _async_wait_for_recorder_commit(hass: HomeAssistant) -> None:
         await instance.async_block_till_done()
 
 
+def _canonical_records(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    """Parse the canonical [start, value] journal rows into merge inputs."""
+    records: list[dict[str, Any]] = []
+    for raw_start, raw_value in entry.get("records") or []:
+        try:
+            start = datetime.fromisoformat(str(raw_start))
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=UTC)
+        records.append({"start": start, "kwh": value})
+    return sorted(records, key=lambda item: item["start"])
+
+
+def _journal_records_match(
+    live_rows: list[tuple[datetime, float | None]],
+    entry: dict[str, Any],
+) -> bool:
+    """Return True when the recorder already holds every canonical journal row."""
+    raw_records = entry.get("records") or []
+    if not raw_records or len(live_rows) != len(raw_records):
+        return False
+    by_start = {start: state for start, state in live_rows}
+    for raw_start, raw_value in raw_records:
+        try:
+            start = datetime.fromisoformat(str(raw_start))
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return False
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=UTC)
+        if start not in by_start:
+            return False
+        if not values_close(by_start[start], value, abs_tol=1e-6):
+            return False
+    return True
+
+
+def _statistic_metadata(
+    clean_meter: str,
+) -> tuple[StatisticMetaData, StatisticMetaData]:
+    """Return the stable consumption/cost metadata for one meter.
+
+    The statistic ids and metadata never change during the hourly migration: the
+    Energy Dashboard keeps its existing history and entity links.
+    """
+    return (
+        StatisticMetaData(
+            has_mean=False,
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name="PSE&G Electricity Consumption",
+            source=DOMAIN,
+            statistic_id=f"{DOMAIN}:{clean_meter}_energy_consumption",
+            unit_class="energy",
+            unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        ),
+        StatisticMetaData(
+            has_mean=False,
+            mean_type=StatisticMeanType.NONE,
+            has_sum=True,
+            name="PSE&G Electricity Cost (Estimated)",
+            source=DOMAIN,
+            statistic_id=f"{DOMAIN}:{clean_meter}_energy_cost",
+            unit_class=None,
+            unit_of_measurement="USD",
+        ),
+    )
+
+
+def _normalise_daily(
+    records: list[dict[str, Any]],
+    price_per_kwh: float,
+) -> dict[date, dict[str, float]]:
+    """Collapse daily records to one entry per New York day, dropping invalid rows."""
+    daily: dict[date, dict[str, float]] = {}
+    for record in records:
+        day = parse_day(record.get("date"))
+        if day is None:
+            _LOGGER.debug("Skipping statistics record with an invalid date")
+            continue
+        try:
+            kwh = float(record.get("kwh"))
+        except (TypeError, ValueError):
+            _LOGGER.debug("Skipping statistics record with non-numeric usage")
+            continue
+        if not math.isfinite(kwh):
+            continue
+        raw_cost = record.get("cost")
+        if raw_cost is None:
+            # Daily fallback cost keeps the portal's cents precision; hourly cost
+            # states use six decimals so 24 hours never accumulate cent rounding.
+            cost = round(kwh * price_per_kwh, 2)
+        else:
+            try:
+                cost = float(raw_cost)
+            except (TypeError, ValueError):
+                _LOGGER.debug("Skipping statistics record with non-numeric cost")
+                continue
+            if not math.isfinite(cost):
+                continue
+        daily[day] = {"kwh": kwh, "cost": cost}
+    return daily
+
+
 def build_external_statistics(
     records: list[dict[str, Any]],
     meter_id: str,
@@ -211,75 +384,33 @@ def build_external_statistics(
     prior_cost_sum: float | None = None,
     price_per_kwh: float = DEFAULT_PRICE_PER_KWH,
 ) -> tuple[StatisticMetaData, list[StatisticData], StatisticMetaData, list[StatisticData]]:
-    """Build consumption and cost external statistic records with running cumulative sums."""
+    """Build daily consumption and cost statistics with running cumulative sums.
+
+    Kept as the pure daily builder used by tests and by callers that only have daily
+    records; the coordinator itself routes through the shared reconciliation so the
+    hourly provenance and the stored-row rechain are never bypassed.
+    """
     clean_meter = (
         re.sub(r"[^a-z0-9_]+", "_", str(meter_id).lower()).strip("_") or "meter"
     )
+    consumption_metadata, cost_metadata = _statistic_metadata(clean_meter)
 
-    consumption_statistic_id = f"{DOMAIN}:{clean_meter}_energy_consumption"
-    cost_statistic_id = f"{DOMAIN}:{clean_meter}_energy_cost"
-
-    consumption_metadata = StatisticMetaData(
-        has_mean=False,
-        mean_type=StatisticMeanType.NONE,
-        has_sum=True,
-        name="PSE&G Electricity Consumption",
-        source=DOMAIN,
-        statistic_id=consumption_statistic_id,
-        unit_class="energy",
-        unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-    )
-
-    cost_metadata = StatisticMetaData(
-        has_mean=False,
-        mean_type=StatisticMeanType.NONE,
-        has_sum=True,
-        name="PSE&G Electricity Cost (Estimated)",
-        source=DOMAIN,
-        statistic_id=cost_statistic_id,
-        unit_class=None,
-        unit_of_measurement="USD",
-    )
-
-    if not records:
+    daily = _normalise_daily(records, price_per_kwh)
+    if not daily:
         return consumption_metadata, [], cost_metadata, []
 
-    sorted_records = sorted(records, key=lambda x: x["date"])
-    tz = zoneinfo.ZoneInfo("America/New_York")
-
-    running_consumption = float(prior_consumption_sum or 0.0)
-    running_cost = float(prior_cost_sum or 0.0)
-
-    consumption_stats: list[StatisticData] = []
-    cost_stats: list[StatisticData] = []
-
-    for r in sorted_records:
-        date_str = r["date"]
-        kwh = float(r.get("kwh") or 0.0)
-        cost = float(r.get("cost") or round(kwh * price_per_kwh, 2))
-
-        local_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=tz)
-        start_utc = dt_util.as_utc(local_dt)
-
-        running_consumption += kwh
-        running_cost += cost
-
-        consumption_stats.append(
-            StatisticData(
-                start=start_utc,
-                state=kwh,
-                sum=round(running_consumption, 2),
-            )
-        )
-        cost_stats.append(
-            StatisticData(
-                start=start_utc,
-                state=cost,
-                sum=round(running_cost, 2),
-            )
-        )
-
-    return consumption_metadata, consumption_stats, cost_metadata, cost_stats
+    consumption_by_start = {
+        ny_midnight_utc(day): values["kwh"] for day, values in daily.items()
+    }
+    cost_by_start = {
+        ny_midnight_utc(day): values["cost"] for day, values in daily.items()
+    }
+    return (
+        consumption_metadata,
+        chain_rows(consumption_by_start, prior_consumption_sum),
+        cost_metadata,
+        chain_rows(cost_by_start, prior_cost_sum),
+    )
 
 
 class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -313,8 +444,22 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._persisted_session_cookies = _session_cookie_names(self._jar_baseline)
         # Serializes portal fetch + statistics import for poll, refresh and backfill.
         self._update_lock = asyncio.Lock()
-        # Serializes baseline read -> import -> commit so concurrent imports chain.
-        self._stats_lock = asyncio.Lock()
+        # Entry-level serialization and ownership survive coordinator unload/reload.
+        self._stats_runtime = _statistics_runtime_for(
+            hass, config_entry.entry_id if config_entry else "default"
+        )
+        self._stats_token = self._stats_runtime.activate()
+        self._stats_lock = self._stats_runtime.lock
+        # Durable promoted-day provenance and the pre-write mutation journal.
+        self._stats_state = self._stats_runtime.store
+        self.last_statistics_import: str | None = None
+        # Last hourly evaluation, kept small and value-free for diagnostics.
+        self._hourly_summary: dict[str, Any] = {
+            "complete_days": 0,
+            "incomplete_days": 0,
+            "promoted_last_run": 0,
+            "reason_counts": {},
+        }
 
         super().__init__(
             hass,
@@ -350,6 +495,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def stop_keepalive(self) -> None:
         """Cancel recurring keepalive timer and retire this coordinator's session."""
         self._stopped = True
+        self._stats_runtime.retire(self._stats_token)
         if self._unsub_keepalive is not None:
             self._unsub_keepalive()
             self._unsub_keepalive = None
@@ -589,14 +735,29 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self._async_persist_cookies()
                 self._async_persist_meter_ids(data.get("meter_ids") or [])
 
-                if "history_14d" in data and data["history_14d"]:
+                daily_records = (
+                    data.get("daily_records") or data.get("history_14d") or []
+                )
+                hourly_records = data.get("hourly_records") or []
+                if daily_records:
                     meter_id = self._get_meter_id(data)
+                    hourly_granularity = data.get(
+                        "hourly_granularity", "unavailable"
+                    )
                     if self.hass.state is CoreState.running:
                         await self._async_record_statistics_logged(
-                            data["history_14d"], meter_id
+                            daily_records,
+                            meter_id,
+                            hourly_records,
+                            hourly_granularity,
                         )
                     else:
-                        self._defer_statistics_until_started(data["history_14d"], meter_id)
+                        self._defer_statistics_until_started(
+                            daily_records,
+                            meter_id,
+                            hourly_records,
+                            hourly_granularity,
+                        )
 
             self.next_update_time = dt_util.utcnow() + self.update_interval
             data["next_update"] = self.next_update_time.isoformat()
@@ -624,16 +785,32 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed(f"Error communicating with PSE&G: {err}") from err
 
     async def _async_record_statistics_logged(
-        self, records: list[dict[str, Any]], meter_id: str
+        self,
+        records: list[dict[str, Any]],
+        meter_id: str,
+        hourly_records: list[dict[str, Any]] | None = None,
+        hourly_granularity: str = "unavailable",
     ) -> None:
         """Import statistics; a failure is logged and never fails the poll."""
         try:
-            await self.async_record_statistics(records, meter_id=meter_id)
+            if hourly_records:
+                await self.async_record_statistics(
+                    records,
+                    meter_id=meter_id,
+                    hourly_records=hourly_records,
+                    hourly_granularity=hourly_granularity,
+                )
+            else:
+                await self.async_record_statistics(records, meter_id=meter_id)
         except Exception as stat_err:
             _LOGGER.warning("Could not record statistics into LTS: %s", stat_err)
 
     def _defer_statistics_until_started(
-        self, records: list[dict[str, Any]], meter_id: str
+        self,
+        records: list[dict[str, Any]],
+        meter_id: str,
+        hourly_records: list[dict[str, Any]] | None = None,
+        hourly_granularity: str = "unavailable",
     ) -> None:
         """Import after Home Assistant has started instead of during setup.
 
@@ -643,77 +820,316 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
 
         async def _import_when_started(_hass: HomeAssistant) -> None:
-            if self._is_stale():
+            if self._is_stale() or not self.statistics_imports_enabled():
                 return
-            await self._async_record_statistics_logged(records, meter_id)
+            await self._async_record_statistics_logged(
+                records, meter_id, hourly_records, hourly_granularity
+            )
 
         unsub = async_at_started(self.hass, _import_when_started)
         if self.config_entry is not None:
             self.config_entry.async_on_unload(unsub)
 
+    def statistics_imports_enabled(self) -> bool:
+        """Return whether any statistics import is allowed for this entry.
+
+        Authentication and keepalive never consult this switch: it exists so an
+        operator can stop every recorder write (automatic poll, deferred startup
+        import and manual backfill) while the signed-in session keeps running,
+        for example before exporting or restoring statistics.
+        """
+        if self.config_entry is None:
+            return True
+        return bool(
+            self.config_entry.options.get(
+                CONF_STATISTICS_IMPORT_ENABLED,
+                DEFAULT_STATISTICS_IMPORT_ENABLED,
+            )
+        )
+
+    def _can_mutate_statistics(self) -> bool:
+        """Re-check ownership and the live pause option immediately before a write."""
+        if self._is_stale() or not self._stats_runtime.is_current(self._stats_token):
+            _LOGGER.debug("Skipping statistics mutation for a retired PSE&G session")
+            return False
+        if not self.statistics_imports_enabled():
+            _LOGGER.debug("Statistics imports are disabled for this PSE&G entry")
+            return False
+        return True
+
     async def async_record_statistics(
-        self, records: list[dict[str, Any]], meter_id: str | None = None
+        self,
+        records: list[dict[str, Any]],
+        meter_id: str | None = None,
+        *,
+        hourly_records: list[dict[str, Any]] | None = None,
+        hourly_granularity: str = "unavailable",
     ) -> None:
-        """Import daily energy consumption and cost records as external statistics."""
-        if not records:
+        """Reconcile authoritative daily records and optional hourly points.
+
+        One path serves the poll and the manual daily backfill. Daily records are
+        always eligible for import; a closed hourly day is promoted only when it is
+        complete, carries positive interval-start evidence and its total agrees with
+        the daily total. A promoted day is never overwritten by a daily retry.
+        """
+        if not records and not hourly_records:
+            return
+        if not self.statistics_imports_enabled():
+            _LOGGER.debug("Statistics imports are disabled for this PSE&G entry")
             return
 
         async with self._stats_lock:
-            await self._async_record_statistics_locked(records, meter_id)
+            if not self._can_mutate_statistics():
+                return
+            await self._async_record_statistics_locked(
+                records, meter_id, hourly_records or [], hourly_granularity
+            )
 
     async def _async_record_statistics_locked(
-        self, records: list[dict[str, Any]], meter_id: str | None
+        self,
+        records: list[dict[str, Any]],
+        meter_id: str | None,
+        hourly_records: list[dict[str, Any]],
+        hourly_granularity: str,
     ) -> None:
-        """Import statistics; caller holds _stats_lock."""
+        """Reconcile and import statistics; caller holds the entry lock."""
         meter_id = meter_id or self._get_meter_id()
         clean_meter = (
             re.sub(r"[^a-z0-9_]+", "_", str(meter_id).lower()).strip("_") or "meter"
         )
         consumption_statistic_id = f"{DOMAIN}:{clean_meter}_energy_consumption"
         cost_statistic_id = f"{DOMAIN}:{clean_meter}_energy_cost"
+        await self._stats_state.async_load()
+        if not self._can_mutate_statistics():
+            return
 
-        sorted_records = sorted(records, key=lambda x: x["date"])
-        tz = zoneinfo.ZoneInfo("America/New_York")
+        # Finish a crashed or timed-out mutation before reconciling new data, so a
+        # daily retry can never land on top of a half-written day.
+        await self._async_recover_pending()
+        if not self._can_mutate_statistics():
+            return
 
-        first_date_str = sorted_records[0]["date"]
-        first_local_dt = datetime.strptime(first_date_str, "%Y-%m-%d").replace(tzinfo=tz)
-        first_start_utc = dt_util.as_utc(first_local_dt)
+        now = dt_util.utcnow()
+        daily = _normalise_daily(records, self.client.price_per_kwh)
+        daily_totals = {day: item["kwh"] for day, item in daily.items()}
+        # A daily-only import (manual backfill or a poll without an hourly leg) has
+        # no hourly provenance to evaluate; daily rows keep today's behaviour.
+        validations = (
+            validate_hourly_days(
+                hourly_records,
+                daily_totals,
+                now,
+                granularity=hourly_granularity,
+            )
+            if hourly_records
+            else {}
+        )
+        complete = {
+            day: check for day, check in validations.items() if check.complete
+        }
+        if not daily and not complete:
+            self._log_hourly_outcome(validations, {})
+            return
 
-        # Baseline running sum strictly before the first start timestamp
+        first_start = min(
+            [ny_midnight_utc(day) for day in daily]
+            + [check.records[0]["start"] for check in complete.values()]
+        )
+
+        # Every read happens before the first write: a failed read imports nothing,
+        # and both series are chained from one consistent snapshot.
         prior_consumption = await _async_get_last_stat_before(
-            self.hass, consumption_statistic_id, first_start_utc
+            self.hass, consumption_statistic_id, first_start
         )
         prior_cost = await _async_get_last_stat_before(
-            self.hass, cost_statistic_id, first_start_utc
+            self.hass, cost_statistic_id, first_start
         )
-
-        (
-            consumption_metadata,
-            consumption_stats,
-            cost_metadata,
-            cost_stats,
-        ) = build_external_statistics(
-            records=sorted_records,
-            meter_id=meter_id,
-            prior_consumption_sum=prior_consumption,
-            prior_cost_sum=prior_cost,
-            price_per_kwh=self.client.price_per_kwh,
-        )
-
-        # Stored rows from the window start onward were chained off the old baseline:
-        # days missing from this fetch and rows newer than it (e.g. a backfill ending
-        # before the newest poll). Merge and re-chain them so the sum never steps back.
-        # All reads happen before any write, so a failed read imports nothing.
         existing_consumption = await _async_get_stats_from(
-            self.hass, consumption_statistic_id, first_start_utc
+            self.hass, consumption_statistic_id, first_start
         )
-        existing_cost = await _async_get_stats_from(self.hass, cost_statistic_id, first_start_utc)
-        consumption_stats = _merge_and_chain(
-            existing_consumption, consumption_stats, prior_consumption
+        existing_cost = await _async_get_stats_from(
+            self.hass, cost_statistic_id, first_start
         )
-        cost_stats = _merge_and_chain(existing_cost, cost_stats, prior_cost)
+        if not self._can_mutate_statistics():
+            return
 
-        async_add_external_statistics(self.hass, consumption_metadata, consumption_stats)
+        pending_days = self._stats_state.pending_days(
+            consumption_statistic_id
+        ) | self._stats_state.pending_days(cost_statistic_id)
+        # Consumption states are kWh; cost states are dollars. Keep consumption's
+        # total authoritative for the daily-total conflict check.
+        detected_consumption = detect_hourly_days(existing_consumption)
+        detected_cost = detect_hourly_days(existing_cost)
+        detected = {**detected_cost, **detected_consumption}
+        protected = set(pending_days) | set(detected)
+        for statistic_id in (consumption_statistic_id, cost_statistic_id):
+            for key in self._stats_state.promoted(statistic_id):
+                day = parse_day(key)
+                if day is not None:
+                    protected.add(day)
+
+        promoted_totals: dict[date, float] = {
+            day: info["total_kwh"] for day, info in detected.items()
+        }
+        promoted_cost_totals: dict[date, float] = {
+            day: info["total_kwh"] for day, info in detected_cost.items()
+        }
+        for key, info in self._stats_state.promoted(
+            consumption_statistic_id
+        ).items():
+            day = parse_day(key)
+            if day is not None:
+                promoted_totals.setdefault(
+                    day, float(info.get("total_kwh", 0.0))
+                )
+        for key, info in self._stats_state.promoted(cost_statistic_id).items():
+            day = parse_day(key)
+            if day is not None:
+                promoted_cost_totals.setdefault(
+                    day, float(info.get("total_cost", 0.0))
+                )
+
+        # A daily retry for a promoted or pending day may confirm it, never rewrite
+        # it. A changed total is an explicit conflict: reject the whole import before
+        # any write instead of silently skipping the correction.
+        for day, item in daily.items():
+            if day not in protected or day in complete:
+                continue
+            stored = promoted_totals.get(day)
+            if stored is None:
+                # Pending with no live rows yet: recovery owns that write.
+                continue
+            if not values_close(
+                item["kwh"],
+                stored,
+                abs_tol=PROMOTION_ABS_TOLERANCE_KWH,
+                rel_tol=PROMOTION_REL_TOLERANCE,
+            ):
+                raise PsegStatisticsConflictError(
+                    f"Daily total {item['kwh']:.4f} kWh for {day.isoformat()} does "
+                    f"not match the promoted hourly total {stored:.4f} kWh; the "
+                    "import was rejected before any statistics were written"
+                )
+            # Cost is an estimate and a rate change legitimately changes it. Compare
+            # with the daily cents vs hourly six-decimal tolerance; never reject on
+            # cost alone, and never rewrite the promoted day from a daily retry.
+            stored_cost = promoted_cost_totals.get(day)
+            if stored_cost is not None and not values_close(
+                item["cost"],
+                stored_cost,
+                abs_tol=cost_tolerance(stored_cost),
+                rel_tol=COST_REL_TOLERANCE,
+            ):
+                _LOGGER.debug(
+                    "Keeping the promoted hourly cost for %s; the daily estimate "
+                    "differs by more than rounding",
+                    day.isoformat(),
+                )
+
+        price = float(self.client.price_per_kwh)
+        existing_by_day = rows_by_day(existing_consumption)
+        existing_cost_by_day = rows_by_day(existing_cost)
+        promote: dict[date, Any] = {}
+        for day, check in complete.items():
+            cost_records = [
+                {
+                    "start": record["start"],
+                    "kwh": round(record["kwh"] * price, STATISTICS_PRECISION),
+                }
+                for record in check.records
+            ]
+            if day_records_match(
+                existing_by_day.get(day, ()), check.records
+            ) and day_records_match(existing_cost_by_day.get(day, ()), cost_records):
+                # A repeat poll or a stable day: nothing to write.
+                continue
+            promote[day] = check
+
+        daily_consumption: dict[datetime, float] = {}
+        daily_cost: dict[datetime, float] = {}
+        for day, item in daily.items():
+            if day in promote or day in protected:
+                # Promoted/pending days are written (or kept) as full hourly sets.
+                continue
+            start = ny_midnight_utc(day)
+            daily_consumption[start] = item["kwh"]
+            daily_cost[start] = item["cost"]
+
+        hourly_consumption = {
+            day: [
+                {"start": record["start"], "kwh": record["kwh"]}
+                for record in check.records
+            ]
+            for day, check in promote.items()
+        }
+        hourly_cost = {
+            day: [
+                {
+                    "start": record["start"],
+                    "kwh": round(record["kwh"] * price, STATISTICS_PRECISION),
+                }
+                for record in check.records
+            ]
+            for day, check in promote.items()
+        }
+
+        if not daily_consumption and not daily_cost and not promote:
+            self._log_hourly_outcome(validations, {})
+            return
+
+        consumption_stats, consumption_changed = merge_series_rows(
+            existing_consumption,
+            daily_consumption,
+            hourly_consumption,
+            protected,
+            prior_consumption,
+        )
+        cost_stats, cost_changed = merge_series_rows(
+            existing_cost,
+            daily_cost,
+            hourly_cost,
+            protected,
+            prior_cost,
+        )
+        if not consumption_changed and not cost_changed:
+            self._log_hourly_outcome(validations, promote)
+            return
+
+        mutation = self._build_mutation(
+            consumption_stats,
+            cost_stats,
+            promote,
+            daily,
+            price,
+            now,
+            first_start,
+            consumption_statistic_id,
+            cost_statistic_id,
+        )
+        if not self._can_mutate_statistics():
+            return
+        try:
+            mutation_id = await self._stats_state.async_begin(mutation)
+        except Exception as err:
+            raise PsegStatisticsError(
+                f"Could not journal the statistics mutation: {err}"
+            ) from err
+        if not await self._stats_state.async_wait_durable(
+            refuse_outstanding=True
+        ):
+            raise PsegStatisticsError(
+                "Statistics journal is not durable; no recorder write was made"
+            )
+        if not self._can_mutate_statistics():
+            # The journal is durable but the operator paused/retired before any
+            # recorder write; remove our own uncommitted mutation.
+            await self._stats_state.async_discard(mutation_id)
+            return
+
+        consumption_metadata, cost_metadata = _statistic_metadata(clean_meter)
+        async_add_external_statistics(
+            self.hass, consumption_metadata, consumption_stats
+        )
         async_add_external_statistics(self.hass, cost_metadata, cost_stats)
         # Bounded at the call site so nothing inside the wait can hold the locks forever.
         try:
@@ -723,13 +1139,288 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise PsegStatisticsError(
                 f"Recorder did not commit the statistics import within {RECORDER_COMMIT_TIMEOUT}s"
             ) from err
+
+        if not await self._async_verify_mutation(mutation):
+            raise PsegStatisticsError(
+                "Recorder did not persist both statistics series; the journal was "
+                "retained for the next recovery attempt"
+            )
+        if not self._can_mutate_statistics():
+            # Rows are valid but the operator paused or the entry retired before the
+            # provenance commit; recovery commits it once writes are allowed again.
+            return
+        await self._stats_state.async_commit(mutation_id)
+
+        self.last_statistics_import = now.isoformat()
+        self._log_hourly_outcome(validations, promote)
         _LOGGER.info(
-            "Imported %d daily external statistics (range: %s to %s, id: %s)",
-            len(sorted_records),
-            sorted_records[0]["date"],
-            sorted_records[-1]["date"],
+            "Imported %d statistics rows (hourly days promoted: %d, range: %s to %s, id: %s)",
+            len(consumption_stats),
+            len(promote),
+            consumption_stats[0]["start"].isoformat(),
+            consumption_stats[-1]["start"].isoformat(),
             clean_meter,
         )
+
+    def _build_mutation(
+        self,
+        consumption_stats: list[dict[str, Any]],
+        cost_stats: list[dict[str, Any]],
+        promote: dict[date, Any],
+        daily: dict[date, dict[str, float]],
+        price: float,
+        now: datetime,
+        first_start: datetime,
+        consumption_statistic_id: str,
+        cost_statistic_id: str,
+    ) -> dict[str, Any]:
+        """Snapshot both complete series before any recorder write."""
+        return {
+            "created_at": now.isoformat(),
+            "first_start": first_start.isoformat(),
+            "series": {
+                consumption_statistic_id: [
+                    [row["start"].isoformat(), row["state"], row["sum"]]
+                    for row in consumption_stats
+                ],
+                cost_statistic_id: [
+                    [row["start"].isoformat(), row["state"], row["sum"]]
+                    for row in cost_stats
+                ],
+            },
+            "promoted": (
+                self._promoted_entries(
+                    promote,
+                    daily,
+                    price,
+                    now,
+                    consumption_statistic_id,
+                    cost_statistic_id,
+                )
+                if promote
+                else {}
+            ),
+        }
+
+    @staticmethod
+    def _promoted_entries(
+        promote: dict[date, Any],
+        daily: dict[date, dict[str, float]],
+        price: float,
+        now: datetime,
+        consumption_statistic_id: str,
+        cost_statistic_id: str,
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        """Build only the promoted-day provenance; rows live in the mutation."""
+        entries: dict[str, dict[str, dict[str, Any]]] = {
+            consumption_statistic_id: {},
+            cost_statistic_id: {},
+        }
+        for day, check in promote.items():
+            cost_total = round(
+                sum(
+                    round(record["kwh"] * price, STATISTICS_PRECISION)
+                    for record in check.records
+                ),
+                STATISTICS_PRECISION,
+            )
+            common = {
+                "total_kwh": round(check.total_kwh, STATISTICS_PRECISION),
+                "total_cost": cost_total,
+                "daily_kwh": daily.get(day, {}).get("kwh"),
+                "daily_cost": daily.get(day, {}).get("cost"),
+                "promoted_at": now.isoformat(),
+            }
+            entries[consumption_statistic_id][day.isoformat()] = dict(common)
+            entries[cost_statistic_id][day.isoformat()] = dict(common)
+        return entries
+
+    def _log_hourly_outcome(
+        self,
+        validations: dict[date, Any],
+        promoted: dict[date, Any],
+    ) -> None:
+        """Log one line about hourly completeness (never a meter identifier)."""
+        if not validations:
+            return
+        incomplete = [
+            check for check in validations.values() if not check.complete
+        ]
+        reason_counts: dict[str, int] = {}
+        for check in incomplete:
+            if check.reason in STATISTICS_INCOMPLETE_REASONS:
+                reason_counts[check.reason] = (
+                    reason_counts.get(check.reason, 0) + 1
+                )
+        self._hourly_summary = {
+            "complete_days": sum(
+                1 for check in validations.values() if check.complete
+            ),
+            "incomplete_days": len(incomplete),
+            "promoted_last_run": len(promoted),
+            "reason_counts": reason_counts,
+        }
+        reasons = sorted(reason_counts)
+        _LOGGER.info(
+            "PSE&G hourly statistics: %d day(s) promoted, %d incomplete%s",
+            len(promoted),
+            len(incomplete),
+            f" ({', '.join(reasons)})" if reasons else "",
+        )
+
+    async def async_statistics_summary(self) -> dict[str, Any]:
+        """Return a small, value-free hourly-import summary for diagnostics.
+
+        Deliberately contains no meter id, statistic id, raw point, kWh value or
+        credential: only counts, fixed reason codes, the pause/recovery booleans and
+        the last import timestamp.
+        """
+        await self._stats_state.async_load()
+        clean_meter = (
+            re.sub(r"[^a-z0-9_]+", "_", str(self._get_meter_id()).lower()).strip("_")
+            or "meter"
+        )
+        consumption_statistic_id = f"{DOMAIN}:{clean_meter}_energy_consumption"
+        promoted = self._stats_state.promoted(consumption_statistic_id)
+        data = self.data or {}
+        stored = self._hourly_summary
+        reason_counts = {
+            reason: int(count)
+            for reason, count in (stored.get("reason_counts") or {}).items()
+            if reason in STATISTICS_INCOMPLETE_REASONS
+        }
+        return {
+            "paused": not self.statistics_imports_enabled(),
+            "granularity": data.get("statistics_granularity"),
+            "complete_days": int(
+                data.get("hourly_complete_days", stored.get("complete_days", 0)) or 0
+            ),
+            "incomplete_days": int(
+                data.get("hourly_incomplete_days", stored.get("incomplete_days", 0))
+                or 0
+            ),
+            "promoted_days": len(promoted),
+            "promoted_last_run": int(stored.get("promoted_last_run", 0) or 0),
+            "reason_counts": reason_counts,
+            "pending_recovery": self._stats_state.has_pending(),
+            "last_import": self.last_statistics_import,
+        }
+
+    async def _async_verify_mutation(self, mutation: dict[str, Any]) -> bool:
+        """Verify both series' rows and cumulative sums in the recorder."""
+        try:
+            first_start = datetime.fromisoformat(str(mutation["first_start"]))
+        except (KeyError, TypeError, ValueError):
+            return False
+        series = mutation.get("series")
+        if not isinstance(series, dict) or not series:
+            return False
+        for statistic_id, raw_rows in series.items():
+            intended: list[tuple[datetime, float, float]] = []
+            try:
+                for raw_start, raw_state, raw_sum in raw_rows:
+                    start = datetime.fromisoformat(str(raw_start))
+                    if start.tzinfo is None:
+                        return False
+                    intended.append(
+                        (start, float(raw_state), float(raw_sum))
+                    )
+            except (TypeError, ValueError):
+                return False
+            live = await _async_get_series_with_sums(
+                self.hass, statistic_id, first_start
+            )
+            if not _series_rows_match(live, intended):
+                _LOGGER.warning(
+                    "Statistics verification failed for one series; journal retained"
+                )
+                return False
+        return True
+
+    async def _async_replay_mutation(self, mutation: dict[str, Any]) -> None:
+        """Replay the exact journal rows for both series, then wait for commit."""
+        series = mutation.get("series") or {}
+        if not isinstance(series, dict) or not series:
+            raise PsegStatisticsError("Pending statistics journal has no series")
+        for statistic_id, raw_rows in series.items():
+            clean_meter = statistic_id.removeprefix(f"{DOMAIN}:").removesuffix(
+                "_energy_consumption"
+            ).removesuffix("_energy_cost")
+            consumption_metadata, cost_metadata = _statistic_metadata(clean_meter)
+            metadata = (
+                consumption_metadata
+                if statistic_id.endswith("_energy_consumption")
+                else cost_metadata
+            )
+            stats = []
+            for raw_start, raw_state, raw_sum in raw_rows:
+                start = datetime.fromisoformat(str(raw_start))
+                if start.tzinfo is None:
+                    start = start.replace(tzinfo=UTC)
+                stats.append(
+                    {
+                        "start": start,
+                        "state": float(raw_state),
+                        "sum": float(raw_sum),
+                    }
+                )
+            async_add_external_statistics(self.hass, metadata, stats)
+        try:
+            async with asyncio.timeout(RECORDER_COMMIT_TIMEOUT):
+                await _async_wait_for_recorder_commit(self.hass)
+        except TimeoutError as err:
+            raise PsegStatisticsError(
+                "Recorder did not commit the replayed statistics within "
+                f"{RECORDER_COMMIT_TIMEOUT}s"
+            ) from err
+
+    async def _async_recover_pending(self) -> int:
+        """Verify, replay and commit unfinished mutations before new work.
+
+        Both series and their cumulative sums must match the journal. If they do,
+        only the provenance commit was missing. Otherwise the exact journal rows are
+        replayed idempotently and verified again. A mismatch or a pause leaves the
+        journal in place for the next attempt.
+        """
+        if not await self._stats_state.async_wait_durable(
+            refuse_outstanding=True
+        ):
+            raise PsegStatisticsError(
+                "Statistics journal is not durable yet; recovery refused"
+            )
+        pending = self._stats_state.pending_mutations()
+        if not pending:
+            return 0
+        if not self._can_mutate_statistics():
+            return 0
+
+        recovered = 0
+        for mutation_id, mutation in pending.items():
+            if not self._can_mutate_statistics():
+                return recovered
+            if await self._async_verify_mutation(mutation):
+                if not self._can_mutate_statistics():
+                    return recovered
+                await self._stats_state.async_commit(mutation_id)
+                recovered += 1
+                continue
+
+            if not self._can_mutate_statistics():
+                return recovered
+            await self._async_replay_mutation(mutation)
+            if not await self._async_verify_mutation(mutation):
+                raise PsegStatisticsError(
+                    "Replayed statistics did not persist both series; journal retained"
+                )
+            if not self._can_mutate_statistics():
+                return recovered
+            await self._stats_state.async_commit(mutation_id)
+            recovered += 1
+        if recovered:
+            _LOGGER.info(
+                "Recovered %d pending statistics mutation(s)", recovered
+            )
+        return recovered
 
     async def async_backfill_history(
         self,
@@ -737,6 +1428,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         end_date: str | None = None,
     ) -> int:
         """Fetch and import historical data into Long-Term Statistics."""
+        if not self.statistics_imports_enabled():
+            _LOGGER.warning(
+                "Statistics imports are disabled for this PSE&G entry; backfill skipped"
+            )
+            return 0
+
         now = dt_util.now()
         if not end_date:
             end_date_str = now.strftime("%Y-%m-%d")
@@ -777,6 +1474,11 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             meter_id = self._get_meter_id()
             await self.async_record_statistics(records, meter_id=meter_id)
+            if not self._can_mutate_statistics():
+                _LOGGER.debug(
+                    "PSE&G backfill stopped after the entry was paused or retired"
+                )
+                return 0
 
         # Statistics only: sensor values (latest_*, history_14d) stay from the regular
         # poll. A backfill of a past range must not make "latest" show old readings.

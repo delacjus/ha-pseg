@@ -147,6 +147,7 @@ class PsegConnectionStatusSensor(PsegBaseSensor):
             ATTR_OKTA_SESSION_EXPIRED_AT: client.okta_session_expired_at,
             ATTR_AUTH_REASON: client.auth_reason,
             ATTR_AUTH_IDLE_GAP: client.idle_gap_seconds,
+            "statistics_imports_enabled": self.coordinator.statistics_imports_enabled(),
         }
 
 
@@ -190,6 +191,16 @@ class PsegElectricityConsumptionSensor(PsegBaseSensor):
                 "last_updated": self._data.get("last_updated"),
                 "temperature_range": self._data.get("temperature_range"),
                 "next_update": self._data.get("next_update"),
+                # Explicit provenance for the newest statistics import: hourly days
+                # are only promoted when their total matches the daily total.
+                "statistics_granularity": self._data.get("statistics_granularity"),
+                "statistics_hourly_complete_days": self._data.get(
+                    "hourly_complete_days"
+                ),
+                "statistics_hourly_incomplete_days": self._data.get(
+                    "hourly_incomplete_days"
+                ),
+                "statistics_last_import": self.coordinator.last_statistics_import,
             })
         attrs["auth_required"] = self.coordinator.auth_required
         attrs["connection_status"] = self.coordinator.status

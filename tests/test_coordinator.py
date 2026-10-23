@@ -20,11 +20,18 @@ from custom_components.pseg.const import (
     DOMAIN,
     OKTA_HOST,
 )
-from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
+from custom_components.pseg.coordinator import (
+    PsegDataUpdateCoordinator,
+    PsegStatisticsConflictError,
+)
 from custom_components.pseg.pseg_client import (
     PsegClient,
     PsegOktaSessionExpired,
     PsegTransientError,
+)
+from custom_components.pseg.sensor import (
+    PsegConnectionStatusSensor,
+    PsegElectricityConsumptionSensor,
 )
 
 
@@ -459,3 +466,133 @@ async def test_stale_coordinator_skips_deferred_statistics_import(hass: HomeAssi
         hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
         await hass.async_block_till_done()
     record.assert_not_awaited()
+
+
+async def test_deferred_import_carries_hourly_records(hass: HomeAssistant) -> None:
+    """A startup-deferred import keeps the hourly records and their granularity."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345", data={CONF_OKTA_COOKIES: "idx=test"}
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    hourly = [{"start": datetime(2026, 10, 20, 4, 0, tzinfo=UTC), "kwh": 10.0}]
+    sample = {
+        "meter": "Meter #12345",
+        "history_14d": [{"date": "2026-10-20", "kwh": 10.0, "cost": 2.47}],
+        "daily_records": [{"date": "2026-10-20", "kwh": 10.0, "cost": 2.47}],
+        "hourly_records": hourly,
+        "hourly_granularity": "hourly",
+    }
+
+    hass.set_state(CoreState.starting)
+    with (
+        patch.object(client, "fetch_energy_data", return_value=sample),
+        patch.object(coord, "async_record_statistics", return_value=None) as record,
+    ):
+        await coord._async_update_data()
+        record.assert_not_awaited()
+
+        hass.set_state(CoreState.running)
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+        await hass.async_block_till_done()
+
+    record.assert_awaited_once_with(
+        sample["daily_records"],
+        meter_id="12345",
+        hourly_records=hourly,
+        hourly_granularity="hourly",
+    )
+
+
+async def test_poll_uses_daily_records_not_hybrid_history(hass: HomeAssistant) -> None:
+    """Statistics validation always receives the authoritative daily records."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345", data={CONF_OKTA_COOKIES: "idx=test"}
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    hybrid = [{"date": "2026-10-20", "kwh": 23.98, "cost": 5.92}]
+    daily = [{"date": "2026-10-20", "kwh": 24.02, "cost": 5.93}]
+    hourly = [{"start": datetime(2026, 10, 20, 4, 0, tzinfo=UTC), "kwh": 1.0}]
+    sample = {
+        "meter": "Meter #12345",
+        "history_14d": hybrid,
+        "daily_records": daily,
+        "hourly_records": hourly,
+        "hourly_granularity": "hourly",
+    }
+
+    with (
+        patch.object(client, "fetch_energy_data", return_value=sample),
+        patch.object(coord, "async_record_statistics", return_value=None) as record,
+    ):
+        data = await coord._async_update_data()
+
+    assert data["history_14d"] == hybrid
+    record.assert_awaited_once_with(
+        daily,
+        meter_id="12345",
+        hourly_records=hourly,
+        hourly_granularity="hourly",
+    )
+
+
+async def test_statistics_conflict_does_not_fail_the_poll(hass: HomeAssistant) -> None:
+    """A rejected conflicting import is logged; sensor data still updates."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345", data={CONF_OKTA_COOKIES: "idx=test"}
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    sample = {
+        "meter": "Meter #12345",
+        "latest_kwh": 10.0,
+        "history_14d": [{"date": "2026-10-20", "kwh": 10.0, "cost": 2.47}],
+        "daily_records": [{"date": "2026-10-20", "kwh": 10.0, "cost": 2.47}],
+    }
+
+    with (
+        patch.object(client, "fetch_energy_data", return_value=sample),
+        patch.object(
+            coord,
+            "async_record_statistics",
+            side_effect=PsegStatisticsConflictError("conflict"),
+        ),
+    ):
+        data = await coord._async_update_data()
+
+    assert data["latest_kwh"] == 10.0
+    assert coord.status == "connected"
+    assert coord.auth_required is False
+
+
+async def test_consumption_sensor_exposes_hourly_provenance(hass: HomeAssistant) -> None:
+    """The sensor reports explicit granularity and completeness attributes."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="12345", data={CONF_OKTA_COOKIES: "idx=test"}
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=test")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    coord.async_set_updated_data(
+        {
+            "latest_kwh": 10.0,
+            "history_14d": [],
+            "statistics_granularity": "hourly",
+            "hourly_complete_days": 3,
+            "hourly_incomplete_days": 1,
+        }
+    )
+
+    consumption = PsegElectricityConsumptionSensor(coord, entry)
+    attrs = consumption.extra_state_attributes
+    assert attrs["statistics_granularity"] == "hourly"
+    assert attrs["statistics_hourly_complete_days"] == 3
+    assert attrs["statistics_hourly_incomplete_days"] == 1
+    assert attrs["statistics_last_import"] is None
+
+    status = PsegConnectionStatusSensor(coord, entry)
+    assert status.extra_state_attributes["statistics_imports_enabled"] is True

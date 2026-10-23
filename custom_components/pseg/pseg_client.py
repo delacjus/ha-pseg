@@ -7,7 +7,7 @@ and Okta SAML SSO endpoints.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import functools
 import json
 import logging
@@ -34,10 +34,29 @@ from .const import (
     PORTAL_BASE_URL,
     PORTAL_HOST,
     REMEMBER_ME_COOKIE,
+    STATISTICS_PRECISION,
+    USAGE_INTERVAL_DAILY,
+    USAGE_INTERVAL_HOURLY,
+)
+from .statistics_hourly import (
+    LABEL_TOLERANCE_SECONDS,
+    label_matches_ny_time,
+    ny_day_bounds,
+    ny_day_of,
+    parse_aware_label,
+    validate_hourly_days,
 )
 
 _LOGGER = logging.getLogger(__name__)
 _METER_SERIES = re.compile(r"^\s*Meter #(\d+)")
+
+
+def _parse_iso_day(value: Any) -> date | None:
+    """Parse a chart day label, returning None instead of raising."""
+    try:
+        return date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
 
 # Path fragments that mean "you were sent to sign in" (portal or Okta).
 _SIGNIN_PATH_MARKERS = ("/signin", "/sign-in", "/login")
@@ -996,7 +1015,7 @@ class PsegClient:
 
             chart_setup_data = {
                 "__RequestVerificationToken": token,
-                "UsageInterval": "6",
+                "UsageInterval": USAGE_INTERVAL_DAILY,
                 "UsageType": "1",
                 "jsTargetName": "StorageType",
                 "EnableHoverChart": "true",
@@ -1018,6 +1037,7 @@ class PsegClient:
                     headers=headers2,
                     timeout=25,
                 )
+                self._raise_for_chart_auth(resp2, "history chart setup")
                 if resp2.status_code >= 500:
                     raise PsegTransientError(f"Server error {resp2.status_code} setting chart context")
                 resp2.raise_for_status()
@@ -1029,6 +1049,7 @@ class PsegClient:
                     headers=headers2,
                     timeout=25,
                 )
+                self._raise_for_chart_auth(resp3, "history chart data")
                 if resp3.status_code >= 500:
                     raise PsegTransientError(f"Server error {resp3.status_code} fetching chart data")
                 resp3.raise_for_status()
@@ -1082,19 +1103,128 @@ class PsegClient:
 
     @_locked
     def fetch_energy_data(self, days_back: int = 14) -> dict[str, Any]:
-        """Fetch usage and temperature data using the 3-step MyMeter chart sequence."""
+        """Fetch daily plus hourly usage using the 3-step MyMeter chart sequence.
+
+        The daily chart remains authoritative: it feeds the sensors, the daily
+        backfill path and the check that gates hourly promotion. The hourly chart is
+        a second, independent request. If the vendor does not honour it (or answers
+        with a daily series), the poll keeps today's daily behaviour and reports the
+        real granularity instead of inventing hourly rows.
+        """
         token = self._get_verification_token()
 
         end_dt = datetime.now()
         start_dt = end_dt - timedelta(days=days_back)
+        start_str = start_dt.strftime("%Y-%m-%d")
+        end_str = end_dt.strftime("%Y-%m-%d")
+        now_utc = datetime.now(UTC)
+
+        daily_payload = self._fetch_chart_json(
+            token, USAGE_INTERVAL_DAILY, start_str, end_str
+        )
+        result = self._parse_chart_data(daily_payload)
+        daily_records = [dict(record) for record in result["history_14d"]]
+        result["daily_records"] = daily_records
+
+        try:
+            hourly_payload = self._fetch_chart_json(
+                token, USAGE_INTERVAL_HOURLY, start_str, end_str
+            )
+            hourly = self._parse_hourly_chart(hourly_payload)
+        except PsegOktaSessionExpired:
+            raise
+        except PsegTransientError as err:
+            # The optional hourly leg must not fail a poll that can still deliver
+            # the authoritative daily readings.
+            _LOGGER.warning(
+                "Hourly chart unavailable; keeping the daily statistics path: %s", err
+            )
+            hourly = {
+                "hourly_records": [],
+                "hourly_granularity": "unavailable",
+                "hourly_invalid_points": 0,
+            }
+
+        daily_totals: dict[date, float] = {}
+        for record in daily_records:
+            day = _parse_iso_day(record.get("date"))
+            kwh = record.get("kwh")
+            if (
+                day is not None
+                and isinstance(kwh, (int, float))
+                and not isinstance(kwh, bool)
+            ):
+                daily_totals[day] = float(kwh)
+
+        validations = validate_hourly_days(
+            hourly["hourly_records"],
+            daily_totals,
+            now_utc,
+            granularity=hourly["hourly_granularity"],
+            days=daily_totals,
+        )
+        complete = {
+            day: check for day, check in validations.items() if check.complete
+        }
+        closed = [
+            check
+            for check in validations.values()
+            if ny_day_bounds(check.day)[1] <= now_utc
+        ]
+
+        result.update(hourly)
+        result["hourly_complete_days"] = len(complete)
+        result["hourly_incomplete_days"] = sum(
+            1 for check in closed if not check.complete
+        )
+        if complete and len(complete) >= len(closed):
+            result["statistics_granularity"] = "hourly"
+        elif complete:
+            result["statistics_granularity"] = "mixed"
+        elif daily_records:
+            result["statistics_granularity"] = "daily"
+        else:
+            result["statistics_granularity"] = "unavailable"
+        # Sensor history remains the authoritative daily series; hourly rows are
+        # used only for statistics promotion and provenance.
+        return result
+
+    def _raise_for_chart_auth(
+        self, resp: requests.Response, context: str
+    ) -> None:
+        """Turn a chart auth status OR final login page into typed auth failure.
+
+        A 302 to the anonymous portal home can finish as HTTP 200 login HTML, so
+        the final response is inspected with the same strong signals used by the
+        dashboard path before JSON decoding and before the optional hourly leg is
+        allowed to fall back. A local portal client never enters an SSO renewal.
+        """
+        final_url = getattr(resp, "url", None)
+        login_page = (
+            isinstance(final_url, str) and self._is_login_page(resp)
+        )
+        if resp.status_code in (401, 403) or login_page:
+            self._mark_auth_failure(self._session_expired_reason())
+            raise PsegOktaSessionExpired(
+                f"PSE&G session expired during {context} (HTTP {resp.status_code})"
+            )
+
+    def _fetch_chart_json(
+        self,
+        token: str,
+        usage_interval: str,
+        start_str: str,
+        end_str: str,
+    ) -> dict[str, Any]:
+        """Run one POST /Dashboard/Chart + GET /Dashboard/ChartData cycle."""
         chart_setup_data = {
             "__RequestVerificationToken": token,
-            "UsageInterval": "6",
+            "UsageInterval": usage_interval,
             "UsageType": "1",
             "jsTargetName": "StorageType",
             "EnableHoverChart": "true",
-            "Start": start_dt.strftime("%Y-%m-%d"),
-            "End": end_dt.strftime("%Y-%m-%d"),
+            "Start": start_str,
+            "End": end_str,
             "IsRangeOpen": "False",
             "MaintainMaxDate": "true",
             "SelectedViaDateRange": "False",
@@ -1117,34 +1247,215 @@ class PsegClient:
                 headers=headers2,
                 timeout=25,
             )
+            self._raise_for_chart_auth(resp2, "chart setup")
             if resp2.status_code >= 500:
-                raise PsegTransientError(f"Server error {resp2.status_code} setting chart context")
+                raise PsegTransientError(
+                    f"Server error {resp2.status_code} setting chart context"
+                )
             resp2.raise_for_status()
-        except (requests.Timeout, requests.ConnectionError) as err:
-            raise PsegTransientError(f"Network timeout/connection error: {err}") from err
-        except requests.RequestException as err:
-            raise PsegTransientError(f"Failed to set chart context: {err}") from err
 
-        ts = int(time.time() * 1000)
-        try:
+            ts = int(time.time() * 1000)
             resp3 = self.session.get(
                 f"{PORTAL_BASE_URL}/Dashboard/ChartData",
                 params={"_": ts},
                 headers=headers2,
                 timeout=25,
             )
+            self._raise_for_chart_auth(resp3, "chart data")
             if resp3.status_code >= 500:
-                raise PsegTransientError(f"Server error {resp3.status_code} fetching chart data")
+                raise PsegTransientError(
+                    f"Server error {resp3.status_code} fetching chart data"
+                )
             resp3.raise_for_status()
-            data = resp3.json()
+            return resp3.json()
         except (requests.Timeout, requests.ConnectionError) as err:
-            raise PsegTransientError(f"Network timeout/connection error: {err}") from err
+            raise PsegTransientError(
+                f"Network timeout/connection error: {err}"
+            ) from err
         except json.JSONDecodeError as err:
-            raise PsegTransientError(f"Failed to decode JSON from chart data: {err}") from err
+            raise PsegTransientError(
+                f"Failed to decode JSON from chart data: {err}"
+            ) from err
         except requests.RequestException as err:
-            raise PsegTransientError(f"Failed to retrieve chart data: {err}") from err
+            raise PsegTransientError(
+                f"Request error retrieving chart data: {err}"
+            ) from err
 
-        return self._parse_chart_data(data)
+    def _raise_if_redirect(self, data: dict[str, Any], context: str) -> None:
+        """Raise an auth expiry when the chart payload is a login redirect."""
+        ajax_results = data.get("AjaxResults") or []
+        for result in ajax_results:
+            if isinstance(result, dict) and result.get("Action") == "Redirect":
+                self._mark_auth_failure(self._session_expired_reason())
+                raise PsegOktaSessionExpired(
+                    f"Session expired during {context}: Redirected to login"
+                )
+
+    def _parse_hourly_chart(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Extract timestamped hourly points without trusting the vendor contract.
+
+        Only ``x`` milliseconds is used as the timestamp (the one field the
+        upstream implementation and review agree on). Points that are missing,
+        non-numeric, negative, not on the hour, or outside a plausible millisecond
+        range are counted as invalid and never turned into zeroes. Promotion also
+        needs positive interval-start evidence: both ``hs.start`` and ``hs.end`` must
+        be timezone-aware and name ``[x, x+1h)``. Date-only or bare wall-clock labels
+        are retained as unverified provenance, never as promotion evidence.
+        """
+        chart_data = data.get("Data")
+        if not chart_data or not isinstance(chart_data, dict):
+            self._raise_if_redirect(data, "hourly statistics")
+            raise PsegTransientError("No chart data returned for hourly statistics.")
+
+        series_list = chart_data.get("series", [])
+        if not isinstance(series_list, list) or not series_list:
+            raise PsegTransientError("No series data returned for hourly statistics.")
+
+        totals: dict[datetime, float] = {}
+        labels: dict[datetime, str | None] = {}
+        label_ok: dict[datetime, bool | None] = {}
+        interval_ok: dict[datetime, bool] = {}
+        interval_reason: dict[datetime, str | None] = {}
+        seen_meters: set[str] = set()
+        invalid = 0
+
+        for series in series_list:
+            if not isinstance(series, dict):
+                continue
+            name = str(series.get("name") or "")
+            match = _METER_SERIES.match(name)
+            if not match:
+                continue
+            meter_id = match.group(1)
+            if meter_id in seen_meters:
+                _LOGGER.debug("Skipping duplicate hourly meter series for %s", meter_id)
+                continue
+            seen_meters.add(meter_id)
+
+            for point in series.get("data") or []:
+                if not isinstance(point, dict):
+                    invalid += 1
+                    continue
+                x = point.get("x")
+                y = point.get("y")
+                if (
+                    isinstance(y, bool)
+                    or not isinstance(y, (int, float))
+                    or not math.isfinite(y)
+                    or y < 0
+                ):
+                    invalid += 1
+                    continue
+                if (
+                    isinstance(x, bool)
+                    or not isinstance(x, (int, float))
+                    or not math.isfinite(x)
+                ):
+                    invalid += 1
+                    continue
+                timestamp = float(x)
+                # Milliseconds between 2001 and 2096. A seconds value, a label-only
+                # point or a missing x is not silently reinterpreted.
+                if not 1e12 <= timestamp <= 4e12:
+                    invalid += 1
+                    continue
+                start = datetime.fromtimestamp(timestamp / 1000, tz=UTC)
+                if start.minute or start.second or start.microsecond:
+                    invalid += 1
+                    continue
+
+                # Sum across meter series: a meter swap can split one hour between
+                # the old and new meter, exactly like the daily aggregator does.
+                totals[start] = totals.get(start, 0.0) + float(y)
+                header = point.get("hs")
+                start_label = header.get("start") if isinstance(header, dict) else None
+                end_label = header.get("end") if isinstance(header, dict) else None
+                # Positive evidence requires BOTH labels to carry an explicit
+                # timezone/offset and to name [x, x+1h). A bare clock, a date-only
+                # label or a missing end cannot distinguish start from end.
+                start_aware = parse_aware_label(start_label)
+                end_aware = parse_aware_label(end_label)
+                if start_aware is not None and end_aware is not None:
+                    start_check = (
+                        abs(
+                            (start_aware.astimezone(UTC) - start).total_seconds()
+                        )
+                        <= LABEL_TOLERANCE_SECONDS
+                    )
+                    end_check = (
+                        abs(
+                            (
+                                end_aware.astimezone(UTC)
+                                - (start + timedelta(hours=1))
+                            ).total_seconds()
+                        )
+                        <= LABEL_TOLERANCE_SECONDS
+                    )
+                    if not start_check:
+                        point_reason = "label_mismatch"
+                        point_ok = False
+                    elif not end_check:
+                        point_reason = "interval_end_mismatch"
+                        point_ok = False
+                    else:
+                        point_reason = None
+                        point_ok = True
+                else:
+                    start_check = label_matches_ny_time(start_label, start)
+                    if start_check is False:
+                        point_reason = "label_mismatch"
+                        point_ok = False
+                    else:
+                        point_reason = "timestamp_semantics_unverified"
+                        point_ok = False
+
+                if start not in label_ok:
+                    labels[start] = str(start_label) if start_label is not None else None
+                    label_ok[start] = start_check
+                elif start_check is False:
+                    label_ok[start] = False
+                elif label_ok[start] is None and start_check is True:
+                    label_ok[start] = True
+
+                interval_ok[start] = interval_ok.get(start, True) and point_ok
+                if not point_ok and start not in interval_reason:
+                    interval_reason[start] = point_reason
+
+        records = [
+            {
+                "start": start,
+                "kwh": round(totals[start], STATISTICS_PRECISION),
+                "label": labels.get(start),
+                "label_ok": label_ok.get(start),
+                "interval_ok": interval_ok.get(start, False),
+                "interval_reason": interval_reason.get(start),
+            }
+            for start in sorted(totals)
+        ]
+        return {
+            "hourly_records": records,
+            "hourly_granularity": self._hourly_granularity(records),
+            "hourly_invalid_points": invalid,
+        }
+
+    @staticmethod
+    def _hourly_granularity(records: list[dict[str, Any]]) -> str:
+        """Report whether the payload is hourly, daily, mixed or unusable.
+
+        One missing hour on one day must not erase the provenance of every other
+        day, so the label is based on the shape of the payload (any day with three
+        or more distinct hourly starts) while :func:`validate_hourly_day` still
+        requires exact per-day coverage before promotion.
+        """
+        per_day: dict[date, set[datetime]] = {}
+        for record in records:
+            per_day.setdefault(ny_day_of(record["start"]), set()).add(record["start"])
+        counts = [len(starts) for starts in per_day.values()]
+        if any(count >= 3 for count in counts):
+            return "hourly"
+        if counts and all(count == 1 for count in counts):
+            return "daily"
+        return "unknown"
 
     def _merge_meter_series(
         self, series_list: list[Any]
