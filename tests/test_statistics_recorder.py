@@ -86,6 +86,18 @@ def auto_enable_custom_integrations(recorder_mock, enable_custom_integrations):
 class _Client:
     price_per_kwh = 0.25
 
+    def attach_renewal_admission(self, admission, runtime=None, token=None) -> None:
+        self.admission = admission
+
+    def set_expected_meter_ids(self, meter_ids) -> None:
+        self.expected_meter_ids = frozenset(meter_ids)
+
+    def pending_confirmed_snapshot(self):
+        return None
+
+    def clear_confirmed_snapshot(self, snapshot_id) -> None:
+        self.cleared_snapshot = snapshot_id
+
 
 @pytest.fixture
 async def coord(hass: HomeAssistant) -> PsegDataUpdateCoordinator:

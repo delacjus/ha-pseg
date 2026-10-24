@@ -17,8 +17,10 @@ from custom_components.pseg.const import (
     CONF_KNOWN_METER_IDS,
     CONF_METER_ID,
     CONF_OKTA_COOKIES,
+    CONF_RENEWAL_ADMISSION,
     DOMAIN,
     OKTA_HOST,
+    PORTAL_HOST,
 )
 from custom_components.pseg.coordinator import (
     PsegDataUpdateCoordinator,
@@ -596,3 +598,102 @@ async def test_consumption_sensor_exposes_hourly_provenance(hass: HomeAssistant)
 
     status = PsegConnectionStatusSensor(coord, entry)
     assert status.extra_state_attributes["statistics_imports_enabled"] is True
+
+
+async def test_poll_persists_a_spent_renewal_slot_without_cookie_values(
+    hass: HomeAssistant,
+) -> None:
+    """A poll-side renewal spends the shared budget and stores no cookie material."""
+    jar = [
+        {
+            "name": "MM_RememberMe",
+            "value": "REMEMBER_SECRET",
+            "domain": PORTAL_HOST,
+            "path": "/",
+            "secure": True,
+        }
+    ]
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="12345",
+        data={"cookies": [dict(c) for c in jar]},
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(cookie_list=[dict(c) for c in jar])
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+
+    def poll(days_back: int = 14) -> dict:
+        client._renewal_admission.reserve(datetime.now(UTC))
+        return {"history_14d": [], "daily_records": []}
+
+    with patch.object(client, "fetch_energy_data", side_effect=poll):
+        await coord._async_update_data()
+
+    admission = entry.data[CONF_RENEWAL_ADMISSION]
+    assert admission["sequences"] == 1
+    assert "REMEMBER_SECRET" not in str(admission)
+    assert "MM_RememberMe" not in str(admission)
+
+
+async def test_unconfirmed_cookie_transaction_is_not_persisted(
+    hass: HomeAssistant,
+) -> None:
+    """A rolled-back renewal may not replace the entry's confirmed jar."""
+    jar = [
+        {
+            "name": "MM_SID",
+            "value": "CONFIRMED_SID",
+            "domain": PORTAL_HOST,
+            "path": "/",
+            "secure": True,
+        }
+    ]
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="12345",
+        data={"cookies": [dict(c) for c in jar]},
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(cookie_list=[dict(c) for c in jar])
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    client.session.cookies.set("MM_SID", "ROTATED", domain=PORTAL_HOST, path="/")
+    client.cookies_confirmed = False
+
+    await coord._async_persist_cookies()
+
+    assert entry.data["cookies"] == jar
+
+
+async def test_retired_poll_result_is_not_published(hass: HomeAssistant) -> None:
+    """A poll that outlived a reauth must not publish status or overwrite the new jar."""
+    old_jar = [{"name": "idx", "value": "OLD", "domain": OKTA_HOST, "path": "/"}]
+    new_jar = [{"name": "idx", "value": "NEW", "domain": OKTA_HOST, "path": "/"}]
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="12345",
+        data={"cookies": [dict(c) for c in old_jar]},
+    )
+    entry.add_to_hass(hass)
+    client = PsegClient(okta_cookies="idx=OLD")
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    coord.status = "error"
+
+    # Reauth replaced the jar while this poll was in flight.
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, "cookies": [dict(c) for c in new_jar]}
+    )
+    with patch.object(
+        client,
+        "fetch_energy_data",
+        return_value={"history_14d": [], "daily_records": []},
+    ):
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
+
+    assert coord.status == "error"
+    assert coord.last_successful_update is None
+    assert coord.next_update_time is None
+    assert entry.data["cookies"] == new_jar

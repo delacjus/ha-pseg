@@ -111,9 +111,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     try:
         await coordinator.async_config_entry_first_refresh()
-    except ConfigEntryAuthFailed:
-        coordinator.auth_required = True
-        coordinator.status = "auth_required"
+    except BaseException as err:
+        if isinstance(err, ConfigEntryAuthFailed):
+            coordinator.auth_required = True
+            coordinator.status = "auth_required"
+        # Failed setup never reaches the ordinary unload registration. Preserve
+        # policy and any renewal-verified jar first, then retire the owner.
+        coordinator.stop_keepalive()
         raise
 
     # Register only once the entry is usable: a not-ready entry must not leave a

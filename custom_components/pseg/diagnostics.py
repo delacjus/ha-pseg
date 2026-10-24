@@ -106,6 +106,8 @@ async def async_get_config_entry_diagnostics(
             "auth_reason": client.auth_reason,
             "idle_gap_seconds": client.idle_gap_seconds,
             "last_portal_success_at": client.last_portal_success_at,
+            # Presence only: no cookie value, length, hash or fingerprint.
+            "has_remember_me": client.has_remember_me,
         },
         "coordinator": {
             "status": coordinator.status,

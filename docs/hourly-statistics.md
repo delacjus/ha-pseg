@@ -119,8 +119,9 @@ hour, double-counting or corrupting the day. Use the supported stop instead.
 2. Turn off **Import Long-Term Statistics** and save.
 3. The entry reloads. Confirm the Connection Status sensor still reads **Connected**
    and its `statistics_imports_enabled` attribute is `false`.
-4. Automatic, startup-deferred and manual statistics imports now stop. Sign-in,
-   cookie renewal and the 3-minute (portal) or 10-minute (Okta) keepalive continue.
+4. Automatic, startup-deferred and manual statistics imports now stop. Sign-in, the
+   credential-free 3-minute (portal) or 10-minute (Okta) keepalive probe, bounded
+   cookie renewal and polling continue.
 5. Leave the existing statistics untouched. They remain readable in the Energy
    Dashboard; they are simply no longer updated by this integration.
 6. Restoring or editing recorder data is a separate operation. Use a verified
@@ -170,6 +171,14 @@ reason to clear history.
 - Statistic ids, metadata and the existing history are preserved. No history clear
   or reset is performed.
 - Authentication, CAPTCHA handling and keepalive are unchanged by this migration.
+  The separate auth hardening in the same release adds one bounded, cookie-only
+  renewal on a typed portal expiry (see the README section "How background renewal
+  works"); it never runs from a network error, a 5xx or a maintenance page.
+  Its poll/keepalive budget survives ordinary reload and failed startup, and
+  malformed budget metadata refuses renewal. A process or disk crash can lose a
+  recent best-effort metadata save. Roll back auth alone to reviewed hourly base
+  `2285845`, retaining all hourly rows, provenance and the pending journal; never
+  restore the 1.4.2 daily importer after hourly writes.
 - The vendor's real hourly start/end, timezone and zero semantics remain unverified
   until an approved live poll observes them. A `daily` result is the designed
   fallback, not a bug.

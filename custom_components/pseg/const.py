@@ -44,12 +44,23 @@ STATISTICS_PRECISION = 6
 # Placeholder the client reports when the chart has no meter series.
 DEFAULT_METER_NAME = "PSE&G Electric Meter"
 DEFAULT_SCAN_INTERVAL_HOURS = 4
-# Okta mode: must stay below PSE&G's Okta idle timeout (observed ~30 min, 2026-10-21).
+# Okta mode: must stay below the observed Okta idle interval (~30 min, 2026-10-21).
+# The vendor's actual timeout is not documented.
 KEEPALIVE_INTERVAL_MINUTES = 10
-# Local (portal-only) mode: MM_SID lapses on an idle timer of ~10 min (observed live
-# 2026-10-22). A GET-only touch well under that keeps the session warm without any
-# credential POST, so renewal can stay on the poll path.
+# Local (portal-only) mode: one observed session lapse happened after ~9 minutes
+# without an accepted request (2026-10-23), but the server's real rule is unknown.
+# A credential-free GET every 3 minutes is a probe, not a vendor TTL contract.
 LOCAL_KEEPALIVE_INTERVAL_MINUTES = 3
+
+# Non-secret bookkeeping for bounded Remember Me renewals, stored in entry.data next
+# to the cookie jar so an options reload cannot reset the vendor-load budget. Never
+# holds a cookie value, fingerprint or credential.
+CONF_RENEWAL_ADMISSION = "renewal_admission"
+# Product limit, not a vendor contract: at most two cookie-renewal sequences per
+# verified Remember Me cookie generation, and at least 15 minutes between any two
+# sequences (including across generations).
+LOCAL_RENEWAL_MIN_INTERVAL_SECONDS = 15 * 60
+LOCAL_RENEWAL_MAX_SEQUENCES = 2
 
 # Typed authentication failure reasons (client.auth_reason, status sensor attribute).
 # A reason is set wherever authentication fails, so local MyMeter failures are never

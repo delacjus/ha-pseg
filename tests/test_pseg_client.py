@@ -698,11 +698,21 @@ def test_keepalive_reports_okta_expiry() -> None:
 REMEMBER_PORTAL = "MM_SID=dead; MM_RememberMe=remember_token"
 
 
+
+def _renewal_identity_fixture(client, mocker):
+    """Give admitted renewal tests a real DAILY proof for their known entry."""
+    client.set_expected_meter_ids({"12345"})
+    mocker.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
+    mocker.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json={"Data": {"series": [{
+        "name": "Meter #12345", "data": [{"y": 4.0, "hs": {"start": "10/22/2026"}}],
+    }]}})
+
 def test_remember_me_renews_without_okta() -> None:
     """A lapsed MM_SID is re-issued from MM_RememberMe; Okta is never contacted."""
     client = PsegClient(portal_cookies=REMEMBER_PORTAL)
     assert client.has_remember_me and not client.has_okta_session
     with requests_mock.Mocker(session=client.session) as m:
+        _renewal_identity_fixture(client, m)
         dash = m.get(
             f"{PORTAL_BASE_URL}/Dashboard",
             [LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}],
@@ -784,6 +794,7 @@ def test_poll_token_renews_via_remember_me_not_okta() -> None:
     """A poll after MM_SID lapse renews from MM_RememberMe (incl. the / fallback), never Okta."""
     client = PsegClient(portal_cookies=REMEMBER_PORTAL)
     with requests_mock.Mocker(session=client.session) as m:
+        _renewal_identity_fixture(client, m)
         m.get(
             f"{PORTAL_BASE_URL}/Dashboard",
             [LOGGED_OUT_REDIRECT, LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}, {"text": DASHBOARD_WITH_TOKEN}],
@@ -844,6 +855,7 @@ def test_bounce_to_anonymous_home_index_renews() -> None:
     """/Dashboard → /Home/Index without form markers is signed out, so Remember Me renews."""
     client = PsegClient(portal_cookies=REMEMBER_PORTAL)
     with requests_mock.Mocker(session=client.session) as m:
+        _renewal_identity_fixture(client, m)
         m.get(
             f"{PORTAL_BASE_URL}/Dashboard",
             [{"status_code": 302, "headers": {"Location": "/Home/Index"}}, {"text": DASHBOARD_WITH_TOKEN}],
@@ -974,6 +986,7 @@ def test_renew_tries_remember_me_before_the_saved_login() -> None:
         portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw"
     )
     with requests_mock.Mocker(session=client.session) as m:
+        _renewal_identity_fixture(client, m)
         m.get(
             f"{PORTAL_BASE_URL}/Dashboard",
             [LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}],

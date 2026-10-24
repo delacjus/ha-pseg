@@ -6,7 +6,8 @@ and Okta SAML SSO endpoints.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+import copy
 from datetime import UTC, date, datetime, timedelta
 import functools
 import json
@@ -38,6 +39,7 @@ from .const import (
     USAGE_INTERVAL_DAILY,
     USAGE_INTERVAL_HOURLY,
 )
+from .renewal_admission import RenewalAdmission
 from .statistics_hourly import (
     LABEL_TOLERANCE_SECONDS,
     label_matches_ny_time,
@@ -57,6 +59,73 @@ def _parse_iso_day(value: Any) -> date | None:
         return date.fromisoformat(str(value))
     except (TypeError, ValueError):
         return None
+
+
+class _MeterRecord(dict):
+    """Parsed usage record carrying per-record contributing meter provenance."""
+
+    __slots__ = ("contributing_meter_ids",)
+
+    def __init__(
+        self,
+        *args: Any,
+        contributing_meter_ids: Iterable[str] = (),
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.contributing_meter_ids: tuple[str, ...] = tuple(
+            str(m) for m in contributing_meter_ids if m
+        )
+
+    def __copy__(self) -> _MeterRecord:
+        return _MeterRecord(self, contributing_meter_ids=self.contributing_meter_ids)
+
+    def __deepcopy__(self, memo: Any) -> _MeterRecord:
+        return _MeterRecord(
+            {copy.deepcopy(k, memo): copy.deepcopy(v, memo) for k, v in self.items()},
+            contributing_meter_ids=self.contributing_meter_ids,
+        )
+
+
+def _record_contributing_meters(record: Any) -> tuple[str, ...]:
+    """Extract parser-built contributing meter ids from one validated record.
+
+    Only the parser's own :class:`_MeterRecord` carries provenance. A plain dict,
+    a serialized copy, or a server-supplied ``meter_id``/``meter_ids`` field is
+    data, not proof, and must never stand in for a validated contributing meter.
+    """
+    if not isinstance(record, _MeterRecord):
+        return ()
+    return tuple(str(m) for m in record.contributing_meter_ids if m)
+
+
+def _series_shape_anomalies(series_list: Iterable[Any]) -> int:
+    """Count non-meter series whose ``data`` is present but not a list.
+
+    Such telemetry is skipped and never feeds readings, but it still marks the
+    response as contract-violating, so no caller may use that response to confirm
+    or rotate the cookie jar (readings prove the meter; the envelope is broken).
+    """
+    count = 0
+    for series in series_list or ():
+        if not isinstance(series, dict):
+            continue
+        if _METER_SERIES.match(str(series.get("name") or "")):
+            continue
+        data = series.get("data")
+        if data is not None and not isinstance(data, list):
+            count += 1
+    return count
+
+
+def _contributing_meter_ids(records: Iterable[Any]) -> list[str]:
+    """Return ordered unique meter ids that contributed >=1 valid parsed record."""
+    seen: list[str] = []
+    for record in records or ():
+        for meter_id in _record_contributing_meters(record):
+            if meter_id not in seen:
+                seen.append(meter_id)
+    return seen
 
 # Path fragments that mean "you were sent to sign in" (portal or Okta).
 _SIGNIN_PATH_MARKERS = ("/signin", "/sign-in", "/login")
@@ -123,18 +192,36 @@ class PsegTransientError(PsegError):
     """Exception raised for transient network/server errors (timeouts, 5xx, connection)."""
 
 
+class PsegRenewalDeferred(PsegError):
+    """The shared admission refused another cookie-renewal sequence.
+
+    Not a ``PsegAuthError``: no new authentication failure happened. ``reason`` is
+    one of ``cooldown``, ``exhausted``, ``terminal`` or ``no_cookie`` and
+    ``terminal`` carries the recorded fixed reason (never a cookie or body).
+    """
+
+    def __init__(self, reason: str, terminal: str | None = None) -> None:
+        """Keep the machine-readable reason for the caller's policy decision."""
+        super().__init__(reason)
+        self.reason = reason
+        self.terminal = terminal
+
+
 class AllowlistedSession(requests.Session):
     """Requests session that enforces a host allowlist on every request and redirect."""
 
-    def __init__(self) -> None:
+    def __init__(self, owner_check: Callable[[], None] | None = None) -> None:
         """Start with both PSE&G hosts; the client narrows this for local logins."""
         super().__init__()
         self.allowed_hosts: frozenset[str] = frozenset(ALLOWED_HOSTS)
         self.trace: list[str] = []
+        self._owner_check = owner_check
 
     def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
         # Runs for the first request and every redirect hop (resolve_redirects calls
         # send), before the cookie-bearing request leaves the process.
+        if self._owner_check is not None:
+            self._owner_check()
         parsed = urllib.parse.urlparse(request.url)
         if parsed.hostname not in self.allowed_hosts:
             raise PsegSecurityError(
@@ -201,7 +288,7 @@ class PsegClient:
     ) -> None:
         """Initialize the client with domain-scoped cookies."""
         self._lock = threading.RLock()
-        self.session = AllowlistedSession()
+        self.session = AllowlistedSession(owner_check=self._check_active_owner)
         self.session.headers.update({
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -226,9 +313,45 @@ class PsegClient:
         # again until a human sign-in succeeds (config flow) or a reauth/reconfigure
         # builds a new client, so a background timer can never hammer the form.
         self._captcha_latched = False
+        # Set when MyMeter asks for a security question or a password change. Like the
+        # CAPTCHA latch it stops every automatic sign-in and cookie renewal (the poll's
+        # fallback included) until a confirmed sign-in clears it, so a background
+        # timer can never retry a form Home Assistant cannot answer.
+        self._security_step_latched = False
         # True only while keepalive() runs: the timer may validate/renew with GETs
         # but must never POST the saved email/password.
         self._in_keepalive = False
+        # Shared, non-secret admission for cookie renewals. The coordinator replaces
+        # this with the state persisted in the entry so the poll, the keepalive and an
+        # options reload all spend the same budget. A standalone client still gets a
+        # local budget: an uncertain admission must never allow duplicate sequences.
+        self._renewal_admission = RenewalAdmission()
+        self._renewal_runtime: Any | None = None
+        self._renewal_token: int | None = None
+        # Meter ids this entry already owns (the account-identity guard for a
+        # keepalive renewal). Set by the coordinator from entry data; not a secret.
+        self._expected_meter_ids: frozenset[str] = frozenset()
+        # True only on a human config-flow client: an unattached sign-in may name its
+        # meter from the authenticated payload's `Meter #N` labels when the window's
+        # usage is not published yet (vendor lag), but that read never confirms
+        # cookies and never publishes readings or statistics.
+        self._allow_label_identity = False
+        # MM_RememberMe values confirmed in this client, held in memory only, to
+        # detect a server rotation. Never exported, persisted, logged or compared by
+        # hash anywhere outside this process. Filled after the jar is seeded below.
+        self._remember_me_seen: frozenset[str] = frozenset()
+        # False after a failed renewal rolled the jar back: the coordinator must not
+        # persist an unconfirmed transaction.
+        self.cookies_confirmed = True
+        # Immutable jar captured at the exact moment a renewal or sign-in was
+        # confirmed (Dashboard plus meter proof where required). The coordinator
+        # persists THIS snapshot on every failure/unload exit, so a later failed
+        # response's Set-Cookie can never replace the jar the portal verified.
+        # In-memory only, value-free outside the client, never logged.
+        self._checkpoint_lock = threading.Lock()
+        self._confirmed_snapshot: dict[str, Any] | None = None
+        self._confirmed_snapshot_seq = 0
+        self._confirmed_cookies: list[dict[str, Any]] | None = None
 
         # Session telemetry
         self.session_established_at: str | None = None
@@ -238,8 +361,8 @@ class PsegClient:
         self.okta_session_expired_at: str | None = None
         # Typed auth failure reason (see AUTH_REASON_* in const); None while healthy.
         self.auth_reason: str | None = None
-        # Seconds between the last confirmed portal request and the failure; tells an
-        # idle expiry (~10 min) apart from an absolute lifetime next time.
+        # Seconds between the last confirmed portal request and the first failure of an
+        # episode; a diagnostic, not a measurement of any vendor timeout.
         self.idle_gap_seconds: float | None = None
         self.last_portal_success_at: str | None = None
         self._last_success_monotonic: float | None = None
@@ -258,6 +381,9 @@ class PsegClient:
         # Values present at construction (pasted or restored). Only a host-only
         # copy still holding its seeded value can be stale; see _dedupe_domain_variants.
         self._seeded = {(c.name, c.domain, c.path): c.value for c in self.session.cookies}
+        # The generation this client starts with: a verified renewal that rotates the
+        # cookie (value changes, in memory only) rearms the admission budget.
+        self._remember_me_seen = self._remember_me_values()
 
     @_locked
     def set_cookies_from_header(self, cookie_header: str, domain: str) -> None:
@@ -335,6 +461,50 @@ class PsegClient:
         """
         return self._export_cookies_unlocked(), self.auth_reason
 
+    def _capture_confirmed_session(self) -> None:
+        """Freeze the just-verified jar for a later failure exit; caller holds lock.
+
+        The snapshot is immutable and independent of the live cookiejar: a later
+        maintenance/4xx/429 response may set its own cookies, and those must never
+        be persisted as if the renewal had issued them.
+        """
+        exported = self._export_cookies_unlocked()
+        with self._checkpoint_lock:
+            self._confirmed_snapshot_seq += 1
+            self._confirmed_cookies = copy.deepcopy(exported)
+            self._confirmed_snapshot = {
+                "id": self._confirmed_snapshot_seq,
+                "cookies": copy.deepcopy(exported),
+                "auth_reason": self.auth_reason,
+                "cookies_confirmed": self.cookies_confirmed,
+            }
+
+    def confirmed_cookies(self) -> list[dict[str, Any]] | None:
+        """Return the last confirmed cookie export (or None before any confirmation)."""
+        with self._checkpoint_lock:
+            return (
+                copy.deepcopy(self._confirmed_cookies)
+                if self._confirmed_cookies is not None
+                else None
+            )
+
+    def pending_confirmed_snapshot(self) -> dict[str, Any] | None:
+        """Return the last confirmed jar awaiting persistence (reference, read-only).
+
+        Uses only the dedicated metadata lock, never the client network lock:
+        callers may be on the event loop while a long backfill holds the portal
+        lock. The dict and its list are never mutated after capture.
+        """
+        with self._checkpoint_lock:
+            return self._confirmed_snapshot
+
+    def clear_confirmed_snapshot(self, snapshot_id: int) -> None:
+        """Drop the snapshot once its jar is durable; ignore a newer confirmation."""
+        with self._checkpoint_lock:
+            snapshot = self._confirmed_snapshot
+            if snapshot is not None and snapshot["id"] == snapshot_id:
+                self._confirmed_snapshot = None
+
     @_locked
     def import_cookies(self, cookie_list: list[dict[str, Any]]) -> None:
         """Restore cookies from persistence."""
@@ -391,6 +561,7 @@ class PsegClient:
         self.idle_gap_seconds = None
         self.last_portal_success_at = now.isoformat()
         self._last_success_monotonic = time.monotonic()
+        self.cookies_confirmed = True
 
     def _seconds_since_last_success(self) -> float | None:
         """Seconds since the last confirmed portal request, or None if unknown."""
@@ -399,18 +570,29 @@ class PsegClient:
         return round(time.monotonic() - self._last_success_monotonic, 1)
 
     def _mark_auth_failure(self, reason: str) -> None:
-        """Record a typed authentication failure, its timestamp and the idle gap.
+        """Record the FIRST typed authentication failure of an episode.
+
+        A repeated failure with the same reason is ignored: the timestamp and the
+        idle gap then describe the request that first failed, instead of being
+        overwritten on every keepalive retry. A different reason starts a new
+        episode and replaces both. Only a verified recovery (``_mark_session_ok``)
+        or a reason transition clears them.
 
         Logs the reason and the idle gap only: never a credential, cookie value or
         page body. ``okta_session_expired_at`` is still stamped for compatibility
         with existing automations/attributes, even when the reason is not Okta.
         """
-        previous_reason = self.auth_reason
+        if reason == AUTH_REASON_SECURITY_STEP:
+            # A security question/password change can only be answered by a human:
+            # latch it so no later tick retries the form or the cookie renewal.
+            self._security_step_latched = True
+        if reason in {AUTH_REASON_CAPTCHA_REQUIRED, AUTH_REASON_SECURITY_STEP}:
+            self._record_terminal_admission(reason)
+        if reason == self.auth_reason:
+            return
         self.auth_reason = reason
         self.okta_session_expired_at = datetime.now(UTC).isoformat()
         self.idle_gap_seconds = self._seconds_since_last_success()
-        if reason == previous_reason:
-            return
         if self.idle_gap_seconds is None:
             _LOGGER.info(
                 "PSE&G authentication failed (%s); no successful portal request yet",
@@ -439,6 +621,57 @@ class PsegClient:
             self._mark_auth_failure(AUTH_REASON_CAPTCHA_REQUIRED)
             raise PsegCaptchaRequired(
                 "MyMeter is waiting for a solved CAPTCHA; no sign-in was sent"
+            )
+
+    def _refuse_if_security_step_latched(self) -> None:
+        """Fail closed while MyMeter waits for a human security step.
+
+        The portal asked for a security question or a password change, which Home
+        Assistant cannot answer. Raising here stops the poll's automatic fallback,
+        the keepalive probe and every cookie renewal until a confirmed sign-in
+        (normally the reauth/config flow) clears the latch.
+        """
+        if self._security_step_latched:
+            self._mark_auth_failure(AUTH_REASON_SECURITY_STEP)
+            raise PsegSecurityStepRequired(
+                "MyMeter is waiting for a security question or password change; "
+                "no sign-in or renewal was sent"
+            )
+
+    def _record_terminal_admission(self, reason: str) -> None:
+        """Mirror a CAPTCHA/security step into the entry's durable admission.
+
+        The in-process latch alone forgot the challenge on reload, so a fresh
+        client would post the saved password or spend an earned cookie retry.
+        Only a completed human sign-in rearms this terminal state.
+        """
+        runtime = self._renewal_runtime
+        if runtime is not None and self._renewal_token is not None:
+            runtime.record_terminal(self._renewal_token, reason)
+            return
+        self._renewal_admission.record_terminal(reason)
+
+    def _refuse_if_terminal_step(self) -> None:
+        """Refuse every automatic attempt while a durable CAPTCHA/security step waits.
+
+        The admission can have been restored from ``entry.data`` by a fresh client
+        after an ordinary reload or a process start, so this check must not rely on
+        the in-memory latches alone. No HTTP is sent from a background timer.
+        """
+        terminal = self._renewal_admission.terminal_reason
+        if terminal == AUTH_REASON_CAPTCHA_REQUIRED:
+            self._captcha_latched = True
+            self._mark_auth_failure(terminal)
+            raise PsegCaptchaRequired(
+                "MyMeter is waiting for a solved CAPTCHA; no automatic sign-in "
+                "or renewal was sent until a human signs in"
+            )
+        if terminal == AUTH_REASON_SECURITY_STEP:
+            self._security_step_latched = True
+            self._mark_auth_failure(terminal)
+            raise PsegSecurityStepRequired(
+                "MyMeter is waiting for a security question or password change; "
+                "no automatic sign-in or renewal was sent until a human signs in"
             )
 
     def _raise_post_renewal_logged_out(self, resp: requests.Response) -> None:
@@ -501,13 +734,278 @@ class PsegClient:
 
     @property
     def has_remember_me(self) -> bool:
-        """MyMeter local-login 'Remember Me' cookie present (lives ~1 year)."""
-        return self._has_cookie(REMEMBER_ME_COOKIE, PORTAL_HOST)
+        """MyMeter local-login 'Remember Me' cookie present (presence only).
+
+        How long the portal honours it is not documented; the integration never
+        asserts a lifetime, only whether the cookie is in the jar right now.
+
+        Diagnostics reads this from the event loop, so it never waits for the client
+        lock: when a portal operation owns it, one unlocked pass over the jar is made,
+        retried only if a concurrent mutation resized the cookiejar mid-iteration.
+        """
+        if self._lock.acquire(blocking=False):
+            try:
+                return self._has_cookie(REMEMBER_ME_COOKIE, PORTAL_HOST)
+            finally:
+                self._lock.release()
+        try:
+            return self._has_cookie(REMEMBER_ME_COOKIE, PORTAL_HOST)
+        except RuntimeError:
+            return False
 
     @property
     def has_okta_session(self) -> bool:
         """An Okta session cookie is present (SAML SSO renewal is possible)."""
         return any(self._has_cookie(name, OKTA_HOST) for name in ("idx", "sid"))
+
+    def _remember_me_values(self) -> frozenset[str]:
+        """Current MM_RememberMe values, for the in-memory rotation check only."""
+        return frozenset(
+            c.value
+            for c in self.session.cookies
+            if c.name == REMEMBER_ME_COOKIE
+            and (c.domain or "").lstrip(".") == PORTAL_HOST
+            and c.value
+        )
+
+    def attach_renewal_admission(
+        self,
+        admission: RenewalAdmission,
+        runtime: Any | None = None,
+        token: int | None = None,
+    ) -> None:
+        """Use the entry's shared (non-secret) renewal budget.
+
+        Construct-time wiring only (the coordinator calls it before its first
+        refresh), so it is a plain reference swap and never takes the client lock:
+        nothing may block the event loop here. ``runtime`` is the entry-scoped
+        ownership gate; without it the client keeps a local, process-only budget.
+        """
+        self._renewal_admission = admission
+        self._renewal_runtime = runtime
+        self._renewal_token = token
+
+    def set_expected_meter_ids(self, meter_ids: Any) -> None:
+        """Remember the entry's meter ids: the account-identity guard for renewals.
+
+        An atomic reference swap of an immutable set: the renewal path reads it while
+        holding the client lock, and callers on the event loop must never block there.
+        """
+        self._expected_meter_ids = frozenset(str(value) for value in meter_ids if value)
+
+    def enable_label_identity_discovery(self) -> None:
+        """Allow a human config-flow client to name its meter from labels alone.
+
+        Only the unattached interactive flow calls this. With no expected meter ids,
+        an authenticated DAILY window whose usage is not published yet (vendor lag)
+        may still name the account's `Meter #N` series; that read never confirms
+        cookies and never publishes readings, and an attached automatic client keeps
+        the strict valid-known-contributor gate.
+        """
+        self._allow_label_identity = True
+
+    def _reserve_renewal_sequence(self) -> None:
+        """Spend one admission slot BEFORE any renewal HTTP request.
+
+        The caller holds the client lock, so a poll and the keepalive of one client
+        cannot both pass. The entry runtime adds the cross-client/cross-reload gate:
+        it refuses a retired owner and a second in-flight reservation. Any unknown
+        or unavailable admission refuses the sequence instead of risking a duplicate.
+        """
+        admission = self._renewal_admission
+        if not self.has_remember_me:
+            raise PsegRenewalDeferred("no_cookie", admission.terminal_reason)
+        now = datetime.now(UTC)
+        runtime = self._renewal_runtime
+        blocked = (
+            runtime.reserve(self._renewal_token, now)
+            if runtime is not None and self._renewal_token is not None
+            else admission.blocked_reason(now)
+        )
+        if blocked is not None:
+            raise PsegRenewalDeferred(blocked, admission.terminal_reason)
+        if runtime is None or self._renewal_token is None:
+            admission.reserve(now)
+
+    def _policy_finish(
+        self, *, reason: str | None, transient: bool, rotated: bool
+    ) -> None:
+        """Settle the reservation through the runtime, or the local budget.
+
+        ``transient`` is the only outcome that may earn the second (retry) sequence.
+        ``rotated`` rearms a new generation only after the caller verified both the
+        dashboard and this entry's DAILY meter identity.
+        """
+        runtime = self._renewal_runtime
+        if runtime is not None and self._renewal_token is not None:
+            runtime.finish(
+                self._renewal_token,
+                reason=reason,
+                transient=transient,
+                rotated=rotated,
+            )
+            return
+        if rotated:
+            self._renewal_admission.rearm()
+        self._renewal_admission.record_outcome(reason, transient=transient)
+
+    def _detect_remember_me_rotation(self) -> bool:
+        """Return True when a verified renewal changed MM_RememberMe's value.
+
+        Values stay in memory. The caller must only use this after the DAILY meter
+        identity proof succeeded; this method itself applies no policy. Only the
+        value observed across an admitted renewal is evidence of a replacement: an
+        ordinary confirmed Dashboard GET may slide the cookie too (see
+        ``_note_confirmed_generation``), and that slide must never be credited to a
+        later renewal as a rotation.
+        """
+        current = self._remember_me_values()
+        rotated = bool(current) and current != self._remember_me_seen
+        self._remember_me_seen = current
+        if rotated:
+            _LOGGER.info("MyMeter rotated the Remember Me cookie; renewal budget rearmed")
+        return rotated
+
+    def _note_confirmed_generation(self) -> None:
+        """Remember the Remember Me value seen on a CONFIRMED session.
+
+        A normal Dashboard response can carry a Set-Cookie that slides
+        ``MM_RememberMe`` without any generation change. Tracking that value on every
+        confirmed success keeps the next *unrotated* renewal from being miscounted as
+        a rotation (which would rearm the budget and grant an extra attempt). When the
+        session is confirmed and error-free, this also publishes the latest validated
+        whole-jar checkpoint so an exit/cancellation/stop before async export saves
+        the newest confirmed cookies. It never rearms a generation or spends a slot.
+        """
+        # Collapse a host-only and a '.host' copy first, exactly as persistence does:
+        # otherwise the stale duplicate would make the observed set differ from the
+        # value the next renewal compares against.
+        self._dedupe_domain_variants()
+        self._remember_me_seen = self._remember_me_values()
+        if self.cookies_confirmed and self.auth_reason is None:
+            exported = self._export_cookies_unlocked()
+            with self._checkpoint_lock:
+                self._confirmed_cookies = copy.deepcopy(exported)
+                snapshot = self._confirmed_snapshot
+                if (
+                    snapshot is None
+                    or snapshot["cookies"] != exported
+                    or snapshot["auth_reason"] != self.auth_reason
+                    or snapshot["cookies_confirmed"] != self.cookies_confirmed
+                ):
+                    self._confirmed_snapshot_seq += 1
+                    self._confirmed_snapshot = {
+                        "id": self._confirmed_snapshot_seq,
+                        "cookies": copy.deepcopy(exported),
+                        "auth_reason": self.auth_reason,
+                        "cookies_confirmed": self.cookies_confirmed,
+                    }
+
+    def _has_valid_meter_read(
+        self,
+        records: list[dict[str, Any]],
+        meter_ids: list[str] | set[str] | None = None,
+        *,
+        require_expected: bool = False,
+    ) -> bool:
+        """Return True when a chart read carries >=1 valid record from a relevant meter.
+
+        Every valid parsed record carries its own contributing meter provenance. When
+        ``self._expected_meter_ids`` is configured (or ``require_expected`` is True, as
+        in renewal identity proof), at least one valid record must be contributed by a
+        meter in ``self._expected_meter_ids``; an empty or all-invalid known series
+        label never validates records from an unknown meter.
+        """
+        if not records:
+            return False
+        contributors = set(_contributing_meter_ids(records))
+        if meter_ids is not None:
+            seen = {str(value) for value in (meter_ids or []) if value}
+            contributors &= seen
+        if not contributors:
+            return False
+        expected = self._expected_meter_ids
+        if require_expected and not expected:
+            return False
+        if expected and contributors.isdisjoint(expected):
+            return False
+        return True
+
+    @staticmethod
+    def _empty_chart_result(last_updated: str | None = None) -> dict[str, Any]:
+        """Return an empty untrusted chart result that publishes no readings or identity."""
+        return {
+            "meter": DEFAULT_METER_NAME,
+            "meter_ids": [],
+            "contributing_meter_ids": [],
+            "identity_confirmed": False,
+            "last_updated": last_updated or datetime.now(UTC).isoformat(),
+            "latest_date": "None",
+            "latest_kwh": 0.0,
+            "latest_cost": 0.0,
+            "previous_date": "None",
+            "previous_kwh": 0.0,
+            "previous_cost": 0.0,
+            "history_14d": [],
+            "temperature_range": "",
+            "temperature_avg": None,
+            "total_records": 0,
+        }
+
+    def _snapshot_session_state(self) -> dict[str, Any]:
+        """Snapshot the confirmed jar and auth telemetry for a renewal transaction."""
+        return {
+            "cookies": copy.deepcopy(self.session.cookies),
+            "session_established_at": self.session_established_at,
+            "last_sso_renewal": self.last_sso_renewal,
+            "sso_renewals": self.sso_renewals,
+            "okta_session_expired_at": self.okta_session_expired_at,
+            "auth_reason": self.auth_reason,
+            "idle_gap_seconds": self.idle_gap_seconds,
+            "last_portal_success_at": self.last_portal_success_at,
+            "last_success_monotonic": self._last_success_monotonic,
+            "cookies_confirmed": self.cookies_confirmed,
+        }
+
+    def _restore_session_jar(self, snapshot: dict[str, Any]) -> None:
+        """Put the last confirmed jar back; a failed renewal must not replace it."""
+        self.session.cookies = copy.deepcopy(snapshot["cookies"])
+        self.cookies_confirmed = False
+        with self._checkpoint_lock:
+            self._confirmed_cookies = None
+
+    def _restore_session_state(self, snapshot: dict[str, Any]) -> None:
+        """Roll back jar AND telemetry after a transient renewal failure."""
+        self._restore_session_jar(snapshot)
+        self.session_established_at = snapshot["session_established_at"]
+        self.last_sso_renewal = snapshot["last_sso_renewal"]
+        self.sso_renewals = snapshot["sso_renewals"]
+        self.okta_session_expired_at = snapshot["okta_session_expired_at"]
+        self.auth_reason = snapshot["auth_reason"]
+        self.idle_gap_seconds = snapshot["idle_gap_seconds"]
+        self.last_portal_success_at = snapshot["last_portal_success_at"]
+        self._last_success_monotonic = snapshot["last_success_monotonic"]
+
+    def _snapshot_cookie_leg(self) -> tuple[Any, frozenset[str]]:
+        """Snapshot the live jar and observed generation before a chart/read stage."""
+        return copy.deepcopy(self.session.cookies), self._remember_me_seen
+
+    def _restore_cookie_leg(self, leg_snapshot: tuple[Any, frozenset[str]]) -> None:
+        """Quarantine and roll back unconfirmed Set-Cookie mutations from a failed stage."""
+        cookies, seen = leg_snapshot
+        self.session.cookies = copy.deepcopy(cookies)
+        self._remember_me_seen = seen
+
+    def _check_active_owner(self) -> None:
+        """Refuse automatic HTTP dispatch once this entry owner is retired."""
+        runtime = self._renewal_runtime
+        if (
+            runtime is not None
+            and self._renewal_token is not None
+            and hasattr(runtime, "is_active")
+            and not runtime.is_active(self._renewal_token)
+        ):
+            raise PsegTransientError("PSE&G entry owner is retired")
 
     @property
     def is_local_mode(self) -> bool:
@@ -527,15 +1025,26 @@ class PsegClient:
     @_locked
     def ensure_session(self) -> bool:
         """Validate the portal session; renew via Remember Me or Okta SSO if expired."""
-        resp = self._get_dashboard()
+        self._check_active_owner()
+        baseline = self._snapshot_session_state()
+        try:
+            resp = self._get_dashboard()
+            self._check_active_owner()
+        except Exception:
+            self._restore_session_state(baseline)
+            raise
         if self._is_login_page(resp):
-            return self._renew()
+            self._restore_session_jar(baseline)
+            return self._renew(baseline=baseline)
         if resp.status_code != 200:
+            self._restore_session_state(baseline)
             raise PsegTransientError(f"Unexpected HTTP {resp.status_code} from /Dashboard")
         if not self._on_dashboard(resp):
             # e.g. a /Maintenance page: neither signed in nor signed out.
+            self._restore_session_state(baseline)
             raise PsegTransientError("PSE&G portal did not serve /Dashboard (maintenance?)")
         self._mark_session_ok()
+        self._note_confirmed_generation()
         return True
 
     @property
@@ -545,6 +1054,7 @@ class PsegClient:
     @_locked
     def _login_form_token(self) -> str:
         """GET the login page and return its antiforgery token ('' if absent)."""
+        self._check_active_owner()
         try:
             home = self.session.get(f"{PORTAL_BASE_URL}/", allow_redirects=True, timeout=20)
         except requests.RequestException as err:
@@ -619,16 +1129,21 @@ class PsegClient:
 
     def _confirm_login_dashboard(self) -> None:
         """Verify the sign-in reached /Dashboard and record the renewal."""
+        self._check_active_owner()
         dash = self._get_dashboard()
+        self._check_active_owner()
         if self._is_login_page(dash) or not self._on_dashboard(dash):
             self._mark_auth_failure(AUTH_REASON_REMEMBER_ME_REJECTED)
             raise PsegLoginRejected("MyMeter login did not reach the dashboard")
-        # A confirmed human/automatic sign-in clears a CAPTCHA latch: the fresh
-        # session replaced whatever the portal was challenging.
+        # A confirmed human/automatic sign-in clears the challenge latches: the fresh
+        # session replaced whatever the portal was asking for.
         self._captcha_latched = False
+        self._security_step_latched = False
         self.last_sso_renewal = datetime.now(UTC).isoformat()
         self.sso_renewals += 1
         self._mark_session_ok()
+        self._note_confirmed_generation()
+        self._capture_confirmed_session()
 
     @_locked
     def login_local(self) -> bool:
@@ -642,6 +1157,7 @@ class PsegClient:
         if not self.has_login:
             raise PsegLoginRejected("No MyMeter email/password stored")
         self._refuse_if_captcha_latched()
+        self._refuse_if_security_step_latched()
         token = self._login_form_token()
         self._post_login(token, "")
         self._confirm_login_dashboard()
@@ -709,6 +1225,7 @@ class PsegClient:
 
     def _post_login(self, token: str, captcha_response: str) -> None:
         """POST /Home/Login and classify the reply (raises on any refusal)."""
+        self._check_active_owner()
         failure: str | None = None
         malformed_redirect = False
         try:
@@ -742,7 +1259,7 @@ class PsegClient:
             return
         self._classify_login_response(resp)
 
-    def _renew(self) -> bool:
+    def _renew(self, *, baseline: dict[str, Any] | None = None) -> bool:
         """Renew a lapsed portal session: Remember Me, saved login, then Okta SSO.
 
         A Remember Me cookie the portal just rotated is the freshest credential, so
@@ -750,25 +1267,91 @@ class PsegClient:
         cycle. Only a rejected/expired cookie falls through to the saved email and
         password (once), and only transports/transients keep their own errors.
 
+        Every admitted Remember Me sequence proves this entry's DAILY meter before
+        it publishes success, counters or a new generation.
+
         A portal-only entry with no renewal credential must not fall through to the
         Okta SSO probe: there is no Okta session to renew, and live 2026-10-22 that
         probe reported a misleading "Okta session expired" for a local entry.
         """
+        baseline = baseline or self._snapshot_session_state()
         if self.is_local_mode and not (self.has_login or self.has_remember_me):
+            self._check_active_owner()
             self._mark_auth_failure(AUTH_REASON_PORTAL_SESSION_EXPIRED)
             raise PsegOktaSessionExpired(
                 "PSE&G portal session expired and no local sign-in is stored"
             )
         self._refuse_if_captcha_latched()
+        self._refuse_if_security_step_latched()
+        self._refuse_if_terminal_step()
         if self.has_remember_me:
             try:
-                return self.renew_remember_me()
+                # The poll spends the same admission budget as the keepalive: the
+                # cookie cap cannot be bypassed by polling more often.
+                return self._renew_remember_me_admitted(baseline=baseline)
+            except PsegRenewalDeferred as deferred:
+                if deferred.reason in {"retired", "busy"}:
+                    # Another owner holds the sequence (or this client was retired).
+                    raise PsegTransientError(
+                        "Remember Me ownership or admission is unavailable"
+                    ) from None
+                self._check_active_owner()
+                if deferred.terminal in {
+                    AUTH_REASON_CAPTCHA_REQUIRED,
+                    AUTH_REASON_SECURITY_STEP,
+                }:
+                    # Defensive: the durable check above normally caught this before
+                    # any HTTP. Never fall through to the password/SSO fallback.
+                    self._refuse_if_terminal_step()
+                if deferred.reason == "exhausted":
+                    # The generation is spent and earned no retry: no automatic
+                    # attempt can follow, so a saved login must not paper over a
+                    # human sign-in demand (R3 N2).
+                    if self.auth_reason is None:
+                        self._mark_auth_failure(
+                            deferred.terminal or AUTH_REASON_PORTAL_SESSION_EXPIRED
+                        )
+                    raise PsegOktaSessionExpired(
+                        "PSE&G portal session expired; the bounded Remember Me "
+                        "generation has no retry left"
+                    ) from None
+                if not self.has_login and not self.has_okta_session:
+                    if deferred.reason == "cooldown":
+                        # An earned retry is still inside its 15-minute window and no
+                        # fallback exists. This is a transient wait, not an auth
+                        # failure: HA must keep scheduling polls for the future
+                        # attempt instead of stopping them and demanding a sign-in.
+                        raise PsegTransientError(
+                            "Remember Me renewal deferred; a later attempt is still available"
+                        ) from None
+                    # Spent/terminal/absent cookie, or unreadable admission metadata:
+                    # no automatic sequence can repair this generation, so ask the
+                    # human to sign in.
+                    if self.auth_reason is None:
+                        self._mark_auth_failure(
+                            deferred.terminal or AUTH_REASON_PORTAL_SESSION_EXPIRED
+                        )
+                    if deferred.reason == "uncertain":
+                        _LOGGER.warning(
+                            "Stored renewal metadata is unusable; automatic cookie "
+                            "renewal is refused until a sign-in repairs it"
+                        )
+                    raise PsegOktaSessionExpired(
+                        "PSE&G portal session expired; the bounded Remember Me "
+                        "renewal is not available"
+                    ) from None
+                _LOGGER.info(
+                    "Remember Me renewal deferred by its shared budget; "
+                    "using the permitted fallback"
+                )
             except PsegOktaSessionExpired:
+                self._check_active_owner()
                 if not self.has_login and not self.has_okta_session:
                     raise
                 _LOGGER.info("MyMeter Remember Me cookie expired; trying the saved login")
         if self.has_login:
             if self._in_keepalive:
+                self._check_active_owner()
                 # Hard rule: the background timer never posts the saved password.
                 # A poll may still sign in; a lapsed keepalive asks the user instead.
                 self._mark_auth_failure(AUTH_REASON_PORTAL_SESSION_EXPIRED)
@@ -776,34 +1359,114 @@ class PsegClient:
                     "PSE&G portal session expired; the keepalive never posts the "
                     "saved sign-in"
                 )
-            return self.login_local()
-        return self.renew_sso()
+            try:
+                return self.login_local()
+            except PsegAuthError:
+                self._restore_session_jar(baseline)
+                raise
+            except Exception:
+                self._restore_session_state(baseline)
+                raise
+        try:
+            return self.renew_sso()
+        except PsegAuthError:
+            self._restore_session_jar(baseline)
+            raise
+        except Exception:
+            self._restore_session_state(baseline)
+            raise
+
+    def _renew_remember_me_admitted(
+        self, *, baseline: dict[str, Any] | None = None
+    ) -> bool:
+        """Poll-side Remember Me leg under the shared, bounded admission.
+
+        The caller holds the client lock (``_renew`` runs from the locked
+        ``ensure_session``/``_get_verification_token``), so the reservation and the
+        sequence cannot interleave with the keepalive. The confirmed jar and telemetry
+        are snapshotted before the request; a failed or unproven renewal rolls them
+        back, so an unconfirmed rotation is never kept or persisted.
+        """
+        baseline = baseline or self._snapshot_session_state()
+        self._reserve_renewal_sequence()
+        try:
+            self._check_renewal_owner()
+            self._renew_remember_me_sequence(verify_identity=True)
+        except PsegOktaSessionExpired:
+            self._restore_session_jar(baseline)
+            self._policy_finish(reason=self.auth_reason, transient=False, rotated=False)
+            raise
+        except Exception as err:
+            self._restore_session_state(baseline)
+            self._policy_finish(
+                reason=None,
+                transient=isinstance(err, (PsegTransientError, requests.RequestException)),
+                rotated=False,
+            )
+            raise
+        rotated = self._detect_remember_me_rotation()
+        self._policy_finish(reason=None, transient=False, rotated=rotated)
+        return True
+
+    def _check_renewal_owner(self) -> None:
+        """Refuse dispatch/publication after retirement or uncertain handoff."""
+        if self._renewal_runtime is not None and not self._renewal_runtime.can_dispatch(
+            self._renewal_token
+        ):
+            raise PsegRenewalDeferred("retired")
 
     @_locked
     def renew_remember_me(self) -> bool:
         """Let MyMeter re-issue MM_SID from its 'Remember Me' cookie.
 
         Accounts that use MyMeter's own email/password login with Remember Me get
-        MM_RememberMe (expires ~1 year; seen live 2026-10-21) next to the
-        session-only MM_SID. PSE&G's Okta sign-in has no 'keep me signed in' and
-        dies ~1 h after login, so this is the only long-lived renewal path. The dead
-        MM_SID is dropped first so the portal falls back to the remember cookie.
+        MM_RememberMe next to the session-only MM_SID (observed live 2026-10-21;
+        its lifetime and the portal's rule are not documented). The dead MM_SID is
+        dropped first so the portal falls back to the remember cookie.
 
         A refused renewal KEEPS MM_RememberMe: one unverified GET bounce is not
         proof the cookie is dead (the only live bounce was a browser-pasted copy,
         and the portal may honour the same cookie later). Dropping it here destroyed
         the only long-lived renewal credential in the live jar (2026-10-22).
+
+        This is the raw sequence, without the shared admission: the config flow
+        proves a *fresh* client once with it, and tests use it directly. The poll and
+        the keepalive go through their admitted wrappers instead.
         """
+        return self._renew_remember_me_sequence(verify_identity=False)
+
+    def _renew_remember_me_sequence(self, *, verify_identity: bool) -> bool:
+        """Run the GET-only Remember Me sequence; caller holds the client lock.
+
+        ``verify_identity`` defers the session-ok stamp, the renewal counters and
+        the API confirmation until a short read-only DAILY chart proves the renewed
+        session still belongs to this entry's meter. A failure there raises before
+        anything is published, so the caller can roll the jar back.
+        """
+        if not verify_identity:
+            self._check_active_owner()
         for cookie in [c for c in self.session.cookies if c.name == "MM_SID"]:
             self.session.cookies.clear(cookie.domain, cookie.path, cookie.name)
         resp = self._get_dashboard()
+        if verify_identity:
+            self._check_renewal_owner()
+        else:
+            self._check_active_owner()
         if self._is_login_page(resp):
             # Some sites only honour the remember cookie on the landing page.
             try:
                 self.session.get(f"{PORTAL_BASE_URL}/", allow_redirects=True, timeout=20)
             except requests.RequestException as err:
                 raise PsegTransientError(f"Network error during Remember Me sign-in: {err}") from err
+            if verify_identity:
+                self._check_renewal_owner()
+            else:
+                self._check_active_owner()
             resp = self._get_dashboard()
+            if verify_identity:
+                self._check_renewal_owner()
+            else:
+                self._check_active_owner()
         if self._is_login_page(resp):
             # Keep the cookie (see docstring): record the rejection and let a later
             # poll retry it instead of destroying the live jar's renewal credential.
@@ -814,12 +1477,62 @@ class PsegClient:
             raise PsegTransientError("Remember Me sign-in did not reach /Dashboard")
         if resp.status_code != 200:
             raise PsegTransientError(f"Unexpected HTTP {resp.status_code} after Remember Me sign-in")
+        if verify_identity:
+            self._confirm_meter_identity(resp)
+            self._check_renewal_owner()
         self._dedupe_domain_variants()
         self.last_sso_renewal = datetime.now(UTC).isoformat()
         self.sso_renewals += 1
         self._mark_session_ok()
+        self._capture_confirmed_session()
         _LOGGER.info("MyMeter Remember Me renewal successful")
         return True
+
+    def _confirm_meter_identity(self, resp: requests.Response) -> None:
+        """Prove a renewed session is this entry's account with one DAILY chart read.
+
+        Uses the antiforgery token of the /Dashboard page that already proved the
+        sign-in. It never renews recursively, never fetches the hourly chart and
+        never imports or writes account data. Any failure raises, so an unconfirmed
+        session is never published as connected or persisted.
+        """
+        expected = self._expected_meter_ids
+        if not expected:
+            raise PsegTransientError(
+                "No known meter identity to confirm the renewed PSE&G session"
+            )
+        tag = BeautifulSoup(resp.text, "html.parser").find(
+            "input", attrs={"name": "__RequestVerificationToken"}
+        )
+        token = str(tag["value"]) if tag and tag.get("value") else ""
+        if not token:
+            raise PsegTransientError(
+                "No antiforgery token to confirm the renewed PSE&G session"
+            )
+        end_dt = datetime.now()
+        start_str = (end_dt - timedelta(days=14)).strftime("%Y-%m-%d")
+        end_str = end_dt.strftime("%Y-%m-%d")
+        proof_leg = self._snapshot_cookie_leg()
+        try:
+            payload = self._fetch_chart_json(token, USAGE_INTERVAL_DAILY, start_str, end_str)
+            parsed = self._parse_chart_data(payload)
+            if not self._has_valid_meter_read(
+                parsed.get("history_14d") or [],
+                parsed.get("meter_ids") or [],
+                require_expected=True,
+            ):
+                raise PsegTransientError(
+                    "The renewed PSE&G session did not confirm this entry's meter"
+                )
+            if parsed.get("payload_anomalies"):
+                # The meter identity IS proven, but an unrelated series broke the
+                # response's shape contract: never adopt, confirm or rotate the
+                # cookie jar from it. Restore the whole proof leg so the prior
+                # Dashboard-proven jar and its observed generation stay in place.
+                self._restore_cookie_leg(proof_leg)
+        except Exception:
+            self._restore_cookie_leg(proof_leg)
+            raise
 
     @_locked
     def renew_sso(self) -> bool:
@@ -829,6 +1542,19 @@ class PsegClient:
         session is gone. Server errors, timeouts and unexpected pages are transient so a
         PSE&G outage never forces the user to re-paste cookies.
         """
+        self._check_active_owner()
+        baseline = self._snapshot_session_state()
+        try:
+            return self._renew_sso_locked()
+        except PsegAuthError:
+            self._restore_session_jar(baseline)
+            raise
+        except Exception:
+            self._restore_session_state(baseline)
+            raise
+
+    def _renew_sso_locked(self) -> bool:
+        """Run the Okta SAML renewal sequence; caller holds lock and baseline."""
         _LOGGER.debug("Attempting SSO renewal via Okta...")
         try:
             resp = self.session.get(
@@ -850,6 +1576,7 @@ class PsegClient:
             form = saml_input.find_parent("form") if saml_input else None
 
         if not form:
+            self._check_active_owner()
             parsed_final = urllib.parse.urlparse(resp.url)
             on_okta_signin = parsed_final.hostname == OKTA_HOST and any(
                 marker in parsed_final.path.lower() for marker in _SIGNIN_PATH_MARKERS
@@ -881,13 +1608,16 @@ class PsegClient:
             if name:
                 data[name] = val
 
+        self._check_active_owner()
         try:
             post_resp = self.session.post(action_url, data=data, allow_redirects=True, timeout=25)
             post_resp.raise_for_status()
         except requests.RequestException as err:
             raise PsegTransientError(f"Network error posting SAML response: {err}") from err
 
+        self._check_active_owner()
         dash_resp = self._get_dashboard()
+        self._check_active_owner()
         if self._is_login_page(dash_resp):
             self._raise_post_renewal_logged_out(dash_resp)
         if dash_resp.status_code != 200:
@@ -898,6 +1628,8 @@ class PsegClient:
         self.last_sso_renewal = datetime.now(UTC).isoformat()
         self.sso_renewals += 1
         self._mark_session_ok()
+        self._note_confirmed_generation()
+        self._capture_confirmed_session()
         _LOGGER.info("SSO renewal successful")
         return True
 
@@ -912,18 +1644,22 @@ class PsegClient:
         Local (portal-only) mode gets one GET /Dashboard every 3 minutes instead.
         That includes a mixed jar (Okta cookie plus a saved login or MM_RememberMe):
         its usable renewal path is the portal, and it is host-restricted to it, so
-        an SSO keepalive could only fail. Live 2026-10-22: a local entry's MM_SID
-        lapsed on roughly a 10-minute idle timer, and the old keepalive answered
-        that by blind-POSTing the saved password, which the portal refused with a
-        CAPTCHA demand. The GET keeps the idle timer from firing; renewal stays on
-        the poll path, so the timer can never post a password or trip a challenge.
+        an SSO keepalive could only fail.
+
+        A local GET answered with the sign-in page is a typed auth expiry and may
+        spend ONE bounded, cookie-only renewal (see _renew_local_cookie_session).
+        Network errors, 5xx, maintenance pages and malformed redirects never start
+        a renewal, and the timer never posts the saved password or probes Okta.
 
         Returns False on transient errors; raises PsegOktaSessionExpired when the
-        session is gone (or a CAPTCHA latch is set) so the coordinator can start
-        reauth.
+        session is gone (or a CAPTCHA/security-step latch is set) so the coordinator
+        can start reauth.
         """
         self.last_keepalive = datetime.now(UTC).isoformat()
         self._refuse_if_captcha_latched()
+        self._refuse_if_security_step_latched()
+        self._refuse_if_terminal_step()
+        previous_in_keepalive = self._in_keepalive
         self._in_keepalive = True
         try:
             if self.is_local_mode:
@@ -933,23 +1669,98 @@ class PsegClient:
             _LOGGER.debug("Keepalive network check encountered transient error: %s", err)
             return False
         finally:
-            self._in_keepalive = False
+            # Restore the previous value: a nested/composed caller keeps its own flag.
+            self._in_keepalive = previous_in_keepalive
 
     @_locked
     def _keepalive_local(self) -> bool:
-        """GET-only local keepalive: accept only a final /Dashboard page."""
-        resp = self._get_dashboard()
-        if self._is_login_page(resp):
-            self._mark_auth_failure(AUTH_REASON_PORTAL_SESSION_EXPIRED)
+        """GET-only local keepalive: accept only a final /Dashboard page.
+
+        A sign-in page is a typed auth expiry and the only condition that may spend
+        one bounded, cookie-only renewal. A network error, 5xx, maintenance page or
+        malformed redirect stays transient and never initiates a renewal.
+        """
+        self._check_active_owner()
+        baseline = self._snapshot_session_state()
+        try:
+            resp = self._get_dashboard()
+            self._check_active_owner()
+            if not self._is_login_page(resp):
+                if resp.status_code != 200 or not self._on_dashboard(resp):
+                    raise PsegTransientError("PSE&G portal did not serve /Dashboard (maintenance?)")
+                self._mark_session_ok()
+                self._note_confirmed_generation()
+                return True
+        except Exception:
+            self._restore_session_state(baseline)
+            raise
+        # Even the expiry probe can send Set-Cookie. It is not a confirmed jar.
+        self._restore_session_jar(baseline)
+        return self._renew_local_cookie_session(baseline=baseline)
+
+    def _renew_local_cookie_session(self, *, baseline: dict[str, Any]) -> bool:
+        """One bounded cookie-only renewal, transactional against jar and telemetry.
+
+        Never posts the saved password (that is the poll's permitted fallback, not
+        the timer's) and never probes Okta. The confirmed jar and telemetry are
+        snapshotted first; a transient failure restores both, a terminal refusal
+        keeps the confirmed jar and the first typed failure, and either way the
+        spent budget and its cooldown remain.
+        """
+        if self._captcha_latched:
+            self._mark_auth_failure(AUTH_REASON_CAPTCHA_REQUIRED)
+            raise PsegCaptchaRequired(
+                "MyMeter is waiting for a solved CAPTCHA; no renewal was sent"
+            )
+        if not self.has_remember_me:
+            # No HTTP renewal at all: there is nothing the portal could accept.
+            self._mark_auth_failure(self._session_expired_reason())
             raise PsegOktaSessionExpired(
-                "PSE&G portal session expired during a local keepalive; "
+                "PSE&G portal session expired and no Remember Me cookie is present; "
                 "no credentials were sent"
             )
-        if resp.status_code != 200 or not self._on_dashboard(resp):
-            # e.g. a /Maintenance page: neither signed in nor signed out.
-            raise PsegTransientError("PSE&G portal did not serve /Dashboard (maintenance?)")
-        self._mark_session_ok()
-        return True
+        try:
+            return self._renew_remember_me_admitted(baseline=baseline)
+        except PsegRenewalDeferred as deferred:
+            return self._refuse_deferred_local_renewal(deferred)
+
+    def _refuse_deferred_local_renewal(self, deferred: PsegRenewalDeferred) -> bool:
+        """Apply the admission's decision without inventing a new auth failure."""
+        if deferred.reason in {"cooldown", "busy", "retired"}:
+            # A previous attempt is still inside its 15-minute window (or another
+            # owner holds it): wait for the next tick instead of alarming the user
+            # or re-posting anything. The retry remains scheduled.
+            raise PsegTransientError(
+                "Remember Me renewal deferred; its retry window is still open"
+            )
+        if deferred.reason == "uncertain":
+            # Unreadable renewal metadata can never be repaired by an automatic
+            # attempt: fail closed and let the normal re-authentication prompt
+            # rewrite it (the config flow rearm is the only repair path).
+            self._mark_auth_failure(self._session_expired_reason())
+            _LOGGER.warning(
+                "Stored renewal metadata is unusable; automatic cookie renewal is "
+                "refused until a sign-in repairs it"
+            )
+            raise PsegOktaSessionExpired(
+                "PSE&G renewal metadata is unusable; re-authentication is required"
+            )
+        if deferred.reason == "exhausted" and self._renewal_admission.sequences == 1:
+            # An unchanged-cookie success (or unknown outcome) earned no retry.
+            # Return the usual False check result, while the coordinator observes
+            # the typed expiry timestamp and asks the human to sign in.
+            self._mark_auth_failure(self._session_expired_reason())
+            raise PsegTransientError("Remember Me generation has no retry; sign-in is required")
+        if deferred.reason == "no_cookie":
+            self._mark_auth_failure(self._session_expired_reason())
+        elif self.auth_reason is None:
+            # Exhausted or terminal generation: keep the recorded reason, and stamp
+            # a portal expiry only when no failure was recorded (e.g. after a
+            # transient attempt that was deliberately not stamped).
+            self._mark_auth_failure(deferred.terminal or AUTH_REASON_PORTAL_SESSION_EXPIRED)
+        raise PsegOktaSessionExpired(
+            "PSE&G portal session expired; the bounded Remember Me renewal is not available"
+        )
 
     @_locked
     def test_connection(self) -> bool:
@@ -959,22 +1770,67 @@ class PsegClient:
     @_locked
     def _get_verification_token(self) -> str:
         """Extract __RequestVerificationToken from /Dashboard, renewing session if needed."""
-        resp = self._get_dashboard(timeout=25)
+        self._check_active_owner()
+        baseline = self._snapshot_session_state()
+        try:
+            resp = self._get_dashboard(timeout=25)
+        except Exception:
+            self._restore_session_state(baseline)
+            raise
 
+        renewed = False
+        post_renewal_leg: tuple[Any, frozenset[str]] | None = None
         if self._is_login_page(resp):
             _LOGGER.debug("Portal session expired during token check; attempting renewal")
-            self._renew()
-            resp = self._get_dashboard(timeout=25)
+            # The expiry probe itself may send Set-Cookie; it is not a confirmed jar.
+            # Only the jar from before that response is a valid renewal baseline.
+            self._restore_session_jar(baseline)
+            self._renew(baseline=baseline)
+            # The renewal (or a successful saved-login/SSO fallback) is now verified:
+            # its jar, counters and budget settlement must survive a later maintenance,
+            # 4xx, 5xx or missing-token page. Rolling back to pre-probe baseline
+            # restored the dead jar, while leaving the failed post-renewal response's
+            # Set-Cookie live let the next poll promote it. Snapshot the post-renewal
+            # confirmed checkpoint and restore it on any post-renewal Dashboard failure.
+            renewed = True
+            post_renewal_leg = self._snapshot_cookie_leg()
+            try:
+                self._check_active_owner()
+                resp = self._get_dashboard(timeout=25)
+                self._check_active_owner()
+            except Exception:
+                self._restore_cookie_leg(post_renewal_leg)
+                raise
             if self._is_login_page(resp):
+                self._restore_cookie_leg(post_renewal_leg)
                 self._raise_post_renewal_logged_out(resp)
+        else:
+            try:
+                self._check_active_owner()
+            except Exception:
+                self._restore_session_state(baseline)
+                raise
+
+        if resp.status_code != 200 or not self._on_dashboard(resp):
+            if not renewed:
+                self._restore_session_state(baseline)
+            if post_renewal_leg is not None:
+                self._restore_cookie_leg(post_renewal_leg)
+            raise PsegTransientError("PSE&G portal did not serve /Dashboard (maintenance?)")
 
         soup = BeautifulSoup(resp.text, "html.parser")
         tag = soup.find("input", attrs={"name": "__RequestVerificationToken"})
         if not tag or not tag.get("value"):
             # Logged in (no redirect to sign-in) but no token: maintenance page or a
-            # layout change. Retry next cycle instead of forcing reauth.
+            # layout change. Retry next cycle instead of forcing reauth, and keep a
+            # session this call already proved.
+            if post_renewal_leg is not None:
+                self._restore_cookie_leg(post_renewal_leg)
+            if not renewed:
+                self._restore_session_state(baseline)
             raise PsegTransientError("__RequestVerificationToken not found on /Dashboard")
         self._mark_session_ok()
+        self._note_confirmed_generation()
         return str(tag["value"])
 
     @_locked
@@ -985,6 +1841,7 @@ class PsegClient:
         chunk_days: int = 90,
     ) -> list[dict[str, Any]]:
         """Fetch historical usage and cost data across a date range in polite chunks."""
+        self._check_active_owner()
         token = self._get_verification_token()
 
         try:
@@ -1005,6 +1862,7 @@ class PsegClient:
         records_map: dict[str, dict[str, Any]] = {}
         # (start, end, had_data) per chunk, to tell an outage from range edges.
         chunks: list[tuple[str, str, bool]] = []
+        last_validated_leg = self._snapshot_cookie_leg()
         curr_start = start_dt
 
         while curr_start <= end_dt:
@@ -1030,7 +1888,9 @@ class PsegClient:
                 "ChartComparison4": "0",
             }
 
+            chunk_leg = self._snapshot_cookie_leg()
             try:
+                self._check_active_owner()
                 resp2 = self.session.post(
                     f"{PORTAL_BASE_URL}/Dashboard/Chart",
                     data=chart_setup_data,
@@ -1042,6 +1902,7 @@ class PsegClient:
                     raise PsegTransientError(f"Server error {resp2.status_code} setting chart context")
                 resp2.raise_for_status()
 
+                self._check_active_owner()
                 ts = int(time.time() * 1000)
                 resp3 = self.session.get(
                     f"{PORTAL_BASE_URL}/Dashboard/ChartData",
@@ -1053,28 +1914,51 @@ class PsegClient:
                 if resp3.status_code >= 500:
                     raise PsegTransientError(f"Server error {resp3.status_code} fetching chart data")
                 resp3.raise_for_status()
-                data = resp3.json()
+                data = self._validate_chart_envelope(resp3.json())
+                chart_data = data.get("Data")
+                if chart_data is not None and not isinstance(chart_data, dict):
+                    raise PsegTransientError("Malformed chart Data from chart data")
+                if not chart_data:
+                    self._raise_if_redirect(data, "history backfill")
+                    self._restore_cookie_leg(chunk_leg)
+                    _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
+                    chunks.append((chunk_start_str, chunk_end_str, False))
+                else:
+                    raw_series = chart_data.get("series", [])
+                    if not isinstance(raw_series, list):
+                        raise PsegTransientError("Malformed series list from chart data")
+                    chunk_records, _, chunk_meters = self._merge_meter_series(raw_series)
+                    if self._has_valid_meter_read(chunk_records, chunk_meters):
+                        if _series_shape_anomalies(raw_series):
+                            # Validated readings, broken unrelated series: import the
+                            # data but never adopt that response's jar rotation.
+                            self._restore_cookie_leg(chunk_leg)
+                        else:
+                            self._note_confirmed_generation()
+                            last_validated_leg = self._snapshot_cookie_leg()
+                        chunks.append((chunk_start_str, chunk_end_str, True))
+                        for rec in chunk_records:
+                            records_map[rec["date"]] = rec
+                    else:
+                        self._restore_cookie_leg(chunk_leg)
+                        chunks.append((chunk_start_str, chunk_end_str, False))
             except (requests.Timeout, requests.ConnectionError) as err:
+                self._restore_cookie_leg(chunk_leg)
                 raise PsegTransientError(f"Network timeout/connection error: {err}") from err
             except json.JSONDecodeError as err:
+                self._restore_cookie_leg(chunk_leg)
                 raise PsegTransientError(f"Failed to decode JSON from chart data: {err}") from err
             except requests.RequestException as err:
+                self._restore_cookie_leg(chunk_leg)
                 raise PsegTransientError(f"Request error retrieving chart chunk: {err}") from err
-
-            chart_data = data.get("Data")
-            if not chart_data or not isinstance(chart_data, dict):
-                ajax_results = data.get("AjaxResults") or []
-                for ar in ajax_results:
-                    if isinstance(ar, dict) and ar.get("Action") == "Redirect":
-                        self._mark_auth_failure(self._session_expired_reason())
-                        raise PsegOktaSessionExpired("Session expired during history backfill: Redirected to login")
-                _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
-                chunks.append((chunk_start_str, chunk_end_str, False))
-            else:
-                chunk_records, _, _ = self._merge_meter_series(chart_data.get("series", []))
-                chunks.append((chunk_start_str, chunk_end_str, bool(chunk_records)))
-                for rec in chunk_records:
-                    records_map[rec["date"]] = rec
+            except (PsegAuthError, PsegTransientError):
+                self._restore_cookie_leg(chunk_leg)
+                raise
+            except Exception as err:
+                self._restore_cookie_leg(chunk_leg)
+                raise PsegTransientError(
+                    f"Malformed history chart payload ({type(err).__name__})"
+                ) from err
 
             curr_start = curr_end + timedelta(days=1)
             if curr_start <= end_dt:
@@ -1087,6 +1971,7 @@ class PsegClient:
         if populated:
             for chunk_start_str, chunk_end_str, had_data in chunks[populated[0] : populated[-1]]:
                 if not had_data:
+                    self._restore_cookie_leg(last_validated_leg)
                     raise PsegTransientError(
                         f"PSE&G returned no data for {chunk_start_str} to {chunk_end_str} "
                         "between populated chunks; backfill aborted"
@@ -1111,6 +1996,7 @@ class PsegClient:
         with a daily series), the poll keeps today's daily behaviour and reports the
         real granularity instead of inventing hourly rows.
         """
+        self._check_active_owner()
         token = self._get_verification_token()
 
         end_dt = datetime.now()
@@ -1119,21 +2005,74 @@ class PsegClient:
         end_str = end_dt.strftime("%Y-%m-%d")
         now_utc = datetime.now(UTC)
 
-        daily_payload = self._fetch_chart_json(
-            token, USAGE_INTERVAL_DAILY, start_str, end_str
-        )
-        result = self._parse_chart_data(daily_payload)
-        daily_records = [dict(record) for record in result["history_14d"]]
+        daily_leg = self._snapshot_cookie_leg()
+        try:
+            self._check_active_owner()
+            daily_payload = self._fetch_chart_json(
+                token, USAGE_INTERVAL_DAILY, start_str, end_str
+            )
+            result = self._parse_chart_data(daily_payload)
+            if self._has_valid_meter_read(
+                result.get("history_14d") or [],
+                result.get("meter_ids") or [],
+            ):
+                proven_ids = list(
+                    result.get("contributing_meter_ids")
+                    or _contributing_meter_ids(result.get("history_14d") or [])
+                )
+                result["meter_ids"] = proven_ids
+                result["contributing_meter_ids"] = proven_ids
+                result["identity_confirmed"] = True
+                if result.pop("payload_anomalies", 0):
+                    # The readings proved the meter, but an unrelated series broke
+                    # the shape contract: this response must not rotate the jar.
+                    self._restore_cookie_leg(daily_leg)
+                else:
+                    self._note_confirmed_generation()
+            else:
+                self._restore_cookie_leg(daily_leg)
+                label_ids = [str(value) for value in (result.get("meter_ids") or []) if value]
+                if self._allow_label_identity and not self._expected_meter_ids and label_ids:
+                    # Human, unattached sign-in with a lagging window: name the meter
+                    # from the authenticated `Meter #N` labels only. No readings, no
+                    # cookie confirmation, no statistics, no identity proof.
+                    empty = self._empty_chart_result(result.get("last_updated"))
+                    empty["meter"] = f"Meter #{label_ids[0]}"
+                    empty["meter_ids"] = label_ids
+                    empty["identity_source"] = "meter_label"
+                    result = empty
+                else:
+                    result = self._empty_chart_result(result.get("last_updated"))
+        except (PsegAuthError, PsegTransientError):
+            self._restore_cookie_leg(daily_leg)
+            raise
+        except Exception as err:
+            self._restore_cookie_leg(daily_leg)
+            raise PsegTransientError(
+                f"Malformed daily chart payload ({type(err).__name__})"
+            ) from err
+        daily_records = [copy.copy(record) for record in result["history_14d"]]
         result["daily_records"] = daily_records
 
+        hourly_leg = self._snapshot_cookie_leg()
         try:
+            self._check_active_owner()
             hourly_payload = self._fetch_chart_json(
                 token, USAGE_INTERVAL_HOURLY, start_str, end_str
             )
             hourly = self._parse_hourly_chart(hourly_payload)
+            if not self._has_valid_meter_read(
+                hourly["hourly_records"],
+                hourly.get("meter_ids") or [],
+            ):
+                raise PsegTransientError(
+                    "No valid hourly meter points returned for hourly statistics."
+                )
         except PsegOktaSessionExpired:
+            self._restore_cookie_leg(hourly_leg)
             raise
         except PsegTransientError as err:
+            self._restore_cookie_leg(hourly_leg)
             # The optional hourly leg must not fail a poll that can still deliver
             # the authoritative daily readings.
             _LOGGER.warning(
@@ -1144,6 +2083,16 @@ class PsegClient:
                 "hourly_granularity": "unavailable",
                 "hourly_invalid_points": 0,
             }
+        except Exception:
+            self._restore_cookie_leg(hourly_leg)
+            raise
+        else:
+            if hourly.pop("payload_anomalies", 0):
+                # Validated hourly points, contract-violating unrelated series:
+                # keep the readings, never confirm/rotate the jar from it.
+                self._restore_cookie_leg(hourly_leg)
+            else:
+                self._note_confirmed_generation()
 
         daily_totals: dict[date, float] = {}
         for record in daily_records:
@@ -1172,7 +2121,27 @@ class PsegClient:
             if ny_day_bounds(check.day)[1] <= now_utc
         ]
 
+        daily_contributors = [
+            str(value) for value in (result.get("contributing_meter_ids") or []) if value
+        ]
+        daily_meter_ids = [str(value) for value in (result.get("meter_ids") or []) if value]
+        hourly_contributors = [
+            str(value) for value in (hourly.get("contributing_meter_ids") or []) if value
+        ]
+        label_identity = result.get("identity_source") == "meter_label"
         result.update(hourly)
+        if label_identity:
+            # A lagging human-flow window keeps its label-derived identity; the
+            # hourly leg may neither replace nor narrow it.
+            result["meter_ids"] = daily_meter_ids
+        elif result.get("identity_confirmed") is True:
+            # The DAILY leg is authoritative for identity, but a valid successor that
+            # only the hourly leg names must still be learned: union the VALIDATED
+            # contributors of both legs (never a raw series label).
+            merged = list(daily_contributors)
+            merged.extend(value for value in hourly_contributors if value not in merged)
+            result["contributing_meter_ids"] = merged
+            result["meter_ids"] = merged
         result["hourly_complete_days"] = len(complete)
         result["hourly_incomplete_days"] = sum(
             1 for check in closed if not check.complete
@@ -1240,6 +2209,7 @@ class PsegClient:
             "Origin": PORTAL_BASE_URL,
         }
 
+        leg_snapshot = self._snapshot_cookie_leg()
         try:
             resp2 = self.session.post(
                 f"{PORTAL_BASE_URL}/Dashboard/Chart",
@@ -1267,24 +2237,47 @@ class PsegClient:
                     f"Server error {resp3.status_code} fetching chart data"
                 )
             resp3.raise_for_status()
-            return resp3.json()
+            return self._validate_chart_envelope(resp3.json())
         except (requests.Timeout, requests.ConnectionError) as err:
+            self._restore_cookie_leg(leg_snapshot)
             raise PsegTransientError(
                 f"Network timeout/connection error: {err}"
             ) from err
         except json.JSONDecodeError as err:
+            self._restore_cookie_leg(leg_snapshot)
             raise PsegTransientError(
                 f"Failed to decode JSON from chart data: {err}"
             ) from err
         except requests.RequestException as err:
+            self._restore_cookie_leg(leg_snapshot)
             raise PsegTransientError(
                 f"Request error retrieving chart data: {err}"
             ) from err
+        except Exception:
+            self._restore_cookie_leg(leg_snapshot)
+            raise
+
+    @staticmethod
+    def _validate_chart_envelope(data: Any) -> dict[str, Any]:
+        """Validate the chart JSON envelope shared by the daily, hourly and history legs.
+
+        A contract violation (root not an object, or an ``AjaxResults`` that is not a
+        list) is a typed transient, so every caller's leg rollback runs instead of a
+        raw ``TypeError`` escaping from a later shape check.
+        """
+        if not isinstance(data, dict):
+            raise PsegTransientError("Malformed JSON root from chart data")
+        ajax_results = data.get("AjaxResults")
+        if ajax_results is not None and not isinstance(ajax_results, list):
+            raise PsegTransientError("Malformed AjaxResults from chart data")
+        return data
 
     def _raise_if_redirect(self, data: dict[str, Any], context: str) -> None:
         """Raise an auth expiry when the chart payload is a login redirect."""
-        ajax_results = data.get("AjaxResults") or []
-        for result in ajax_results:
+        ajax_results = data.get("AjaxResults")
+        if ajax_results is not None and not isinstance(ajax_results, list):
+            raise PsegTransientError(f"Malformed AjaxResults from {context}")
+        for result in ajax_results or []:
             if isinstance(result, dict) and result.get("Action") == "Redirect":
                 self._mark_auth_failure(self._session_expired_reason())
                 raise PsegOktaSessionExpired(
@@ -1302,8 +2295,12 @@ class PsegClient:
         be timezone-aware and name ``[x, x+1h)``. Date-only or bare wall-clock labels
         are retained as unverified provenance, never as promotion evidence.
         """
+        if not isinstance(data, dict):
+            raise PsegTransientError("No chart data returned for hourly statistics.")
         chart_data = data.get("Data")
-        if not chart_data or not isinstance(chart_data, dict):
+        if chart_data is not None and not isinstance(chart_data, dict):
+            raise PsegTransientError("Malformed chart Data for hourly statistics.")
+        if not chart_data:
             self._raise_if_redirect(data, "hourly statistics")
             raise PsegTransientError("No chart data returned for hourly statistics.")
 
@@ -1312,6 +2309,7 @@ class PsegClient:
             raise PsegTransientError("No series data returned for hourly statistics.")
 
         totals: dict[datetime, float] = {}
+        hour_meters: dict[datetime, list[str]] = {}
         labels: dict[datetime, str | None] = {}
         label_ok: dict[datetime, bool | None] = {}
         interval_ok: dict[datetime, bool] = {}
@@ -1325,14 +2323,19 @@ class PsegClient:
             name = str(series.get("name") or "")
             match = _METER_SERIES.match(name)
             if not match:
+                # Non-meter telemetry is not this parser's business: skip it before
+                # any shape check so a bad Temperature series cannot fail the leg.
                 continue
+            raw_points = series.get("data")
+            if raw_points is not None and not isinstance(raw_points, list):
+                raise PsegTransientError("Malformed meter data series for hourly statistics.")
             meter_id = match.group(1)
             if meter_id in seen_meters:
                 _LOGGER.debug("Skipping duplicate hourly meter series for %s", meter_id)
                 continue
             seen_meters.add(meter_id)
 
-            for point in series.get("data") or []:
+            for point in raw_points or []:
                 if not isinstance(point, dict):
                     invalid += 1
                     continue
@@ -1367,6 +2370,9 @@ class PsegClient:
                 # Sum across meter series: a meter swap can split one hour between
                 # the old and new meter, exactly like the daily aggregator does.
                 totals[start] = totals.get(start, 0.0) + float(y)
+                contributors = hour_meters.setdefault(start, [])
+                if meter_id not in contributors:
+                    contributors.append(meter_id)
                 header = point.get("hs")
                 start_label = header.get("start") if isinstance(header, dict) else None
                 end_label = header.get("end") if isinstance(header, dict) else None
@@ -1422,20 +2428,27 @@ class PsegClient:
                     interval_reason[start] = point_reason
 
         records = [
-            {
-                "start": start,
-                "kwh": round(totals[start], STATISTICS_PRECISION),
-                "label": labels.get(start),
-                "label_ok": label_ok.get(start),
-                "interval_ok": interval_ok.get(start, False),
-                "interval_reason": interval_reason.get(start),
-            }
+            _MeterRecord(
+                {
+                    "start": start,
+                    "kwh": round(totals[start], STATISTICS_PRECISION),
+                    "label": labels.get(start),
+                    "label_ok": label_ok.get(start),
+                    "interval_ok": interval_ok.get(start, False),
+                    "interval_reason": interval_reason.get(start),
+                },
+                contributing_meter_ids=hour_meters.get(start, ()),
+            )
             for start in sorted(totals)
         ]
+        contributing_ids = _contributing_meter_ids(records)
         return {
             "hourly_records": records,
             "hourly_granularity": self._hourly_granularity(records),
             "hourly_invalid_points": invalid,
+            "meter_ids": contributing_ids,
+            "contributing_meter_ids": contributing_ids,
+            "payload_anomalies": _series_shape_anomalies(series_list),
         }
 
     @staticmethod
@@ -1469,6 +2482,7 @@ class PsegClient:
         date, name of the meter with the most recent reading, all meter ids).
         """
         totals: dict[str, float] = {}
+        day_meters: dict[str, list[str]] = {}
         active_name: str | None = None
         active_x = -1
         meter_ids: list[str] = []
@@ -1478,15 +2492,20 @@ class PsegClient:
             name = str(s.get("name") or "")
             match = _METER_SERIES.match(name)
             if not match:
+                # Unrelated telemetry (e.g. a Temperature series) may carry any
+                # shape: it never feeds the metered leg and must not fail it. Any
+                # shape anomaly is reported by _series_shape_anomalies so the
+                # response cannot confirm the jar.
                 continue
+            raw_points = s.get("data")
+            if raw_points is not None and not isinstance(raw_points, list):
+                raise PsegTransientError("Malformed meter data series from chart data")
             meter_id = match.group(1)
             if meter_id in meter_ids:
                 _LOGGER.debug("Skipping duplicate meter series for meter %s", meter_id)
                 continue
             meter_ids.append(meter_id)
-            if active_name is None:
-                active_name = name
-            for pt in s.get("data") or []:
+            for pt in raw_points or []:
                 if not isinstance(pt, dict):
                     continue
                 hs = pt.get("hs")
@@ -1501,50 +2520,80 @@ class PsegClient:
                     _LOGGER.debug("Skipping meter %s point with non-numeric usage", meter_id)
                     continue
                 totals[date_iso] = totals.get(date_iso, 0.0) + float(y)
+                contributors = day_meters.setdefault(date_iso, [])
+                if meter_id not in contributors:
+                    contributors.append(meter_id)
+                if active_name is None:
+                    active_name = name
                 x = pt.get("x")
-                if isinstance(x, (int, float)) and x > active_x:
+                if (
+                    isinstance(x, (int, float))
+                    and not isinstance(x, bool)
+                    and math.isfinite(x)
+                    and x > active_x
+                ):
                     active_x, active_name = x, name
 
-        records = []
+        records: list[dict[str, Any]] = []
         for date_iso in sorted(totals):
             kwh = round(totals[date_iso], 2)
-            records.append({"date": date_iso, "kwh": kwh, "cost": round(kwh * self.price_per_kwh, 2)})
+            records.append(
+                _MeterRecord(
+                    {
+                        "date": date_iso,
+                        "kwh": kwh,
+                        "cost": round(kwh * self.price_per_kwh, 2),
+                    },
+                    contributing_meter_ids=day_meters.get(date_iso, ()),
+                )
+            )
         return records, active_name, meter_ids
 
     def _parse_chart_data(self, data: dict[str, Any]) -> dict[str, Any]:
         """Parse series into clean sensor model."""
+        if not isinstance(data, dict):
+            raise PsegTransientError("No chart data returned from MyMeter.")
         chart_data = data.get("Data")
-        if not chart_data or not isinstance(chart_data, dict):
-            ajax_results = data.get("AjaxResults") or []
-            for ar in ajax_results:
-                if isinstance(ar, dict) and ar.get("Action") == "Redirect":
-                    self._mark_auth_failure(self._session_expired_reason())
-                    raise PsegOktaSessionExpired("Session expired: Redirected to login portal")
+        if chart_data is not None and not isinstance(chart_data, dict):
+            raise PsegTransientError("Malformed chart Data from MyMeter.")
+        if not chart_data:
+            self._raise_if_redirect(data, "daily chart")
             raise PsegTransientError("No chart data returned from MyMeter.")
 
         series_list = chart_data.get("series", [])
-        if not series_list:
+        if not isinstance(series_list, list) or not series_list:
             raise PsegTransientError("No series data returned from MyMeter.")
 
-        nav_series = series_list[0].get("data", [])
-        temp_series = {}
+        first_series = series_list[0] if isinstance(series_list[0], dict) else {}
+        nav_series = first_series.get("data") if isinstance(first_series.get("data"), list) else []
+        temp_series: dict[str, Any] = {}
         for s in series_list:
-            if "Temperature" in str(s.get("name") or ""):
+            if isinstance(s, dict) and "Temperature" in str(s.get("name") or ""):
                 temp_series = s
 
         history_14d, active_name, meter_ids = self._merge_meter_series(series_list)
+        contributing_ids = _contributing_meter_ids(history_14d)
         meter_name = active_name or DEFAULT_METER_NAME
-        temp_pts = temp_series.get("data", [])
+        raw_temp_pts = temp_series.get("data")
+        temp_pts = raw_temp_pts if isinstance(raw_temp_pts, list) else []
 
         latest_record = history_14d[-1] if history_14d else {"date": "None", "kwh": 0.0, "cost": 0.0}
         prev_record = history_14d[-2] if len(history_14d) > 1 else {"date": "None", "kwh": 0.0, "cost": 0.0}
 
-        latest_temp = temp_pts[-1] if temp_pts else {}
+        latest_temp = temp_pts[-1] if temp_pts and isinstance(temp_pts[-1], dict) else {}
         temp_range = latest_temp.get("tr", "")
+        temp_y = latest_temp.get("y")
+        temp_avg = (
+            round(float(temp_y), 1)
+            if isinstance(temp_y, (int, float)) and not isinstance(temp_y, bool) and math.isfinite(temp_y)
+            else None
+        )
 
         return {
             "meter": meter_name,
             "meter_ids": meter_ids,
+            "contributing_meter_ids": contributing_ids,
+            "payload_anomalies": _series_shape_anomalies(series_list),
             "last_updated": datetime.now(UTC).isoformat(),
             "latest_date": latest_record["date"],
             "latest_kwh": latest_record["kwh"],
@@ -1554,6 +2603,6 @@ class PsegClient:
             "previous_cost": prev_record["cost"],
             "history_14d": history_14d,
             "temperature_range": temp_range,
-            "temperature_avg": round(latest_temp.get("y", 0.0), 1) if "y" in latest_temp else None,
+            "temperature_avg": temp_avg,
             "total_records": len(nav_series),
         }

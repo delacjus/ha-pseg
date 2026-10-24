@@ -42,6 +42,7 @@ from .const import (
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
     CONF_PRICE_PER_KWH,
+    CONF_RENEWAL_ADMISSION,
     CONF_STATISTICS_IMPORT_ENABLED,
     DEFAULT_METER_NAME,
     DEFAULT_PRICE_PER_KWH,
@@ -58,6 +59,7 @@ from .pseg_client import (
     PsegSecurityStepRequired,
     PsegTransientError,
 )
+from .renewal_admission import rearm_entry_admission
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -196,6 +198,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         client = PsegClient(
             okta_cookies=okta_cookies, portal_cookies=portal_cookies, email=email, password=password
         )
+        # A human sign-in may name the account's meter from the authenticated
+        # payload's `Meter #N` labels when this window's usage is not published yet
+        # (vendor lag). The read never confirms cookies or publishes readings, and
+        # only this unattached interactive client may use it.
+        client.enable_label_identity_discovery()
 
         if client.has_login:
             # The saved login is the strongest proof and one sign-in is enough: this
@@ -232,7 +239,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             no_session_error = "login_failed"
         else:
             try:
-                await self.hass.async_add_executor_job(client.ensure_session)
+                if not client.has_remember_me:
+                    await self.hass.async_add_executor_job(client.ensure_session)
+                # A fresh human cookie flow has no saved meter identity yet. Its
+                # existing forced renewal + meter extraction below is the proof;
+                # do not send it through the entry's admitted polling path first.
             except PsegLoginRejected:
                 _LOGGER.warning("PSE&G MyMeter login rejected at setup: %s", client.auth_diagnostics())
                 return {"base": "login_failed"}, None, None, []
@@ -650,10 +661,17 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         `stopped` returns an abort result when this attempt may no longer commit; it is
         checked after every await so an aborted flow never touches an entry.
         """
+        fields = dict(fields)
         if entry is not None:
+            # A completed human sign-in starts a fresh renewal generation; the
+            # cross-generation 15-minute clock is preserved in the shared runtime.
             known = _known_meter_ids(entry)
             if meter_ids and known.isdisjoint(meter_ids):
                 return self.async_abort(reason="reauth_account_mismatch")
+            fields[CONF_RENEWAL_ADMISSION] = rearm_entry_admission(
+                self.hass, entry.entry_id, entry.data.get(CONF_RENEWAL_ADMISSION),
+                CONF_RENEWAL_ADMISSION in entry.data,
+            )
             return self.async_update_reload_and_abort(
                 entry,
                 data={
@@ -669,7 +687,12 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         authenticated = {meter_id, *meter_ids}
         matches = self._entries_claiming(authenticated)
         if local_login and len(matches) == 1 and matches[0].source != SOURCE_IGNORE:
-            return self._async_update_existing_login(matches[0], fields, authenticated)
+            target = matches[0]
+            fields[CONF_RENEWAL_ADMISSION] = rearm_entry_admission(
+                self.hass, target.entry_id, target.data.get(CONF_RENEWAL_ADMISSION),
+                CONF_RENEWAL_ADMISSION in target.data,
+            )
+            return self._async_update_existing_login(target, fields, authenticated)
 
         await self.async_set_unique_id(meter_id)
         # async_set_unique_id can abort other flows and yields: re-check that this

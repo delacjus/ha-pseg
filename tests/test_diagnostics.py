@@ -82,6 +82,7 @@ async def test_diagnostics_redacts_sensitive_data(hass: HomeAssistant) -> None:
     assert telemetry["sso_renewals"] == 2
     assert telemetry["last_keepalive"] == "2026-10-20T13:00:00Z"
     assert telemetry["okta_session_expired_at"] is None
+    assert telemetry["has_remember_me"] is False
 
 
 async def test_diagnostics_redacts_captcha_proof_fields(hass: HomeAssistant) -> None:
@@ -257,3 +258,33 @@ async def test_diagnostics_statistics_summary_is_value_free(hass: HomeAssistant)
     assert "99.9" not in str(diag)
     assert "88.8" not in str(diag)
     assert "raw_secret_value" not in str(diag)
+
+
+async def test_diagnostics_has_remember_me_is_a_boolean_only(hass: HomeAssistant) -> None:
+    """Presence is exposed as a bool; the cookie value never leaves the jar."""
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id="12345", data={})
+    entry.add_to_hass(hass)
+    client = PsegClient(
+        portal_cookies="MM_SID=session-value-9d2; MM_RememberMe=remember-value-4c1"
+    )
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    telemetry = diag["session_telemetry"]
+
+    assert telemetry["has_remember_me"] is True
+    for key in (
+        "session_established_at",
+        "last_sso_renewal",
+        "sso_renewals",
+        "last_keepalive",
+        "okta_session_expired_at",
+        "auth_reason",
+        "idle_gap_seconds",
+        "last_portal_success_at",
+    ):
+        assert key in telemetry
+    assert "remember-value-4c1" not in str(diag)
+    assert "session-value-9d2" not in str(diag)
+    assert "MM_RememberMe" not in str(diag)

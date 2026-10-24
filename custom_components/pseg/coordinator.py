@@ -42,6 +42,7 @@ from .const import (
     CONF_KNOWN_METER_IDS,
     CONF_METER_ID,
     CONF_PRICE_PER_KWH,
+    CONF_RENEWAL_ADMISSION,
     CONF_STATISTICS_IMPORT_ENABLED,
     DEFAULT_PRICE_PER_KWH,
     DEFAULT_SCAN_INTERVAL_HOURS,
@@ -57,6 +58,7 @@ from .pseg_client import (
     PsegOktaSessionExpired,
     PsegTransientError,
 )
+from .renewal_admission import RenewalAdmission, renewal_runtime_for
 from .statistics_hourly import (
     COST_REL_TOLERANCE,
     PROMOTION_ABS_TOLERANCE_KWH,
@@ -432,6 +434,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.auth_required: bool = False
         self.status: str = "connected"
         self.last_successful_update: str | None = None
+        # Avoids repeating the typed identity-rejection warning on every poll; reset
+        # by the next fully confirmed update.
+        self._identity_rejection_logged = False
         self._unsub_keepalive: Callable[[], None] | None = None
         # Set on unload. A keepalive/poll still in the executor at that point belongs
         # to a dead coordinator and must not write to the entry or start reauth.
@@ -439,6 +444,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # The jar this coordinator loaded or last wrote. If entry.data["cookies"]
         # differs, reauth/reconfigure replaced it and our in-memory jar is stale.
         self._jar_baseline = config_entry.data.get("cookies") if config_entry else None
+        self._jar_writing_target: list[dict[str, Any]] | None = None
         # Session-cookie names the last persist (or the loaded jar) carried. A jar
         # that loses one of them is a half-empty jar from a failed renewal.
         self._persisted_session_cookies = _session_cookie_names(self._jar_baseline)
@@ -460,6 +466,25 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "promoted_last_run": 0,
             "reason_counts": {},
         }
+        # Shared, non-secret renewal budget (attempts, cooldown, terminal reason). It
+        # lives in entry.data next to the cookie jar so an options reload cannot
+        # reset it, and the client spends it for both the poll and the keepalive.
+        self._renewal_runtime = None
+        self._renewal_token = None
+        if config_entry:
+            self._renewal_runtime = renewal_runtime_for(hass, config_entry.entry_id)
+            self._renewal_runtime.bind(config_entry.data)
+            self._renewal_runtime.bind_persistence(hass, config_entry)
+            self._renewal_token = self._renewal_runtime.activate(
+                lambda: not self._stopped and not self._jar_replaced()
+            )
+            self._renewal_admission = self._renewal_runtime.admission
+        else:
+            self._renewal_admission = RenewalAdmission.from_entry_data(entry_data)
+        client.attach_renewal_admission(
+            self._renewal_admission, self._renewal_runtime, self._renewal_token
+        )
+        client.set_expected_meter_ids(self._known_meter_ids())
 
         super().__init__(
             hass,
@@ -472,9 +497,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def keepalive_interval(self) -> timedelta:
         """Return the per-mode keepalive period.
 
-        Okta sessions tolerate a 10-minute SSO round trip; a local portal session's
-        MM_SID lapses on a ~10-minute idle timer (live 2026-10-22), so it is touched
-        every 3 minutes with a GET that carries no credentials.
+        Okta sessions tolerate a 10-minute SSO round trip. A local portal session is
+        touched every 3 minutes with a credential-free GET: one observed lapse
+        happened after ~9 minutes without an accepted request (2026-10-23), but the
+        server's real rule is unknown, so this is a product cadence, not a TTL claim.
         """
         minutes = (
             LOCAL_KEEPALIVE_INTERVAL_MINUTES
@@ -494,7 +520,14 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def stop_keepalive(self) -> None:
         """Cancel recurring keepalive timer and retire this coordinator's session."""
+        # Best effort before retirement: keep the spent renewal budget and any jar a
+        # renewal already confirmed durable across a reload/stop. A jar replaced by
+        # reauth is newer than this coordinator's state, so nothing is written then.
+        self._persist_auth_metadata()
+        self._persist_confirmed_session()
         self._stopped = True
+        if self._renewal_runtime is not None:
+            self._renewal_runtime.retire(self._renewal_token)
         self._stats_runtime.retire(self._stats_token)
         if self._unsub_keepalive is not None:
             self._unsub_keepalive()
@@ -518,7 +551,13 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Ignoring keepalive result from a retired PSE&G session")
             return
 
+        # Budget first: a reservation spent before the HTTP request must survive even
+        # when the cookie snapshot itself is refused as unconfirmed.
+        self._persist_auth_metadata()
         await self._async_persist_cookies()
+        self._persist_confirmed_session()
+        if self._is_stale():
+            return
 
         if expired or self.client.okta_session_expired_at:
             if not self.auth_required:
@@ -543,14 +582,46 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._dismiss_auth_issues()
             self.async_update_listeners()
 
+    def _jar_replaced(self) -> bool:
+        """Return True when reauth/reconfigure replaced the jar this client loaded."""
+        if not self.config_entry:
+            return False
+        current = self.config_entry.data.get("cookies")
+        if current == self._jar_baseline:
+            return False
+        writing = self._jar_writing_target
+        return not (writing is not None and current == writing)
+
     def _is_stale(self) -> bool:
         """Return True if this coordinator was unloaded or its jar was replaced."""
-        if self._stopped:
-            return True
-        return bool(
-            self.config_entry
-            and self.config_entry.data.get("cookies") != self._jar_baseline
+        return (
+            self._stopped
+            or self._jar_replaced()
+            or (
+                self._renewal_runtime is not None
+                and not self._renewal_runtime.is_active(self._renewal_token)
+            )
         )
+
+    def _known_meter_ids(self) -> set[str]:
+        """Every meter id this entry already owns (account-identity guard)."""
+        if not self.config_entry:
+            return set()
+        known = {
+            str(value)
+            for value in (self.config_entry.data.get(CONF_KNOWN_METER_IDS) or [])
+            if value
+        }
+        for value in (self.config_entry.unique_id, self.config_entry.data.get(CONF_METER_ID)):
+            if value:
+                known.add(str(value))
+        return known
+
+    def _persist_auth_metadata(self) -> None:
+        """Persist the non-secret renewal budget next to the cookies (no reload)."""
+        if not self.config_entry or self._is_stale():
+            return
+        self._renewal_runtime.persist(self.hass, self.config_entry)
 
     async def _async_persist_cookies(self) -> None:
         """Persist rotated session cookies to entry.data without logging values.
@@ -563,11 +634,20 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if not self.config_entry:
             return
+        # Remember which confirmation was current before the executor snapshot: a
+        # keepalive may confirm a newer renewal while the export is queued, and that
+        # newer snapshot must stay pending for the next exit.
+        pending_before = self.client.pending_confirmed_snapshot()
         # Executor: the snapshot takes the client's portal lock, which a long
         # backfill may hold.
         exported, auth_reason = await self.hass.async_add_executor_job(
             self.client.export_cookies_and_auth_reason
         )
+        if not self.client.cookies_confirmed:
+            # A failed renewal rolled the jar back; only a confirmed transaction may
+            # replace the saved jar.
+            _LOGGER.debug("Not persisting a cookie jar from an unconfirmed transaction")
+            return
         if auth_reason is not None:
             # The snapshot belongs to a session the portal just refused. A failed
             # Remember Me renewal drops MM_SID before its GET, so persisting now
@@ -587,27 +667,118 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._is_stale():
             _LOGGER.debug("Not persisting cookies from a retired PSE&G session")
             return
+        confirmed_cookies = (
+            self.client.confirmed_cookies()
+            if hasattr(self.client, "confirmed_cookies")
+            else None
+        )
+        if confirmed_cookies is not None and exported != confirmed_cookies:
+            _LOGGER.debug(
+                "Not persisting unconfirmed live-jar mutations over a confirmed PSE&G jar"
+            )
+            return
+        self._write_cookie_handoff(exported, session_cookies)
+        pending_after = self.client.pending_confirmed_snapshot()
+        if (
+            pending_before is not None
+            and pending_after is not None
+            and pending_after["id"] == pending_before["id"]
+        ):
+            # The live fully-confirmed jar is durable now; this failure-exit
+            # snapshot must not overwrite it later in the same poll/keepalive.
+            self.client.clear_confirmed_snapshot(pending_before["id"])
+
+    def _write_cookie_handoff(
+        self, exported: list[dict[str, Any]], session_cookies: frozenset[str]
+    ) -> None:
+        """Write the jar and the current budget together, without an await.
+
+        Keeping the confirmed jar and the settled admission in one entry update
+        prevents a reload/process stop from observing a rearmed budget next to the
+        previous cookie generation. Policy is omitted only when it is unreadable
+        (``None``), so corrupt bytes stay untouched and fail closed.
+        """
+        if not self.config_entry:
+            return
+        admission = (
+            self._renewal_runtime.admission_dict()
+            if self._renewal_runtime is not None
+            else None
+        )
         current_cookies = self.config_entry.data.get("cookies")
-        if current_cookies != exported:
+        current_admission = self.config_entry.data.get(CONF_RENEWAL_ADMISSION)
+        if current_cookies == exported and (
+            admission is None or current_admission == admission
+        ):
+            self._jar_baseline = exported
+            self._persisted_session_cookies = session_cookies
+            return
+        new_data = dict(self.config_entry.data)
+        new_data["cookies"] = exported
+        if admission is not None:
+            new_data[CONF_RENEWAL_ADMISSION] = admission
+        if new_data != self.config_entry.data:
             _LOGGER.debug("Persisting rotated session cookies to entry.data")
-            new_data = dict(self.config_entry.data)
-            new_data["cookies"] = exported
-            self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+            self._jar_writing_target = exported
+            try:
+                self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+            finally:
+                if self.config_entry.data.get("cookies") == exported:
+                    self._jar_baseline = exported
+                    self._persisted_session_cookies = session_cookies
+                self._jar_writing_target = None
+            return
         self._jar_baseline = exported
         self._persisted_session_cookies = session_cookies
 
-    def _async_persist_meter_ids(self, meter_ids: list[str]) -> None:
-        """Remember meters seen on this account without reloading the entry."""
-        if not self.config_entry or self._is_stale() or not meter_ids:
+    def _persist_confirmed_session(self) -> None:
+        """Hand off the jar a renewal/sign-in verified, on every exit path.
+
+        A later DAILY chart timeout, token-maintenance page, failed setup, unload,
+        stop, or backfill failure used to leave a verified renewal only in memory
+        while its spent budget was durable. Only the immutable snapshot captured at
+        confirmation is written here: never the live jar, which a later failed
+        response may have poisoned with its own Set-Cookie.
+        """
+        if not self.config_entry or self._is_stale():
             return
-        known = set(self.config_entry.data.get(CONF_KNOWN_METER_IDS) or [])
-        known.update(
-            filter(None, (self.config_entry.unique_id, self.config_entry.data.get(CONF_METER_ID)))
-        )
-        if not set(meter_ids).issubset(known):
+        snapshot = self.client.pending_confirmed_snapshot()
+        if snapshot is None:
+            return
+        if not snapshot["cookies_confirmed"] or snapshot["auth_reason"] is not None:
+            return
+        exported = snapshot["cookies"]
+        if not exported:
+            return
+        session_cookies = _session_cookie_names(exported)
+        if not self._persisted_session_cookies <= session_cookies:
+            _LOGGER.debug("Not persisting a partial confirmed cookie jar")
+            return
+        try:
+            self._write_cookie_handoff(exported, session_cookies)
+        except Exception:
+            _LOGGER.warning(
+                "Confirmed cookie handoff failed; the next failure or stop retries it"
+            )
+            return
+        self.client.clear_confirmed_snapshot(snapshot["id"])
+
+    def _async_persist_meter_ids(self, meter_ids: list[str]) -> None:
+        """Remember meters proven on this account without reloading the entry."""
+        if not self.config_entry or self._is_stale():
+            return
+        known = self._known_meter_ids()
+        # The client needs the entry's known ids to confirm a renewed session's
+        # account identity before it publishes or persists that transaction.
+        self.client.set_expected_meter_ids(known)
+        cleaned = [str(value) for value in (meter_ids or []) if value]
+        if not cleaned:
+            return
+        if not set(cleaned).issubset(known):
             new_data = dict(self.config_entry.data)
-            new_data[CONF_KNOWN_METER_IDS] = sorted(known.union(meter_ids))
+            new_data[CONF_KNOWN_METER_IDS] = sorted(known.union(cleaned))
             self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+            self.client.set_expected_meter_ids(self._known_meter_ids())
 
     def _dismiss_auth_issues(self) -> None:
         """Dismiss persistent notification and repairs issue once authenticated."""
@@ -732,8 +903,43 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data = await self.hass.async_add_executor_job(
                     self.client.fetch_energy_data, 14
                 )
+                if self._is_stale():
+                    raise UpdateFailed("Ignoring poll result from a retired PSE&G session")
+                self._persist_auth_metadata()
                 await self._async_persist_cookies()
-                self._async_persist_meter_ids(data.get("meter_ids") or [])
+                if self._is_stale():
+                    raise UpdateFailed("Ignoring poll result from a retired PSE&G session")
+                if data.get("identity_confirmed") is False:
+                    # The DAILY leg is authoritative. An unconfirmed account identity
+                    # must never publish readings, statistics or identity, must never
+                    # look like a success, and must never be reported as connected.
+                    # Keep the previous data (the sensors fall back to it) and fail
+                    # typed, so HA keeps the poll scheduled and entities stay put.
+                    self.status = "error"
+                    if not self._identity_rejection_logged:
+                        self._identity_rejection_logged = True
+                        _LOGGER.warning(
+                            "PSE&G daily usage did not confirm this entry's meter; "
+                            "keeping the previous readings"
+                        )
+                    raise UpdateFailed(
+                        "PSE&G daily usage did not confirm this entry's meter identity"
+                    )
+                candidate_meters = (
+                    data.get("contributing_meter_ids")
+                    if "contributing_meter_ids" in data
+                    else (data.get("meter_ids") or [])
+                )
+                if "history_14d" in data:
+                    if self.client._has_valid_meter_read(
+                        data.get("history_14d") or [],
+                        candidate_meters,
+                    ):
+                        self._async_persist_meter_ids(candidate_meters)
+                    else:
+                        self.client.set_expected_meter_ids(self._known_meter_ids())
+                else:
+                    self._async_persist_meter_ids(candidate_meters)
 
                 daily_records = (
                     data.get("daily_records") or data.get("history_14d") or []
@@ -759,14 +965,21 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             hourly_granularity,
                         )
 
+            if self._is_stale():
+                # A reauth/reload replaced this session while the poll ran: its data,
+                # status and cookie snapshot belong to a retired coordinator.
+                raise UpdateFailed("Ignoring poll result from a retired PSE&G session")
             self.next_update_time = dt_util.utcnow() + self.update_interval
             data["next_update"] = self.next_update_time.isoformat()
             self._last_valid_data = data
             self.last_successful_update = dt_util.utcnow().isoformat()
             self.auth_required = False
             self.status = "connected"
+            self._identity_rejection_logged = False
             self._dismiss_auth_issues()
             return data
+        except UpdateFailed:
+            raise
         except PsegOktaSessionExpired as err:
             if self._is_stale():
                 # A retired coordinator (unloaded or jar replaced by reauth) must not
@@ -778,11 +991,16 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._raise_auth_issues(str(err))
             raise ConfigEntryAuthFailed(self._auth_failed_message()) from err
         except (PsegTransientError, requests.RequestException) as err:
-            self.status = "error"
+            if not self._is_stale():
+                self.status = "error"
             raise UpdateFailed(f"Transient error communicating with PSE&G: {err}") from err
         except Exception as err:
-            self.status = "error"
+            if not self._is_stale():
+                self.status = "error"
             raise UpdateFailed(f"Error communicating with PSE&G: {err}") from err
+        finally:
+            self._persist_auth_metadata()
+            self._persist_confirmed_session()
 
     async def _async_record_statistics_logged(
         self,
@@ -1457,12 +1675,18 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         async with self._update_lock:
-            records = await self.hass.async_add_executor_job(
-                self.client.fetch_history_range,
-                start_date_str,
-                end_date_str,
-                90,
-            )
+            try:
+                records = await self.hass.async_add_executor_job(
+                    self.client.fetch_history_range,
+                    start_date_str,
+                    end_date_str,
+                    90,
+                )
+            finally:
+                # Auth-only handoff: a backfill's token GET can complete a bounded
+                # renewal, and its jar must survive a later chart failure or a stop.
+                self._persist_auth_metadata()
+                self._persist_confirmed_session()
 
             if not records:
                 _LOGGER.warning(

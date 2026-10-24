@@ -11,7 +11,7 @@ from unittest.mock import patch
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 import requests_mock
@@ -23,6 +23,7 @@ from custom_components.pseg.const import (
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
     CONF_PRICE_PER_KWH,
+    CONF_RENEWAL_ADMISSION,
     DOMAIN,
     OKTA_HOST,
     PORTAL_BASE_URL,
@@ -257,11 +258,12 @@ async def test_failed_remember_renewal_jar_is_never_persisted(hass: HomeAssistan
         with pytest.raises(PsegOktaSessionExpired):
             client._renew()
 
-    # The export is NOT empty (the Remember Me cookie is kept), so without the guard
-    # the entry would be overwritten with a jar that has no MM_SID.
+    # The failed transaction restores the confirmed jar in memory, but remains
+    # unconfirmed and cannot overwrite entry cookies.
     exported = {c["name"] for c in client.export_cookies()}
     assert "MM_RememberMe" in exported
-    assert "MM_SID" not in exported
+    assert "MM_SID" in exported
+    assert client.cookies_confirmed is False
 
     await coord._async_persist_cookies()
 
@@ -415,7 +417,33 @@ async def test_entity_ids_match_card_and_readme(hass: HomeAssistant, portal) -> 
 
 
 async def test_second_account_gets_suffixed_entity_ids(hass: HomeAssistant, portal) -> None:
-    """A second account must not collide with the first account's ids (README claim)."""
+    """A second account added after the first is registered gets `_2` entity_ids."""
+    first = _entry(hass)
+    assert await hass.config_entries.async_setup(first.entry_id)
+    await hass.async_block_till_done()
+
+    second = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="87654321",
+        title="PSE&G (87654321)",
+        data={CONF_OKTA_COOKIES: "idx=b", CONF_PORTAL_COOKIES: "", CONF_METER_ID: "87654321"},
+    )
+    second.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(second.entry_id)
+    await hass.async_block_till_done()
+
+    registry = er.async_get(hass)
+    second_ids = {e.entity_id for e in er.async_entries_for_config_entry(registry, second.entry_id)}
+    assert "sensor.pseg_connection_status_2" in second_ids
+    assert "sensor.pseg_electricity_consumption_2" in second_ids
+    assert registry.async_get("sensor.pseg_connection_status").config_entry_id == first.entry_id
+
+
+async def test_concurrent_multi_entry_domain_setup_preserves_distinct_ownership(
+    hass: HomeAssistant, portal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Concurrent initial domain setup registers both accounts distinctly even if second finishes first."""
     first = _entry(hass)
     second = MockConfigEntry(
         domain=DOMAIN,
@@ -425,17 +453,70 @@ async def test_second_account_gets_suffixed_entity_ids(hass: HomeAssistant, port
         data={CONF_OKTA_COOKIES: "idx=b", CONF_PORTAL_COOKIES: "", CONF_METER_ID: "87654321"},
     )
     second.add_to_hass(hass)
+
+    second_fetch_done = threading.Event()
+    first_entered = threading.Event()
+
+    def ordered_fetch(self, days: int = 14):
+        if "87654321" in (self._expected_meter_ids or set()):
+            second_fetch_done.set()
+            return dict(DATA, meter="Electric Meter 87654321")
+        first_entered.set()
+        assert second_fetch_done.wait(timeout=5.0)
+        return dict(DATA)
+
+    monkeypatch.setattr(PsegClient, "fetch_energy_data", ordered_fetch)
+
     assert await hass.config_entries.async_setup(first.entry_id)
     await hass.async_block_till_done()
-    if second.state is not ConfigEntryState.LOADED:
-        assert await hass.config_entries.async_setup(second.entry_id)
-        await hass.async_block_till_done()
+
+    assert first_entered.is_set()
+    assert second_fetch_done.is_set()
+    assert first.state is ConfigEntryState.LOADED
+    assert second.state is ConfigEntryState.LOADED
 
     registry = er.async_get(hass)
-    second_ids = {e.entity_id for e in er.async_entries_for_config_entry(registry, second.entry_id)}
-    assert "sensor.pseg_connection_status_2" in second_ids
-    assert "sensor.pseg_electricity_consumption_2" in second_ids
-    assert registry.async_get("sensor.pseg_connection_status").config_entry_id == first.entry_id
+    dev_registry = dr.async_get(hass)
+    first_entries = er.async_entries_for_config_entry(registry, first.entry_id)
+    second_entries = er.async_entries_for_config_entry(registry, second.entry_id)
+    assert len(first_entries) == 8
+    assert len(second_entries) == 8
+    assert len(first_entries) + len(second_entries) == 16
+
+    first_unique_ids = {e.unique_id for e in first_entries}
+    second_unique_ids = {e.unique_id for e in second_entries}
+    assert all(uid.startswith(f"{first.entry_id}_") for uid in first_unique_ids)
+    assert all(uid.startswith(f"{second.entry_id}_") for uid in second_unique_ids)
+    assert first_unique_ids.isdisjoint(second_unique_ids)
+
+    first_entity_ids = {e.entity_id for e in first_entries}
+    second_entity_ids = {e.entity_id for e in second_entries}
+    assert first_entity_ids.isdisjoint(second_entity_ids)
+
+    base_ids = {
+        "button.pseg_refresh_data",
+        "sensor.pseg_connection_status",
+        "sensor.pseg_electricity_consumption",
+        "sensor.pseg_electricity_cost",
+        "sensor.pseg_latest_reading_date",
+        "sensor.pseg_meter_id",
+        "sensor.pseg_next_update",
+        "sensor.pseg_outdoor_temperature",
+    }
+    suffixed_ids = {f"{eid}_2" for eid in base_ids}
+    # Whichever entry finishes first takes base_ids and the other takes suffixed_ids
+    assert {frozenset(first_entity_ids), frozenset(second_entity_ids)} == {
+        frozenset(base_ids),
+        frozenset(suffixed_ids),
+    }
+
+    first_devices = dr.async_entries_for_config_entry(dev_registry, first.entry_id)
+    second_devices = dr.async_entries_for_config_entry(dev_registry, second.entry_id)
+    assert len(first_devices) == 1
+    assert len(second_devices) == 1
+    assert first_devices[0].id != second_devices[0].id
+    assert {e.device_id for e in first_entries} == {first_devices[0].id}
+    assert {e.device_id for e in second_entries} == {second_devices[0].id}
 
 
 OLD_JAR = [{"name": "idx", "value": "OLD", "domain": OKTA_HOST, "path": "/", "secure": True}]
@@ -522,3 +603,55 @@ _AUTOPOST_FORM = (
     f'<form method="POST" action="{PORTAL_BASE_URL}/Saml/okta-prod/Acs">'
     '<input type="hidden" name="SAMLResponse" value="assertion"/></form>'
 )
+
+
+REAUTH_METADATA = {
+    "sequences": 2,
+    "last_sequence_at": "2026-10-23T12:00:00+00:00",
+    "terminal_reason": AUTH_REASON_REMEMBER_ME_REJECTED,
+    "retry_eligible": False,
+}
+
+
+async def test_reauth_rearms_the_renewal_budget_and_keeps_the_global_clock(
+    hass: HomeAssistant, portal
+) -> None:
+    """A completed human sign-in starts a fresh generation, not a fresh cooldown clock."""
+    entry = _entry(hass, **{CONF_RENEWAL_ADMISSION: dict(REAUTH_METADATA)})
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"],
+        user_input={CONF_OKTA_COOKIES: "idx=fresh", CONF_PORTAL_COOKIES: ""},
+    )
+    assert result["reason"] == "reauth_successful"
+    await hass.async_block_till_done()
+
+    assert entry.data[CONF_RENEWAL_ADMISSION] == {
+        "sequences": 0,
+        "last_sequence_at": "2026-10-23T12:00:00+00:00",
+        "terminal_reason": None,
+        "retry_eligible": False,
+    }
+
+
+async def test_options_reload_keeps_the_renewal_budget(hass: HomeAssistant, portal) -> None:
+    """An options reload must not reset the persisted renewal admission."""
+    entry = _entry(hass, **{CONF_RENEWAL_ADMISSION: dict(REAUTH_METADATA)})
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], user_input={CONF_PRICE_PER_KWH: 0.31}
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+
+    assert entry.data[CONF_RENEWAL_ADMISSION] == REAUTH_METADATA
+    coord = hass.data[DOMAIN][entry.entry_id]
+    assert coord._renewal_admission.terminal_reason == AUTH_REASON_REMEMBER_ME_REJECTED
+    assert coord.client._renewal_admission is coord._renewal_admission
+    assert METER in coord.client._expected_meter_ids

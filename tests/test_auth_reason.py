@@ -298,3 +298,34 @@ def test_keepalive_interval_is_per_mode(hass: HomeAssistant) -> None:
     assert track.call_args.args[2] == timedelta(
         minutes=LOCAL_KEEPALIVE_INTERVAL_MINUTES
     )
+
+
+def test_first_auth_failure_is_stable_until_recovery_or_a_new_reason() -> None:
+    """A retry with the same reason must not overwrite the first failure's evidence."""
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL)
+    with freeze_time("2026-10-23 12:00:00") as frozen:
+        client._mark_session_ok()
+        frozen.tick(timedelta(seconds=600))
+        client._mark_auth_failure(AUTH_REASON_PORTAL_SESSION_EXPIRED)
+        first_stamp = client.okta_session_expired_at
+        assert client.idle_gap_seconds == 600.0
+
+        # A later tick with the same reason keeps the original stamp and gap.
+        frozen.tick(timedelta(seconds=180))
+        client._mark_auth_failure(AUTH_REASON_PORTAL_SESSION_EXPIRED)
+        assert client.okta_session_expired_at == first_stamp
+        assert client.idle_gap_seconds == 600.0
+        assert client.auth_reason == AUTH_REASON_PORTAL_SESSION_EXPIRED
+
+        # A different reason is a new episode: both are replaced.
+        frozen.tick(timedelta(seconds=60))
+        client._mark_auth_failure(AUTH_REASON_REMEMBER_ME_REJECTED)
+        assert client.okta_session_expired_at != first_stamp
+        assert client.idle_gap_seconds == 840.0
+        assert client.auth_reason == AUTH_REASON_REMEMBER_ME_REJECTED
+
+        # A verified recovery clears the episode.
+        client._mark_session_ok()
+        assert client.auth_reason is None
+        assert client.okta_session_expired_at is None
+        assert client.idle_gap_seconds is None

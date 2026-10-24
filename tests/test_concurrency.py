@@ -10,11 +10,12 @@ from unittest.mock import AsyncMock, patch
 import urllib.parse
 
 from homeassistant.core import HomeAssistant
+import pytest
 import requests_mock
 
 from custom_components.pseg.const import PORTAL_BASE_URL
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
-from custom_components.pseg.pseg_client import PsegClient
+from custom_components.pseg.pseg_client import PsegClient, PsegTransientError
 
 DASHBOARD = '<input name="__RequestVerificationToken" value="t"/>Dashboard'
 
@@ -110,3 +111,172 @@ async def test_coordinator_serializes_poll_and_backfill(hass: HomeAssistant) -> 
         )
 
     assert max_active == 1
+
+
+def _renewal_portal(state: dict[str, object], guard: threading.Lock):
+    """Portal stubs: only the very first probe is a sign-in page, later ones work."""
+
+    def dashboard(_request, context):
+        with guard:
+            state["probes"] = int(state["probes"]) + 1
+            first_probe = state["probes"] == 1
+        if first_probe:
+            context.status_code = 302
+            context.headers["Location"] = "/"
+            return ""
+        return '<input name="__RequestVerificationToken" value="af"/>Dashboard'
+
+    def chart_setup(_request, _context):
+        with guard:
+            state["charts"] = int(state["charts"]) + 1
+        return "ok"
+
+    def chart_data(_request, _context):
+        return {
+            "Data": {
+                "series": [
+                    {
+                        "name": "Meter #12345",
+                        "data": [{"y": 2.0, "hs": {"start": "10/22/2026"}}],
+                    }
+                ]
+            }
+        }
+
+    return dashboard, chart_setup, chart_data
+
+
+def _run_pair(first, second) -> list:
+    """Run two client calls on their own threads and return their outcomes."""
+    outcomes: list = []
+    guard = threading.Lock()
+
+    def run(func, label):
+        try:
+            result = func()
+            with guard:
+                outcomes.append((label, result))
+        except Exception as err:  # noqa: BLE001 - the outcome is the assertion
+            with guard:
+                outcomes.append((label, type(err).__name__))
+
+    threads = [threading.Thread(target=run, args=(first, "a")),
+               threading.Thread(target=run, args=(second, "b"))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    return outcomes
+
+
+@pytest.mark.parametrize("second", ["keepalive", "poll"])
+def test_concurrent_keepalive_and_poll_spend_one_renewal(second: str) -> None:
+    """The client lock plus the shared admission allow exactly one renewal sequence."""
+    client = PsegClient(portal_cookies="MM_SID=dead; MM_RememberMe=remember-token")
+    client.set_expected_meter_ids({"12345"})
+    state: dict[str, object] = {"probes": 0, "charts": 0}
+    guard = threading.Lock()
+    dashboard, chart_setup, chart_data = _renewal_portal(state, guard)
+
+    first_call = client.keepalive
+    second_call = client.keepalive if second == "keepalive" else client.ensure_session
+
+    with requests_mock.Mocker() as m:
+        m.get(f"{PORTAL_BASE_URL}/Dashboard", text=dashboard)
+        m.get(f"{PORTAL_BASE_URL}/", text="<html>home</html>")
+        m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart_setup)
+        m.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
+        outcomes = _run_pair(first_call, second_call)
+
+    assert len(outcomes) == 2
+    assert state["charts"] == 1  # exactly one renewal sequence
+    assert client.sso_renewals == 1
+    assert client.has_remember_me is True
+    assert client.auth_reason is None
+    assert client._renewal_admission.sequences == 1
+    assert client._in_keepalive is False
+
+
+def test_keepalive_holds_the_client_lock_across_a_renewal() -> None:
+    """A second entry point waits for the lock instead of reading a half-renewed jar."""
+    client = PsegClient(portal_cookies="MM_SID=dead; MM_RememberMe=remember-token")
+    client.set_expected_meter_ids({"12345"})
+    parked = threading.Event()
+    release = threading.Event()
+    calls = {"n": 0}
+    guard = threading.Lock()
+
+    def dashboard(_request, context):
+        with guard:
+            calls["n"] += 1
+            first = calls["n"] == 1
+        if first:
+            parked.set()
+            assert release.wait(5)
+            context.status_code = 302
+            context.headers["Location"] = "/"
+            return ""
+        return '<input name="__RequestVerificationToken" value="af"/>Dashboard'
+
+    def chart_data(_request, _context):
+        return {
+            "Data": {
+                "series": [
+                    {"name": "Meter #12345", "data": [{"y": 1.0, "hs": {"start": "10/22/2026"}}]}
+                ]
+            }
+        }
+
+    outcome: dict = {}
+    with requests_mock.Mocker() as m:
+        dash = m.get(f"{PORTAL_BASE_URL}/Dashboard", text=dashboard)
+        m.get(f"{PORTAL_BASE_URL}/", text="<html>home</html>")
+        m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
+        m.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
+        first = threading.Thread(
+            target=lambda: outcome.setdefault("keepalive", client.keepalive())
+        )
+        first.start()
+        assert parked.wait(5)
+        second = threading.Thread(target=client.renew_remember_me)
+        second.start()
+        time.sleep(0.5)
+        # Parked inside the renewal: the second caller must not send a request yet.
+        assert dash.call_count == 1
+        release.set()
+        first.join(10)
+        second.join(10)
+
+    assert dash.call_count >= 2
+    assert outcome["keepalive"] is True
+
+
+def test_public_renewal_entry_point_waits_for_the_client_lock() -> None:
+    """The RLock is what makes the shared admission non-racy between entry points."""
+    client = PsegClient(portal_cookies="MM_SID=dead; MM_RememberMe=remember-token")
+    assert client._lock.acquire(timeout=1)
+    done = threading.Event()
+    started = threading.Event()
+
+    def call_renewal() -> None:
+        started.set()
+        try:
+            client.renew_remember_me()
+        except Exception:  # noqa: BLE001 - the fake portal raises to stop the test
+            pass
+        done.set()
+
+    with patch.object(
+        client, "_get_dashboard", side_effect=PsegTransientError("synthetic stop")
+    ):
+        thread = threading.Thread(target=call_renewal)
+        thread.start()
+        try:
+            assert started.wait(5)
+            # While another portal operation holds the lock, no request may start.
+            assert not done.wait(0.25)
+        finally:
+            client._lock.release()
+        thread.join(5)
+
+    assert done.is_set()

@@ -17,7 +17,7 @@ This fork (`delacjus/ha-pseg`, forked from `sidprax/ha-pseg`) hardens the integr
 
 - **Security Hardening**: This fork does not ship or support the upstream companion add-on; that path is removed here, and the integration talks to PSE&G directly. Hard-coded fallback URLs are gone. The MyMeter email/password you enter is stored in this integration's config entry so Home Assistant can sign in with it — it does not stay in the browser.
 - **Strict Host Allowlist**: Every HTTP request, redirect, and form submission is strictly restricted to `{mysmartenergy.nj.pseg.com, id.myaccount.pseg.com}`. With a saved MyMeter email/password, the client is narrowed further to `mysmartenergy.nj.pseg.com` only, so local sign-in never sends anything to Okta.
-- **Background Renewal**: Uses a domain-scoped cookie jar. With a saved MyMeter login or `MM_RememberMe` cookie, Home Assistant renews the portal session itself and does not use Okta; the background check for those portal-only sessions is a credential-free `GET /Dashboard` every 3 minutes, because MyMeter's session cookie idles out in about 10 minutes. Okta-only setups renew through standard SAML auto-post flows, with a 10-minute keepalive check. When MyMeter asks for a CAPTCHA, automatic sign-in stops until you re-authenticate: the integration never posts the saved password again on a timer. How long unattended renewal keeps working is not verified, and PSE&G can still ask for a CAPTCHA or another human step.
+- **Background Renewal**: Uses a domain-scoped cookie jar. With a saved MyMeter login or `MM_RememberMe` cookie, Home Assistant renews the portal session itself and does not use Okta. The 3-minute background check for those portal-only sessions is a credential-free `GET /Dashboard` probe, not a sign-in. Only when that probe is answered with the sign-in page does a bounded, cookie-only renewal run: MyMeter re-issues its session cookie, at most twice per `MM_RememberMe` generation and at least 15 minutes apart, and the result is kept only after a read-only meter check. Network errors, 5xx answers and maintenance pages never start a renewal. Okta-only setups renew through standard SAML auto-post flows, with a 10-minute keepalive check. PSE&G does not document how long a portal session lasts; one observed lapse (~9 minutes without an accepted request) is not a vendor contract. When MyMeter asks for a CAPTCHA, security question or password change, automatic sign-in stops until you re-authenticate: the integration never posts the saved password from the background timer. Renewal reduces re-prompts; it is not a promise of a permanent session.
 - **Statistics Corruption Fix**: Uses Home Assistant External Statistics (`pseg:<meter_id>_energy_consumption` and `pseg:<meter_id>_energy_cost`) with strict cumulative sum preservation across rolling windows and backfills.
 - **Hourly Statistics with a Daily Gate**: Recent closed New York days are promoted to hourly External Statistics only when all 23/24/25 expected hours are present and their sum agrees with the independently fetched daily total. Incomplete days keep their current daily row.
 - **Transparent Cost Estimation**: Accurately describes cost calculations as estimates based on a configurable electric rate ($0.247/kWh default), adjustable at any time via integration Options.
@@ -121,6 +121,67 @@ the extension (see `docs/captcha-extension-testing.md`).
 A CAPTCHA-assisted sign-in proves the account works *now* and gives the current
 access only. It does not create a permanent renewable session, so a later CAPTCHA
 prompt needs you again.
+
+### How background renewal works
+
+Three different things can happen, and they have different limits:
+
+1. **A keepalive probe** — every 3 minutes for a portal-only session, a
+   credential-free `GET /Dashboard`. It only checks whether the portal still
+   accepts the session; it never signs in, posts a password or contacts Okta.
+2. **A confirmed cookie renewal** — only when that probe lands on the sign-in page
+   *and* the jar holds `MM_RememberMe`: Home Assistant asks the portal to re-issue
+   its own session cookie (no email/password, no Okta, no CAPTCHA solving). The
+   result is published only if a short read-only daily chart read still shows this
+   entry's meter; otherwise the previous cookies and telemetry are restored. A jar
+   that passed that proof is saved even when a later read in the same poll fails,
+   and a later failed response's own `Set-Cookie` is never saved as if the renewal
+   had issued it. The product limit is two attempts per cookie generation (one
+   initial attempt and one retry after a *transient* failure), at least 15 minutes
+   apart, including across generations. A refused cookie, a CAPTCHA demand or a
+   security step ends that generation until the cookie is replaced or you sign in
+   again.
+3. **Human re-authentication** — required when the cookie is unusable, a CAPTCHA
+   appears, or PSE&G asks for a security step or password change. Completing the
+   prompt starts a fresh renewal generation; it does not reset the 15-minute gap.
+   A CAPTCHA or security step met by an automatic attempt is remembered across an
+   ordinary reload, a failed startup and a process restart; it stops every later
+   automatic sign-in and cookie renewal until a confirmed sign-in clears it.
+
+These limits are not a TTL. PSE&G publishes neither the portal session lifetime nor
+the `MM_RememberMe` lifetime, and an anonymous sign-in response cannot distinguish
+an expired cookie from a dropped one, a revoked one, or a vendor-side fault. So the
+integration acts only on the typed sign-in response and never assumes a fixed
+number of minutes.
+
+Polling, background checks and an ordinary integration reload share one renewal
+budget. A failed startup also keeps its spent attempt and any terminal refusal;
+reloading cannot retry the same refused cookie. Only an actual transient failure
+earns the second attempt. A successful renewal with an unchanged Remember Me
+cookie, an unfinished request or an unknown outcome earns no retry. While an
+earned retry is still inside its 15-minute window and no saved sign-in is
+available, the poll reports an ordinary transient wait: Home Assistant keeps
+retrying for it instead of stopping the poll schedule and asking you to sign in
+again. A settled generation that has no retry left asks for sign-in immediately,
+even inside that window. A normal dashboard response that merely re-issues the
+Remember Me cookie is not a new generation; only a cookie replaced during a
+verified renewal, or a completed sign-in, restarts the generation.
+
+The budget contains only an attempt count, a timestamp, a fixed terminal reason
+and a retry flag. Invalid stored budget data stops automatic cookie renewal;
+complete the normal re-authentication prompt to repair it. Do not delete the
+budget to force another attempt. Home Assistant saves the budget with the
+confirmed cookie jar in the same entry update, so a reload cannot pair a rearmed
+budget with a replaced cookie. A renewal-verified jar, a spent attempt, and a
+CAPTCHA or security step seen by an automatic attempt survive an ordinary reload
+or failed startup; an abrupt process or disk failure can still lose a recent save,
+so crash durability is best effort. Only a completed sign-in clears the terminal
+step. The diagnostic `has_remember_me` field reports presence as a boolean only.
+
+For maintainers, the offline regression and guard-removal checks are documented in
+[`docs/auth-review-verification.md`](docs/auth-review-verification.md). To roll back
+only this auth change, use reviewed hourly base `2285845` and retain every hourly
+statistics row, provenance record and pending journal. Do not reinstall 1.4.2.
 
 ### Older methods
 
@@ -284,9 +345,7 @@ entity: sensor.pseg_electricity_consumption
 
 ## Entities Provided
 
-Entity ids below are for the first configured account (device name `PSEG`). A second account
-gets the same ids with a `_2` suffix; point the card's `entity`, `next_update_entity` and
-`connection_status_entity` options at those.
+Entity ids below are for the first registered account in Home Assistant's entity registry (device name `PSEG`). When multiple accounts are present, Home Assistant may initialize entries concurrently on first load, so whichever account registers its entities first receives the base ids and a second account gets the `_2` suffix; once registered, entity ids remain stable across restarts and each account's entities stay uniquely bound to its config entry. Point the card's `entity`, `next_update_entity` and `connection_status_entity` options at the account's registered entity ids.
 
 - `sensor.pseg_electricity_consumption`: Latest daily electric usage in kWh (contains `history_14d`, `statistics_granularity`, and hourly completeness attributes)
 - `sensor.pseg_electricity_cost`: Latest daily estimated cost in USD
