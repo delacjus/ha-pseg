@@ -17,12 +17,25 @@ import requests_mock
 
 from custom_components.pseg.const import PORTAL_BASE_URL
 from custom_components.pseg.pseg_client import AllowlistedSession
-
-try:
-    from conftest import BlockedOfflineTransportError
-except ImportError:
-    from tests.conftest import BlockedOfflineTransportError
 from tests.test_pseg_client import _CannedAdapter
+
+
+def _loaded_conftest():
+    """Return the conftest module pytest actually loaded.
+
+    With tests/ a package it is ``tests.conftest``; ``import conftest`` would
+    create a second copy whose classes and globals the active guards never use.
+    """
+    for name in ("tests.conftest", "conftest"):
+        module = sys.modules.get(name)
+        if module is not None and hasattr(module, "BlockedOfflineTransportError"):
+            return module
+    import tests.conftest as module
+
+    return module
+
+
+BlockedOfflineTransportError = _loaded_conftest().BlockedOfflineTransportError
 
 
 class SentinelReachedError(RuntimeError):
@@ -37,10 +50,7 @@ def _install_lower_sentinel(
     calls: dict[str, list[Any]] = {m: [] for m in methods}
     target_cls = getattr(pytest_socket, "_true_socket", socket.socket)
 
-    try:
-        import conftest as conftest_module
-    except ImportError:
-        import tests.conftest as conftest_module
+    conftest_module = _loaded_conftest()
 
     for method in methods:
         true_attr = f"_true_{method}"
