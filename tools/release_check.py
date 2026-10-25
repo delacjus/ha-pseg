@@ -71,6 +71,9 @@ def _child(command: list[str], copy: Path, label: str, timeout: float) -> bool:
         env.pop(key, None)
     env.update({
         "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0",
+        # Unbuffered output plus faulthandler: a hang that hits the timeout leaves
+        # the real progress and every thread's stack in the log, not a stale buffer.
+        "PYTHONUNBUFFERED": "1", "PYTHONFAULTHANDLER": "1",
         "PYTHONPATH": os.pathsep.join((str(copy), str(copy / "tests"))),
         "RUFF_NO_CACHE": "true", "TMPDIR": str(runtime), "TMP": str(runtime),
         "TEMP": str(runtime), "XDG_CACHE_HOME": str(runtime / "cache"),
@@ -88,7 +91,16 @@ def _child(command: list[str], copy: Path, label: str, timeout: float) -> bool:
             returncode = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            os.killpg(process.pid, signal.SIGKILL)
+            # SIGABRT first so faulthandler dumps all thread stacks, then SIGKILL.
+            try:
+                process.send_signal(signal.SIGABRT)
+                process.wait(timeout=5)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                pass
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             returncode = process.wait()
         except BaseException:
             # Ctrl-C / SIGTERM: never leave the child's process group running.
