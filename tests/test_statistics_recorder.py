@@ -11,7 +11,6 @@ import copy
 from datetime import UTC, date, datetime, timedelta
 import json
 import threading
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 import urllib.parse
 
@@ -355,8 +354,17 @@ class _SlowRecorderTask(RecorderTask):
 
     commit_before = False
 
+    def __init__(
+        self,
+        reached: threading.Event | None = None,
+        release: threading.Event | None = None,
+    ) -> None:
+        self.reached = reached or threading.Event()
+        self.release = release or threading.Event()
+
     def run(self, instance) -> None:
-        time.sleep(0.3)
+        self.reached.set()
+        self.release.wait(timeout=10.0)
 
 
 async def test_import_waits_for_recorder_commit_before_next_baseline(coord, hass) -> None:
@@ -364,11 +372,26 @@ async def test_import_waits_for_recorder_commit_before_next_baseline(coord, hass
     await coord.async_record_statistics(_recs("2026-10-01", 14), meter_id="m1")
     await async_wait_recording_done(hass)
 
-    get_instance(hass).queue_task(_SlowRecorderTask())
-    await asyncio.gather(
-        coord.async_record_statistics(_recs("2026-09-01", 44), meter_id="m1"),
-        coord.async_record_statistics(_recs("2026-10-02", 14), meter_id="m1"),
+    reached = threading.Event()
+    release = threading.Event()
+    get_instance(hass).queue_task(
+        _SlowRecorderTask(reached=reached, release=release)
     )
+    await hass.async_add_executor_job(reached.wait, 10.0)
+
+    real_add = coord_mod.async_add_external_statistics
+
+    def unblock_recorder(*args, **kwargs):
+        release.set()
+        return real_add(*args, **kwargs)
+
+    with patch.object(
+        coord_mod, "async_add_external_statistics", side_effect=unblock_recorder
+    ):
+        await asyncio.gather(
+            coord.async_record_statistics(_recs("2026-09-01", 44), meter_id="m1"),
+            coord.async_record_statistics(_recs("2026-10-02", 14), meter_id="m1"),
+        )
     await async_wait_recording_done(hass)
 
     sums = await _sums(hass)
