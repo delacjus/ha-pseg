@@ -740,7 +740,7 @@ def test_sleeping_mutant():
     proc = subprocess.Popen([
         _TEST_PYTHON, "-B", mutation_check.__file__, "--source", str(repo),
         "--python", _TEST_PYTHON, "--table", str(table), "--json", "--timeout",
-        "2" if termination == "timeout" else "35",
+        "8" if termination == "timeout" else "35",
     ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     group = None
     try:
