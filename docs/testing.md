@@ -31,7 +31,7 @@ Run release checks from the repository root:
 ### Profile Descriptions
 
 - **`fast`**: Runs `ruff check .` and all collected Python test suites, excluding those marked `slow`, `nightly`, or `quarantine`. Promoted independent suites remain included in `fast`.
-- **`node`**: Verifies Node.js offline guards and tests using the offline preload (`tests/support/node_offline.cjs`) across `tests/test_node_offline.js`, `tests/test_captcha_helper.js`, and `tests/test_captcha_extension.js`.
+- **`node`**: Verifies Node.js offline guards and tests using the offline preload (`tests/support/node_offline.cjs`) across `tests/test_node_offline.js`, `tests/test_captcha_helper.js`, `tests/test_captcha_extension.js`, and `tests/test_energy_card.js`.
 - **`independent`**: Runs the promoted independent probe suites (`-m independent`) in isolation.
 - **`mutation`**: Runs all 60 authentication guard mutations in fresh per-mutant copies using `tools/mutation_check.py` against `tests/mutations/auth_guards.py`.
 - **`all`**: Runs `fast`, `node`, `independent`, and `mutation` sequentially in fresh disposable copies.

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import datetime
 import hashlib
 import logging
+import math
 import re
 import time
 from typing import Any
@@ -943,8 +944,19 @@ class PsegOptionsFlowHandler(OptionsFlowWithReload):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Manage integration options."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            raw_price = user_input.get(CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH)
+            try:
+                price = float(raw_price)
+                if isinstance(raw_price, bool) or not math.isfinite(price) or price < 0:
+                    raise ValueError
+            except (TypeError, ValueError, OverflowError):
+                errors[CONF_PRICE_PER_KWH] = "invalid_price"
+            else:
+                return self.async_create_entry(
+                    title="", data={**user_input, CONF_PRICE_PER_KWH: price}
+                )
 
         schema = vol.Schema(
             {
@@ -953,7 +965,7 @@ class PsegOptionsFlowHandler(OptionsFlowWithReload):
                     default=self.config_entry.options.get(
                         CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH
                     ),
-                ): vol.Coerce(float),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0)),
                 vol.Optional(
                     CONF_STATISTICS_IMPORT_ENABLED,
                     default=self.config_entry.options.get(
@@ -964,4 +976,4 @@ class PsegOptionsFlowHandler(OptionsFlowWithReload):
             }
         )
 
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

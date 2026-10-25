@@ -17,7 +17,7 @@ This project (`delacjus/ha-pseg`, current release **1.6.1**) is an independent f
 
 - **Direct local MyMeter sign-in**: Home Assistant signs into MyMeter directly. There is no companion add-on, and credentials are never sent over HTTP to a `localhost:8000` helper.
 - **Strict host allowlist**: Every HTTP request, redirect, and form submission is strictly restricted to `{mysmartenergy.nj.pseg.com, id.myaccount.pseg.com}`. When signing in with a MyMeter email and password, requests are narrowed to `mysmartenergy.nj.pseg.com` only, preventing any credentials or tokens from being sent to Okta.
-- **Bounded cookie-only renewal**: Portal sessions renew in the background without re-sending passwords. The integration runs a credential-free `GET /Dashboard` check every 3 minutes. If the session has lapsed, it performs a bounded cookie renewal (at most 2 attempts per cookie generation, spaced at least 15 minutes apart) and verifies access with a read-only meter check before saving cookies.
+- **Bounded cookie-only keepalive**: The integration runs a credential-free `GET /Dashboard` check every 3 minutes. If the session has lapsed, this timer performs a bounded cookie renewal (at most 2 attempts per cookie generation, spaced at least 15 minutes apart) and verifies access with a read-only meter check before saving cookies. Regular data polling can fall back to submitting the saved MyMeter email and password when the renewal policy permits it; the keepalive timer never submits them.
 - **Diagnostics redaction**: Diagnostic downloads automatically redact email addresses, passwords, session cookies, and meter serial numbers.
 - **Stable statistics with correction guards**: Uses Home Assistant External Statistics (`pseg:<meter_id>_energy_consumption` and `pseg:<meter_id>_energy_cost`) with strict cumulative sum preservation across rolling windows and backfills. Gaps are preserved and existing data is never wiped out.
 - **Hourly statistics**: Live since release 1.6.0. Promotes complete recent days to hourly resolution while safely falling back to daily rows when data is incomplete.
@@ -49,6 +49,8 @@ This fork deliberately does **not** adopt:
 
 ## Installation
 
+Requires **Home Assistant 2026.10.2 or newer**, the minimum version tested by this project. Earlier releases are not supported.
+
 ### Via HACS (Recommended)
 
 Install `delacjus/ha-pseg` as a custom repository in HACS:
@@ -79,7 +81,7 @@ Install `delacjus/ha-pseg` as a custom repository in HACS:
 3. Enter your MyMeter **Email** and **Password** (the login credentials from `https://mysmartenergy.nj.pseg.com`).
 4. Click **Submit**.
 
-Home Assistant securely stores your credentials in the integration config entry and uses them to authenticate directly with MyMeter.
+Home Assistant stores your credentials and session cookies in the integration config entry and uses them to authenticate directly with MyMeter over HTTPS. The integration does not encrypt these stored values itself; protect access to your Home Assistant configuration and backups.
 
 ## Signing In and the CAPTCHA Helper Extension
 
@@ -137,6 +139,8 @@ Once signed in, Home Assistant maintains the session in the background:
 2. **Cookie renewal**: If the portal prompts for a renewed session and a `MM_RememberMe` cookie is present, Home Assistant requests a refreshed session cookie without re-sending your password. Renewals are bounded to at most 2 attempts per cookie generation, spaced at least 15 minutes apart, and verified with a read-only meter reading before being saved.
 3. **Re-authentication prompt**: If a session expires completely, or if PSE&G demands a new CAPTCHA or security question, automatic attempts stop safely. Home Assistant alerts you to re-authenticate rather than risking account lockout.
 
+The regular data poll has a separate saved-password fallback when the renewal policy permits it. A poll that encounters an expired session may submit your saved MyMeter email and password over HTTPS. CAPTCHA/security-step latches and an exhausted renewal generation block that fallback; the three-minute keepalive always remains cookie-only.
+
 ### Older Authentication Methods
 
 The integration retains backward-compatible support for legacy login methods:
@@ -177,6 +181,8 @@ The Energy Dashboard will reflect your electricity consumption and estimated cos
 ## Lovelace Card
 
 The `pseg-energy-card` bundles with the integration and **auto-loads automatically since release 1.6.1**. No manual Lovelace resource registration is needed (existing manual resource entries are harmless and do not conflict).
+
+The card displays only its configured entity. Home Assistant retains previous readings during connection failures; the card does not store account data in browser storage. Loading the updated card removes the older shared browser cache. If your entity has a legacy name, use that exact entity ID in the card configuration.
 
 Add the card to any dashboard:
 

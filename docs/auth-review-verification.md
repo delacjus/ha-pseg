@@ -19,7 +19,7 @@ around the same copy-only engine.
 ```sh
 timeout 90 .venv/bin/python -m pytest -q --tb=short -p no:cacheprovider
 timeout 15 .venv/bin/ruff check . --no-cache
-timeout 15 node --require ./tests/support/node_offline.cjs --test tests/test_node_offline.js tests/test_captcha_helper.js tests/test_captcha_extension.js
+timeout 15 node --require ./tests/support/node_offline.cjs --test tests/test_node_offline.js tests/test_captcha_helper.js tests/test_captcha_extension.js tests/test_energy_card.js
 timeout 600 .venv/bin/python tools/release_check.py mutation --source . --python .venv/bin/python
 timeout 5 git diff --check
 ```

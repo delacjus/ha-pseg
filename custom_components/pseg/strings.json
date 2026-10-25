@@ -69,6 +69,9 @@
     }
   },
   "options": {
+    "error": {
+      "invalid_price": "Enter a finite electricity rate greater than or equal to zero."
+    },
     "step": {
       "init": {
         "title": "PSE&G Energy Options",
