@@ -21,6 +21,16 @@ combine-as-imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+xfail_strict = true
+timeout = 60
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
+markers = [
+    "independent: mark test as independent verification probe",
+    "slow: mark test as slow running",
+    "nightly: mark test as nightly only",
+    "quarantine: mark test as quarantined",
+]
