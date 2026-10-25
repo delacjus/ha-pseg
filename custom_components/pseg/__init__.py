@@ -58,6 +58,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             configs = [StaticPathConfig(url, path, False) for url, path in static_paths]
             await hass.http.async_register_static_paths(configs)
             _LOGGER.debug("Registered static paths for PSE&G resources")
+            if frontend_path.exists():
+                # Load the card on every dashboard without a manual Lovelace
+                # resource (upstream 1.0.1). frontend is an after_dependency, so it
+                # is set up first whenever present; without it (minimal installs,
+                # tests) skip rather than fail setup. The card guards
+                # customElements.define, so a manual resource loading it too is harmless.
+                from homeassistant.components.frontend import add_extra_js_url
+
+                try:
+                    add_extra_js_url(hass, "/pseg/pseg-energy-card.js")
+                except KeyError:
+                    _LOGGER.debug("Frontend not loaded; energy card not auto-registered")
         except Exception as err:
             _LOGGER.debug("Could not register static paths: %s", err)
 

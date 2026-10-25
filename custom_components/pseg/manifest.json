@@ -2,6 +2,7 @@
   "domain": "pseg",
   "name": "PSE&G Energy (New Jersey)",
   "after_dependencies": [
+    "frontend",
     "recorder"
   ],
   "codeowners": [

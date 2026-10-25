@@ -176,3 +176,21 @@ async def test_unload_cancels_keepalive_timer(hass: HomeAssistant) -> None:
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
     assert coord._unsub_keepalive is None
+
+
+async def test_async_setup_registers_energy_card_js(hass: HomeAssistant) -> None:
+    """The card is auto-loaded on dashboards via add_extra_js_url (upstream 1.0.1)."""
+    hass.http = MagicMock()
+    hass.http.async_register_static_paths = AsyncMock()
+    with patch("homeassistant.components.frontend.add_extra_js_url") as add_js:
+        assert await async_setup(hass, {}) is True
+    registered = [cfg.url_path for cfg in hass.http.async_register_static_paths.call_args.args[0]]
+    assert "/pseg/pseg-energy-card.js" in registered
+    add_js.assert_called_once_with(hass, "/pseg/pseg-energy-card.js")
+
+
+async def test_async_setup_without_frontend_skips_card(hass: HomeAssistant) -> None:
+    """No frontend data (minimal install/tests) must not fail integration setup."""
+    hass.http = MagicMock()
+    hass.http.async_register_static_paths = AsyncMock()
+    assert await async_setup(hass, {}) is True
