@@ -1,0 +1,50 @@
+{
+  "group": "nywall",
+  "status": "active",
+  "reviewer_kb": "8f4541f2-63e1-4666-bbef-2fd86c1686a0",
+  "sources": [
+    {
+      "original_path": "/tmp/pseg-review-nywall-r1/probe.py",
+      "original_sha256": "bcc76c9f3c2a24699db4a6116d82e1f2f8926218f0828941c50465b6a0ff191d",
+      "archived_path": "nywall/r1_probe.py.txt",
+      "archived_sha256": "bcc76c9f3c2a24699db4a6116d82e1f2f8926218f0828941c50465b6a0ff191d",
+      "role": "assertion_script",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-review-nywall-r2/probe.py",
+      "original_sha256": "d244c6dfbc4448fc30260ad62781fcbf91881bd169097192da91b7d81991f69b",
+      "archived_path": "nywall/r2_probe.py.txt",
+      "archived_sha256": "d244c6dfbc4448fc30260ad62781fcbf91881bd169097192da91b7d81991f69b",
+      "role": "assertion_script",
+      "collect": false
+    }
+  ],
+  "expected_collection": 50,
+  "transformation_rationale": [
+    "Promoted historical standalone assertion scripts r1_probe.py.txt and r2_probe.py.txt into portable active pytest test modules.",
+    "Mapped every original probe scenario and assertion to stable pytest node and parameter IDs.",
+    "Superseded R1 obsolete-by-design unsafe gate acceptances into strict rejections (closed in R2).",
+    "Superseded R1 fallback_25_aware label_mismatch expectation into dst_ambiguous per ambiguity precedence (closed in R2).",
+    "Replaced historical runtime git show HEAD and AST parsing with declared value expectations and static closed reason verification.",
+    "Isolated captcha placeholder rendering test against strings.json and translations/en.json without config flow or Home Assistant runtime dependencies."
+  ],
+  "promoted_files": [
+    {
+      "relative_path": "__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": "conftest.py",
+      "sha256": "763acc154ac77506124982c912d336c08167b56079ca3bc38b366d8dfa43405d"
+    },
+    {
+      "relative_path": "test_independent_nywall_contract.py",
+      "sha256": "2f3ffbb0e0374f36a8d5c2d095dd6d99d04a986ea998bd48bbc7380deb69f5e8"
+    },
+    {
+      "relative_path": "test_independent_nywall_labels.py",
+      "sha256": "4590704821934f55d92f7c8b7b1fc30d9a3eb42261b715eece71a87d7fdd046f"
+    }
+  ]
+}
