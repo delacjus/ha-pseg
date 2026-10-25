@@ -1,16 +1,27 @@
 #!/usr/bin/env python3
 """ha-pseg release check and snapshot tooling.
 
-Currently implements freeze and snapshot subcommands (P1-01).
-Additional profiles (fast, node, independent, mutation, all) arrive in P1-09.
+Profiles execute exact frozen inputs in fresh external copies; source is never a child cwd.
+Snapshots and child logs are retained as evidence, including on failure. This has the
+same local, non-hostile-process threat model as tools._snapshot.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 from pathlib import Path
+import re
+import shutil
+import signal
+import subprocess
 import sys
+import tempfile
+
+# Also protect direct invocations without -B before importing the local helper.
+sys.dont_write_bytecode = True
 
 _TOOLS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _TOOLS_DIR.parent
@@ -28,6 +39,154 @@ from tools._snapshot import (  # noqa: E402
 def _emit_error(code: str, **context: object) -> None:
     payload = {"ok": False, "error": code, **context}
     print(json.dumps(payload, sort_keys=True), file=sys.stderr)
+
+
+_NODE_FILES = (
+    "tests/test_node_offline.js",
+    "tests/test_captcha_helper.js",
+    "tests/test_captcha_extension.js",
+)
+
+
+def _source_state(source: Path, paths_from: str | None) -> dict[str, object]:
+    manifest = freeze(source=source, paths_from=paths_from)
+    status = None
+    if (source / ".git").exists():
+        result = subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(source), "status", "--porcelain", "--untracked-files=all"],
+            check=True, capture_output=True, text=True,
+        )
+        status = result.stdout
+    return {"head": manifest["head"], "sha256": manifest["sha256"], "status": status}
+
+
+def _child(command: list[str], copy: Path, label: str, timeout: float) -> bool:
+    runtime = copy / ".release-check" / label
+    runtime.mkdir(parents=True)
+    env = os.environ.copy()
+    for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "NODE_OPTIONS", "PYTHONHOME"):
+        env.pop(key, None)
+    env.update({
+        "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0",
+        "PYTHONPATH": os.pathsep.join((str(copy), str(copy / "tests"))),
+        "RUFF_NO_CACHE": "true", "TMPDIR": str(runtime), "TMP": str(runtime),
+        "TEMP": str(runtime), "XDG_CACHE_HOME": str(runtime / "cache"),
+    })
+    if label in {"fast-pytest", "independent-pytest"}:
+        command += ["--basetemp", str(runtime / "pytest")]
+    log = runtime / "output.log"
+    timed_out = False
+    with log.open("w") as output:
+        process = subprocess.Popen(
+            command, cwd=copy, env=env, stdout=output, stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            returncode = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            os.killpg(process.pid, signal.SIGKILL)
+            returncode = process.wait()
+        except BaseException:
+            # Ctrl-C / SIGTERM: never leave the child's process group running.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            raise
+    text = log.read_text(errors="replace")
+    counts: dict[str, int] = {}
+    if label.endswith("pytest"):
+        # Take the final pytest summary, rather than counting progress or warning lines.
+        summaries = [line for line in text.splitlines() if re.search(r"\d+ passed|\d+ failed|no tests ran|\d+ deselected", line)]
+        if summaries:
+            counts = {kind: int(n) for n, kind in re.findall(
+                r"(\d+) (passed|failed|skipped|xfailed|xpassed|errors?)\b", summaries[-1]
+            )}
+        nonempty = sum(counts.values()) > 0
+    elif label == "node":
+        counts = {kind: int(n) for kind, n in re.findall(
+            r"^# (tests|pass|fail|cancelled|skipped|todo) (\d+)$", text, re.MULTILINE
+        )}
+        # Node reports an empty file as a successful test of that file. Those
+        # implicit wrappers are not suite cases and must not create empty success.
+        wrappers = sum(bool(re.search(
+            r"^ok \d+ - (?:" + re.escape(name) + "|" + re.escape(str(copy / name)) + r")$",
+            text, re.MULTILINE,
+        )) for name in _NODE_FILES)
+        nonempty = counts.get("tests", 0) > wrappers
+    else:
+        nonempty = True  # Ruff is a lint check, not an expected test suite.
+    ok = returncode == 0 and not timed_out and nonempty
+    print(json.dumps({
+        "child": label, "returncode": returncode, "counts": counts, "ok": ok,
+        "timeout": timed_out, "empty_suite": not nonempty, "log": str(log),
+    }, sort_keys=True), flush=True)
+    if not ok:
+        print(text[-6000:], file=sys.stderr)
+    return ok
+
+
+def _run_profiles(args: argparse.Namespace) -> int:
+    if args.subcommand in {"slow", "nightly", "replay", "stats-baseline"}:
+        _emit_error("profile_not_available", profile=args.subcommand)
+        return 1
+    if args.subcommand == "mutation":
+        _emit_error("mutation_pending", message="Mutation profile unavailable until P1-11")
+        return 1
+    if args.repeat < 1 or not math.isfinite(args.timeout) or args.timeout <= 0:
+        _emit_error("invalid_repeat_or_timeout")
+        return 1
+    interpreter = shutil.which(args.python)
+    if interpreter is None:
+        _emit_error("interpreter_not_found", interpreter=args.python)
+        return 1
+    interpreter = str(Path(interpreter).absolute())
+    source = Path(args.source).resolve()
+    profiles = ("fast", "node", "independent") if args.subcommand == "all" else (args.subcommand,)
+    ok = True
+    for iteration in range(1, args.repeat + 1):
+        # Explicit external parent: ignore a caller TMPDIR that might point into source.
+        evidence = Path(tempfile.mkdtemp(prefix="pseg-release-", dir="/tmp"))
+        copy = evidence / "source"
+        print(json.dumps({"repeat": iteration, "evidence": str(evidence)}), flush=True)
+        before = _source_state(source, args.paths_from)
+        print(json.dumps({"source_before": before}, sort_keys=True), flush=True)
+        try:
+            manifest = snapshot(source=source, dest=copy, paths_from=args.paths_from)
+            print(json.dumps({"manifest": manifest["sha256"], "files": manifest["count"],
+                              "copy": str(copy)}, sort_keys=True), flush=True)
+            if manifest["sha256"] != before["sha256"] or manifest["head"] != before["head"]:
+                raise SnapshotError("source_changed_before_snapshot")
+            for profile in profiles:
+                if profile == "fast":
+                    lint_ok = _child([interpreter, "-B", "-m", "ruff", "check", "."],
+                                     copy, "ruff", args.timeout)
+                    ok = lint_ok and ok
+                if profile in {"fast", "independent"}:
+                    marker = "not slow and not nightly and not quarantine" if profile == "fast" else "independent"
+                    command = [interpreter, "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                               "-o", "pythonpath=. tests", "-m", marker]
+                    passed = _child(command, copy, profile + "-pytest", args.timeout)
+                else:
+                    node = shutil.which("node")
+                    if node is None:
+                        raise SnapshotError("node_not_found")
+                    passed = _child([str(Path(node).absolute()), "--require", "./tests/support/node_offline.cjs",
+                                     "--test", "--test-reporter=tap", *_NODE_FILES], copy, "node", args.timeout)
+                ok = passed and ok
+        finally:
+            after = _source_state(source, args.paths_from)
+            unchanged = before == after
+            print(json.dumps({"source_after": after, "source_unchanged": unchanged},
+                             sort_keys=True), flush=True)
+            if not unchanged:
+                raise SnapshotError("source_changed_during_run")
+    if args.subcommand == "all":
+        _emit_error("mutation_pending", message="All is incomplete until P1-11 wires mutation")
+        return 1
+    return 0 if ok else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -65,6 +224,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Explicit file containing paths to include",
     )
 
+    for profile in ("fast", "node", "independent", "mutation", "all",
+                    "slow", "nightly", "replay", "stats-baseline"):
+        runner = subparsers.add_parser(profile, help=f"Run {profile} profile in a fresh copy")
+        runner.add_argument("--source", default=".")
+        runner.add_argument("--python", default=os.environ.get("PSEG_TEST_PYTHON", sys.executable))
+        runner.add_argument("--paths-from", help="Explicit reviewed new suite paths (snapshot contract)")
+        runner.add_argument("--repeat", type=int, default=1)
+        runner.add_argument("--timeout", type=float, default=600, help="Seconds per child (default: 600)")
+
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
@@ -99,16 +267,15 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         else:
-            _emit_error("unknown_subcommand", subcommand=args.subcommand)
-            return 1
+            return _run_profiles(args)
     except SnapshotError as err:
         _emit_error(err.code, **err.context)
         return 1
     except CleanupRefused:
         _emit_error("cleanup_refused")
         return 1
-    except OSError:
-        _emit_error("io_error")
+    except (OSError, subprocess.SubprocessError) as err:
+        _emit_error("child_or_io_error", detail=str(err))
         return 1
 
 
