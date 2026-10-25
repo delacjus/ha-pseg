@@ -36,10 +36,25 @@ directory for inspection; remove that directory when it is no longer needed.
 This is a local release helper with the same threat model as `_snapshot.py`, not a
 sandbox against a hostile process with your user permissions.
 
-`mutation` explicitly fails until P1-11 connects the mutation suite. `all` executes
-`fast`, `node`, and `independent`, reports pending mutation, and exits nonzero until
-that connection is implemented. Future `slow`, `nightly`, `replay`, and
-`stats-baseline` profiles also fail clearly until implemented.
+`mutation` runs all 60 auth guard mutations through `tools/mutation_check.py`
+in fresh copies. `all` runs `fast`, `node`, `independent`, and `mutation`.
+Future `slow`, `nightly`, `replay`, and `stats-baseline` profiles fail clearly
+until implemented.
+
+```sh
+"$PSEG_TEST_PYTHON" -B tools/release_check.py mutation --source . --python "$PSEG_TEST_PYTHON"
+"$PSEG_TEST_PYTHON" -B tools/mutation_check.py --source . --python "$PSEG_TEST_PYTHON" --table tests/mutations/auth_guards.py --json
+"$PSEG_TEST_PYTHON" -B tests/auth_guard_mutations.py
+```
+
+The compatibility command uses the same copy-only engine and honors
+`PSEG_TEST_PYTHON` (default: the current interpreter). Mutation engine exits are
+0 for all detected, 1 for survivors, and 2 for invalid specifications or runs;
+the release profile returns nonzero on either failure. Row-specific expected
+exceptions are declared in the catalog; collection/setup errors never count as
+detections. The frozen `tests/mutations/auth_guards_original.json` fixture was
+extracted from `git show 804451d:tests/auth_guard_mutations.py` when writing the
+catalog tests; runtime tests require no git history.
 
 The existing `freeze --source . --json` and
 `snapshot --source . --dest /absolute/nonexistent/directory` subcommands remain

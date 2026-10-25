@@ -61,7 +61,10 @@ def _source_state(source: Path, paths_from: str | None) -> dict[str, object]:
 
 
 def _child(command: list[str], copy: Path, label: str, timeout: float) -> bool:
-    runtime = copy / ".release-check" / label
+    # Runtime (logs, basetemp, TMPDIR, caches) lives beside the copy, never in it:
+    # a test that snapshots its own copy must see exactly the frozen source.
+    runtime = (copy.parent / "mutation-runtime" if label == "mutation"
+               else copy.parent / "runtime" / label)
     runtime.mkdir(parents=True)
     env = os.environ.copy()
     for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "NODE_OPTIONS", "PYTHONHOME"):
@@ -116,6 +119,13 @@ def _child(command: list[str], copy: Path, label: str, timeout: float) -> bool:
             text, re.MULTILINE,
         )) for name in _NODE_FILES)
         nonempty = counts.get("tests", 0) > wrappers
+    elif label == "mutation":
+        try:
+            report = json.loads(text)
+            counts = {key: int(report[key]) for key in ("detected", "survived", "invalid")}
+            nonempty = report["total"] > 0
+        except (ValueError, KeyError, TypeError):
+            nonempty = False
     else:
         nonempty = True  # Ruff is a lint check, not an expected test suite.
     ok = returncode == 0 and not timed_out and nonempty
@@ -132,9 +142,6 @@ def _run_profiles(args: argparse.Namespace) -> int:
     if args.subcommand in {"slow", "nightly", "replay", "stats-baseline"}:
         _emit_error("profile_not_available", profile=args.subcommand)
         return 1
-    if args.subcommand == "mutation":
-        _emit_error("mutation_pending", message="Mutation profile unavailable until P1-11")
-        return 1
     if args.repeat < 1 or not math.isfinite(args.timeout) or args.timeout <= 0:
         _emit_error("invalid_repeat_or_timeout")
         return 1
@@ -144,7 +151,7 @@ def _run_profiles(args: argparse.Namespace) -> int:
         return 1
     interpreter = str(Path(interpreter).absolute())
     source = Path(args.source).resolve()
-    profiles = ("fast", "node", "independent") if args.subcommand == "all" else (args.subcommand,)
+    profiles = ("fast", "node", "independent", "mutation") if args.subcommand == "all" else (args.subcommand,)
     ok = True
     for iteration in range(1, args.repeat + 1):
         # Explicit external parent: ignore a caller TMPDIR that might point into source.
@@ -169,6 +176,11 @@ def _run_profiles(args: argparse.Namespace) -> int:
                     command = [interpreter, "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider",
                                "-o", "pythonpath=. tests", "-m", marker]
                     passed = _child(command, copy, profile + "-pytest", args.timeout)
+                elif profile == "mutation":
+                    passed = _child([interpreter, "-B", "tools/mutation_check.py",
+                                     "--source", ".", "--python", interpreter,
+                                     "--table", "tests/mutations/auth_guards.py", "--json"],
+                                    copy, "mutation", args.timeout)
                 else:
                     node = shutil.which("node")
                     if node is None:
@@ -183,9 +195,6 @@ def _run_profiles(args: argparse.Namespace) -> int:
                              sort_keys=True), flush=True)
             if not unchanged:
                 raise SnapshotError("source_changed_during_run")
-    if args.subcommand == "all":
-        _emit_error("mutation_pending", message="All is incomplete until P1-11 wires mutation")
-        return 1
     return 0 if ok else 1
 
 

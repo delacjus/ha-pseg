@@ -397,6 +397,11 @@ def run_pytest_in_copy(
         shutil.rmtree(scratch_dir, ignore_errors=True)
 
 
+def _node_matches(node: str, selector: str) -> bool:
+    """Exact node id, or a case of a parametrized parent selector (``sel[...]``)."""
+    return node == selector or node.startswith(selector + "[")
+
+
 def classify_mutant_outcome(
     run_result: dict[str, Any],
     expected_nodes: list[str],
@@ -432,12 +437,7 @@ def classify_mutant_outcome(
 
     # Check for missing nodes
     for exp in expected_nodes:
-        found = False
-        for node in reports_by_node:
-            if node == exp or node.endswith(exp) or exp.endswith(node):
-                found = True
-                break
-        if not found:
+        if not any(_node_matches(node, exp) for node in reports_by_node):
             return "invalid", {"reason": "missing_node", "expected": exp}
 
     if returncode not in (0, 1):
@@ -535,18 +535,17 @@ def check_baseline(
             reports_by_node.setdefault(r.get("nodeid", ""), []).append(r)
 
         for exp in test_nodes:
-            found = False
-            for node, rlist in reports_by_node.items():
-                if node == exp or node.endswith(exp) or exp.endswith(node):
-                    found = True
-                    if not any(r.get("when") == "call" for r in rlist):
-                        return False, f"Baseline detector failed: {node}: no call phase"
-                    for r in rlist:
-                        if r.get("outcome") != "passed" or r.get("wasxfail"):
-                            return False, f"Baseline detector failed: {node} during {r.get('when')}: {r.get('crash_message')}"
-                    break
-            if not found:
+            # A parametrized parent selector expands to every case; all must pass.
+            matched = [n for n in reports_by_node if _node_matches(n, exp)]
+            if not matched:
                 return False, f"Baseline detector not found: {exp}"
+            for node in matched:
+                rlist = reports_by_node[node]
+                if not any(r.get("when") == "call" for r in rlist):
+                    return False, f"Baseline detector failed: {node}: no call phase"
+                for r in rlist:
+                    if r.get("outcome") != "passed" or r.get("wasxfail"):
+                        return False, f"Baseline detector failed: {node} during {r.get('when')}: {r.get('crash_message')}"
 
         return True, "Baseline detectors passed"
     except SnapshotError as exc:

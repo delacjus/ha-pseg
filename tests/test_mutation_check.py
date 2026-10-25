@@ -792,3 +792,52 @@ def test_total_report_limit_preserves_verdict(monkeypatch: pytest.MonkeyPatch) -
     assert report["invalid"] == 100
     assert report["diagnostics_truncated"] is True
     assert len(json.dumps(report)) < 262144
+
+
+def _add_parametrized_detector(repo: Path, body: str) -> None:
+    test = repo / "tests/test_auth.py"
+    test.write_text(test.read_text() + body)
+    _run_git(repo, "commit", "-am", "parametrized detector")
+
+
+def test_parametrized_parent_selector_detects(tmp_path: Path) -> None:
+    """A parent selector expands to every case: baseline all pass, mutant detected."""
+    from tools.mutation_check import run_mutation_check
+
+    repo = _create_synthetic_repo(tmp_path / "repo")
+    _add_parametrized_detector(repo, '''
+
+@pytest.mark.parametrize("role", ["admin", "admin "])
+def test_admin_param(role):
+    assert check_permission(role.strip()) is True
+''')
+    table = _table(tmp_path, test="tests/test_auth.py::test_admin_param")
+    code, report = run_mutation_check(repo, _TEST_PYTHON, table)
+    assert code == 0, report
+    assert report["mutations"][0]["outcome"] == "detected"
+
+
+def test_parametrized_parent_baseline_requires_every_case(tmp_path: Path) -> None:
+    """One failing case of a parent selector makes the baseline invalid."""
+    from tools.mutation_check import run_mutation_check
+
+    repo = _create_synthetic_repo(tmp_path / "repo")
+    _add_parametrized_detector(repo, '''
+
+@pytest.mark.parametrize("role", ["admin", "guest"])
+def test_admin_param(role):
+    assert check_permission(role) is True
+''')
+    table = _table(tmp_path, test="tests/test_auth.py::test_admin_param")
+    code, report = run_mutation_check(repo, _TEST_PYTHON, table)
+    assert code == 2, report
+
+
+def test_selector_prefix_is_not_a_match(tmp_path: Path) -> None:
+    """test_admin must not match test_admin_has_permission (no fuzzy matching)."""
+    from tools.mutation_check import _node_matches
+
+    assert _node_matches("tests/t.py::test_a[x]", "tests/t.py::test_a")
+    assert _node_matches("tests/t.py::test_a", "tests/t.py::test_a")
+    assert not _node_matches("tests/t.py::test_ab", "tests/t.py::test_a")
+    assert not _node_matches("x/tests/t.py::test_a", "tests/t.py::test_a")

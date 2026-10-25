@@ -28,7 +28,9 @@ def source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "    assert origin.VALUE == 42\n"
         "    assert Path(origin.__file__).parent == Path.cwd()\n"
         f"    assert Path.cwd() != Path({str(repo)!r})\n"
-        "    assert Path(os.environ['TMPDIR']).is_relative_to(Path.cwd())\n"
+        "    tmp = Path(os.environ['TMPDIR'])\n"
+        "    assert tmp.is_relative_to(Path.cwd().parent)\n"
+        "    assert not tmp.is_relative_to(Path.cwd())\n"
         "    assert not Path('origin.py').is_symlink()\n\n"
         "@pytest.mark.slow\ndef test_slow():\n    assert False\n\n"
         "@pytest.mark.nightly\ndef test_nightly():\n    assert False\n\n"
@@ -42,6 +44,27 @@ def source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             "const test = require('node:test');\nconst assert = require('node:assert/strict');\n"
             "test('preload', () => { assert.equal(process.env.PSEG_PRELOAD_SENTINEL, 'loaded'); });\n"
         )
+    # Exercise the real copy engine, with a small catalog whose detector also
+    # verifies that both release and mutation imports come from disposable copies.
+    (repo / "tools").mkdir()
+    for name in ("mutation_check.py", "_snapshot.py"):
+        (repo / "tools" / name).write_bytes(
+            (Path(release_check.__file__).parent / name).read_bytes()
+        )
+    (repo / "custom_components" / "pseg").mkdir(parents=True)
+    (repo / "custom_components" / "pseg" / "auth.py").write_text("VALUE = 42\n")
+    (repo / "tests" / "test_mutant.py").write_text(
+        "from pathlib import Path\nfrom custom_components.pseg import auth\n\n"
+        "def test_value():\n"
+        "    assert Path(auth.__file__).is_relative_to(Path.cwd())\n"
+        f"    assert not Path.cwd().is_relative_to(Path({str(repo)!r}))\n"
+        "    assert auth.VALUE == 42\n"
+    )
+    (repo / "tests" / "mutations").mkdir()
+    (repo / "tests" / "mutations" / "auth_guards.py").write_text(
+        'MUTATIONS = [("guard", "auth.py", "VALUE = 42", "VALUE = 0", '
+        '"tests/test_mutant.py::test_value")]\n'
+    )
     for args in (("init", "-b", "main"), ("add", "."),
                  ("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture")):
         subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
@@ -65,7 +88,7 @@ def test_fast_isolated_imports_counts_no_source_writes(source: Path, capsys: pyt
     assert run(source) == 0
     result = records(capsys)
     child = next(row for row in result if row.get("child") == "fast-pytest")
-    assert child["counts"] == {"passed": 1}
+    assert child["counts"] == {"passed": 2}
     assert next(row for row in result if "source_unchanged" in row)["source_unchanged"]
     assert before == sorted(str(p.relative_to(source)) for p in source.rglob("*"))
     assert not list(source.rglob("__pycache__"))
@@ -98,7 +121,7 @@ def test_allowlisted_new_failing_suite(source: Path, tmp_path: Path, capsys: pyt
     assert run(source, "fast", "--paths-from", str(paths)) == 1
     result = records(capsys)
     child = next(row for row in result if row.get("child") == "fast-pytest")
-    assert child["counts"] == {"failed": 1, "passed": 1}
+    assert child["counts"] == {"failed": 1, "passed": 2}
     assert "assert False" in Path(child["log"]).read_text()
     assert next(row for row in result if "source_unchanged" in row)["source_unchanged"]
 
@@ -143,6 +166,7 @@ def test_timeout_keeps_evidence(source: Path, capsys: pytest.CaptureFixture[str]
 
 def test_empty_suite(source: Path, capsys: pytest.CaptureFixture[str]) -> None:
     (source / "tests" / "test_origin.py").write_text("# empty\n")
+    (source / "tests" / "test_mutant.py").write_text("# empty\n")
     assert run(source) == 1
     assert any(row.get("empty_suite") for row in records(capsys))
 
@@ -169,18 +193,18 @@ def test_source_change_detected(source: Path, monkeypatch: pytest.MonkeyPatch, c
     assert "source_changed_during_run" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("profile", ["mutation", "slow", "nightly", "replay", "stats-baseline", "unknown"])
+@pytest.mark.parametrize("profile", ["slow", "nightly", "replay", "stats-baseline", "unknown"])
 def test_unavailable_profiles(source: Path, profile: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert run(source, profile) != 0
     assert capsys.readouterr().err
 
 
-def test_all_runs_available_profiles_but_fails_pending_mutation(source: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert run(source, "all") == 1
+def test_all_runs_every_profile(source: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert run(source, "all") == 0
     captured = capsys.readouterr()
-    assert "mutation_pending" in captured.err and "P1-11" in captured.err
+    assert not captured.err
     children = [json.loads(line)["child"] for line in captured.out.splitlines() if '"child"' in line]
-    assert children == ["ruff", "fast-pytest", "node", "independent-pytest"]
+    assert children == ["ruff", "fast-pytest", "node", "independent-pytest", "mutation"]
 
 
 @pytest.mark.parametrize("options", [("--repeat", "0"), ("--timeout", "0"), ("--timeout", "nan"), ("--python", "/missing/python")])
@@ -214,3 +238,20 @@ def test_node_failure(source: Path, capsys: pytest.CaptureFixture[str]) -> None:
     child = next(row for row in records(capsys) if row.get("child") == "node")
     assert child["counts"]["fail"] == 1
     assert "deliberate failure" in Path(child["log"]).read_text()
+
+
+def test_mutation_real_engine(source: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert run(source, "mutation") == 0
+    result = records(capsys)
+    child = next(row for row in result if row.get("child") == "mutation")
+    report = json.loads(Path(child["log"]).read_text())
+    assert (report["detected"], report["survived"], report["invalid"]) == (1, 0, 0)
+    assert next(row["source_unchanged"] for row in result if "source_unchanged" in row)
+
+
+def test_mutation_failure_propagates(source: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    table = source / "tests/mutations/auth_guards.py"
+    table.write_text(table.read_text().replace('"VALUE = 0"', '"VALUE = 42"'))
+    assert run(source, "mutation") == 1
+    child = next(row for row in records(capsys) if row.get("child") == "mutation")
+    assert json.loads(Path(child["log"]).read_text())["survived"] == 1
