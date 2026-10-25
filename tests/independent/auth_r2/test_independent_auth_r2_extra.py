@@ -1,0 +1,79 @@
+"""R2 extra controls/edges. Synthetic only; no cookie values printed."""
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+from custom_components.pseg.const import (
+    AUTH_REASON_SECURITY_STEP,
+    CONF_PORTAL_COOKIES,
+    DOMAIN,
+)
+from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
+from custom_components.pseg.pseg_client import PsegClient, PsegTransientError
+from tests.independent.auth_r2.test_independent_auth_r2 import METER, SEED, Vendor, make_client
+
+
+async def test_e1_control_transient_poll_keeps_schedule(hass):
+    """Control for D2: an ordinary transient poll failure keeps HA's poll schedule."""
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    client = make_client(Vendor([{"kind": "timeout"}]))
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    unsub = coord.async_add_listener(lambda: None)
+    try:
+        await coord.async_refresh()
+        print("E1_PROOF", {"status": coord.status, "scheduled_poll": coord._unsub_refresh is not None})
+        assert coord._unsub_refresh is not None
+    finally:
+        unsub()
+        coord.stop_keepalive()
+
+
+def test_e2_poll_with_saved_login_posts_password_during_cookie_cooldown():
+    """Documents the plan's permitted fallback: a pending cookie retry window makes the
+    poll use the saved password where HEAD would have retried the cookie itself."""
+    vendor = Vendor([{"kind": "login"}])
+    c = PsegClient(portal_cookies=SEED, email="synthetic@example.invalid", password="synthetic")
+    c.set_expected_meter_ids({METER})
+    c.session.mount("https://", vendor)
+    adm = c._renewal_admission
+    adm.sequences, adm.retry_eligible = 1, True
+    adm.last_sequence_at = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    calls = []
+
+    def fake_login():
+        calls.append("login_local")
+        raise PsegTransientError("synthetic stop after recording the fallback")
+
+    c.login_local = fake_login
+    with pytest.raises(PsegTransientError):
+        c._get_verification_token()
+    print("E2_PROOF", {"password_fallback_calls": len(calls),
+                       "cookie_renewal_http": sum(1 for e in vendor.events if e[2] == "/")})
+    assert calls == ["login_local"]
+
+
+def test_e3_security_step_seen_by_poll_fallback_does_not_stop_keepalive_cookie_retry():
+    """Edge: poll fallback met a security step during the cookie cooldown; once the
+    window passes, the keepalive still sends the transient-earned cookie retry."""
+    vendor = Vendor([{"kind": "login"}, {"kind": "login"}, {"kind": "login"}])
+    c = PsegClient(portal_cookies=SEED, email="synthetic@example.invalid", password="synthetic")
+    c.set_expected_meter_ids({METER})
+    c.session.mount("https://", vendor)
+    adm = c._renewal_admission
+    adm.sequences, adm.retry_eligible = 1, True
+    adm.last_sequence_at = (datetime.now(UTC) - timedelta(minutes=16)).isoformat()
+    c._mark_auth_failure(AUTH_REASON_SECURITY_STEP)
+    try:
+        c.keepalive()
+    except Exception:  # noqa: BLE001 - only the HTTP record matters here
+        pass
+    sent = sum(1 for e in vendor.events if e[2] == "/")
+    print("E3_PROOF", {"cookie_renewal_http_after_security_step": sent,
+                       "terminal": adm.terminal_reason})
+    assert sent == 0, "cookie renewal sent while a security step is pending"
+
+
+pytestmark = pytest.mark.independent

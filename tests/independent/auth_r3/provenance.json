@@ -1,0 +1,44 @@
+{
+  "group": "auth_r3",
+  "status": "active",
+  "reviewer_kb": "0ce46ae2-76f1-4f59-8b73-e744c48e3f62",
+  "expected_collection": 29,
+  "transformation_rationale": [
+    "Promote inert probe to active independent test suite",
+    "Preserve assertion ASTs and parameter domains verbatim",
+    "Apply independent test marker via conftest and module pytestmark",
+    "Inherit root custom integration and statistics fixtures"
+  ],
+  "sources": [
+    {
+      "original_path": "/tmp/pseg-auth-review-r3-opus/probes/test_r3_probes.py",
+      "original_sha256": "d15abd37e1bd78c6fdaa90d2550d7bc37c5fe0f51424a74b2e215395f46273c2",
+      "archived_path": "auth_r3/test_r3_probes.py.txt",
+      "archived_sha256": "d15abd37e1bd78c6fdaa90d2550d7bc37c5fe0f51424a74b2e215395f46273c2",
+      "role": "probe",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-auth-review-r3-opus/probes/conftest.py",
+      "original_sha256": "88fbd609ef7b2b0026e303f4d844642153ebf3a47131ddfecca325f2f13e2934",
+      "archived_path": "auth_r3/conftest.py.txt",
+      "archived_sha256": "88fbd609ef7b2b0026e303f4d844642153ebf3a47131ddfecca325f2f13e2934",
+      "role": "conftest",
+      "collect": false
+    }
+  ],
+  "promoted_files": [
+    {
+      "relative_path": "__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": "conftest.py",
+      "sha256": "c52beac4a349b8d2f90699bc0e31520aa819f424c75e7c8628d2a93ceb9327c8"
+    },
+    {
+      "relative_path": "test_independent_auth_r3.py",
+      "sha256": "52bc0bfe6c667bd7fa676683e5080e35a2b760b1976a1bb1db6c3cf2ef85e96c"
+    }
+  ]
+}

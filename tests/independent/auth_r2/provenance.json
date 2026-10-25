@@ -1,0 +1,66 @@
+{
+  "group": "auth_r2",
+  "status": "active",
+  "reviewer_kb": "0ce46ae2-76f1-4f59-8b73-e744c48e3f62",
+  "expected_collection": 29,
+  "transformation_rationale": [
+    "Promote inert probes to active independent test suite",
+    "Preserve assertion ASTs and parameter domains verbatim",
+    "Preserve C5 expectation history documented in PROVENANCE.md and test_r2_adversarial.py.orig.txt",
+    "Normalize cross-test import to stable tests.independent.auth_r2 package path",
+    "Apply independent test marker via conftest and module pytestmark",
+    "Inherit root custom integration and statistics fixtures"
+  ],
+  "sources": [
+    {
+      "original_path": "/tmp/pseg-auth-review-r2-opus/test_r2_adversarial.py",
+      "original_sha256": "c8c901aefe7f84905f947e47e080dbc9a79008233a9d0c089f1cbc61be5324dd",
+      "archived_path": "auth_r2/test_r2_adversarial.py.txt",
+      "archived_sha256": "c8c901aefe7f84905f947e47e080dbc9a79008233a9d0c089f1cbc61be5324dd",
+      "role": "probe",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-auth-review-r2-opus/test_r2_extra.py",
+      "original_sha256": "d9bcb1cf71f12b97aac8235f7c95a7e85b89abf14d6f0d8c079b1932f2e60ff6",
+      "archived_path": "auth_r2/test_r2_extra.py.txt",
+      "archived_sha256": "d9bcb1cf71f12b97aac8235f7c95a7e85b89abf14d6f0d8c079b1932f2e60ff6",
+      "role": "probe",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-auth-review-r2-opus/test_r2_adversarial.py.orig",
+      "original_sha256": "46ffaf1032f88a22dbe752a583f4acb646cc80e6b3df98468ccb34cf3e14de3d",
+      "archived_path": "auth_r2/test_r2_adversarial.py.orig.txt",
+      "archived_sha256": "46ffaf1032f88a22dbe752a583f4acb646cc80e6b3df98468ccb34cf3e14de3d",
+      "role": "historical_orig",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-auth-review-r2-opus/conftest.py",
+      "original_sha256": "88fbd609ef7b2b0026e303f4d844642153ebf3a47131ddfecca325f2f13e2934",
+      "archived_path": "auth_r2/conftest.py.txt",
+      "archived_sha256": "88fbd609ef7b2b0026e303f4d844642153ebf3a47131ddfecca325f2f13e2934",
+      "role": "conftest",
+      "collect": false
+    }
+  ],
+  "promoted_files": [
+    {
+      "relative_path": "__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": "conftest.py",
+      "sha256": "d608ce0f00c8059b73e87002cfa6321c44fcf14fefae9ad37811296da3f20ef3"
+    },
+    {
+      "relative_path": "test_independent_auth_r2.py",
+      "sha256": "6148a7f8fdfe33af2f87707ffa9df63519cde66d617f09c7dfa52c5b21bd6c0b"
+    },
+    {
+      "relative_path": "test_independent_auth_r2_extra.py",
+      "sha256": "c34a09de377e5895913738d726578bd31e30c5eab7b18de05635106febdb6437"
+    }
+  ]
+}
