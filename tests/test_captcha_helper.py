@@ -143,6 +143,7 @@ def test_extension_archive_absent_when_any_member_is_missing(
     assert build_extension_archive() is None
 
 
+@pytest.mark.allow_loopback
 async def test_helper_page_is_public_and_builds_bookmarklet(
     hass: HomeAssistant, hass_client_no_auth, monkeypatch, tmp_path: Path
 ) -> None:
@@ -167,6 +168,7 @@ async def test_helper_page_is_public_and_builds_bookmarklet(
     assert response.headers["Cache-Control"] == "no-store"
 
 
+@pytest.mark.allow_loopback
 async def test_helper_page_survives_missing_script(
     hass: HomeAssistant, hass_client_no_auth, monkeypatch, tmp_path: Path
 ) -> None:
@@ -180,6 +182,7 @@ async def test_helper_page_survives_missing_script(
     assert "bookmarklet cannot be built" in await response.text()
 
 
+@pytest.mark.allow_loopback
 async def test_extension_zip_is_public_fixed_and_ignores_request_data(
     hass: HomeAssistant, hass_client_no_auth
 ) -> None:
@@ -220,6 +223,7 @@ async def test_extension_zip_is_public_fixed_and_ignores_request_data(
             ).read_bytes()
 
 
+@pytest.mark.allow_loopback
 async def test_extension_zip_missing_file_returns_generic_error(
     hass: HomeAssistant, hass_client_no_auth, monkeypatch, tmp_path: Path
 ) -> None:
