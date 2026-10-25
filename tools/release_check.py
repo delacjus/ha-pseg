@@ -146,7 +146,9 @@ def _child(command: list[str], copy: Path, label: str, timeout: float) -> bool:
         "timeout": timed_out, "empty_suite": not nonempty, "log": str(log),
     }, sort_keys=True), flush=True)
     if not ok:
-        print(text[-6000:], file=sys.stderr)
+        # A timeout's faulthandler dump (Python stacks, then a long C stack) needs
+        # far more than the usual tail to show which test was running.
+        print(text[-(200_000 if timed_out else 6000):], file=sys.stderr)
     return ok
 
 
