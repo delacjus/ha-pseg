@@ -182,11 +182,6 @@ async def test_clock_advance_causes_scheduled_dashboard_dispatch(
         assert "/Dashboard" in latest.url
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="Flaky ~1 in 5: keepalive fires but sometimes sends no Dashboard GET; "
-    "diagnosis pending (KB pseg-suite-keepalive-boundary-flake-20261025)",
-)
 async def test_clock_advance_keepalive_boundary_and_consistency(
     hass: HomeAssistant,
     freezer: Any,

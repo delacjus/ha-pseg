@@ -81,7 +81,9 @@ class ClockDriver:
     ) -> datetime:
         """Advance simulated clock by delta and await completion of scheduled HA callbacks."""
         target_dt = self.advance(delta, fire_time=fire_time, fire_all=fire_all)
-        await self.hass.async_block_till_done()
+        # Interval listeners (the keepalive) run as background tasks; without this
+        # the executor request can still be in flight when the caller asserts.
+        await self.hass.async_block_till_done(wait_background_tasks=True)
         return target_dt
 
     def fire_time_changed(
