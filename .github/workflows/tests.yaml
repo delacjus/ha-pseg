@@ -7,7 +7,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     strategy:
       matrix:
         python-version: ["3.14"]
@@ -33,7 +33,9 @@ jobs:
 
       - name: Run release check (fast)
         run: |
-          python tools/release_check.py fast --source . --python "$(which python)"
+          # 2-vCPU runners take ~460-600 s for the fast suite (vs ~3 min locally);
+          # the 600 s default child timeout was killing healthy runs.
+          python tools/release_check.py fast --source . --python "$(which python)" --timeout 1500
 
       - name: Collect evidence logs on failure
         if: failure()
