@@ -1,0 +1,273 @@
+"""Independent R7B synthetic response/provenance and metadata boundary probes."""
+from __future__ import annotations
+
+import copy
+from datetime import UTC, datetime
+import threading
+
+import pytest
+from homeassistant.util import dt as dt_util
+
+from custom_components.pseg.const import DOMAIN, CONF_KNOWN_METER_IDS, PORTAL_HOST
+from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
+from custom_components.pseg.pseg_client import PsegClient, PsegTransientError
+from custom_components.pseg.renewal_admission import rearm_entry_admission
+from test_r6_probes import R6Portal, METER, POISON, build, daily_payload, hourly_payload, poisoned
+
+
+@pytest.fixture(autouse=True)
+def _enabled(enable_custom_integrations):
+    yield
+
+
+class DispatchPortal(R6Portal):
+    def __init__(self):
+        super().__init__()
+        self.poison_dispatches = []
+
+    def send(self, request, **kwargs):
+        if POISON in request.headers.get("Cookie", ""):
+            self.poison_dispatches.append((request.method, request.url.split("?")[0].rsplit("/", 1)[-1]))
+        return super().send(request, **kwargs)
+
+
+async def follow_through_cold(hass, client, entry, coord, portal, cookie):
+    trail = []
+    await coord._async_keepalive(dt_util.utcnow())
+    trail.append(poisoned(entry.data.get("cookies"), cookie))
+    for _ in range(2):
+        await coord._async_update_data()
+        trail.append(poisoned(entry.data.get("cookies"), cookie))
+    coord.stop_keepalive()
+    hass.data.pop(f"{DOMAIN}_renewal_runtimes", None)
+    cold = PsegClient(cookie_list=copy.deepcopy(entry.data.get("cookies")))
+    cold.session.mount("https://", portal)
+    cold_coord = PsegDataUpdateCoordinator(hass, cold, dict(entry.data), config_entry=entry)
+    try:
+        await cold_coord._async_update_data()
+        trail.append(poisoned(entry.data.get("cookies"), cookie))
+    finally:
+        cold_coord.stop_keepalive()
+    return trail
+
+
+MALFORMED = {
+    "meter_data_integer": {"Data": {"series": [{"name": f"Meter #{METER}", "data": 7}]}},
+    "meter_data_bool": {"Data": {"series": [{"name": f"Meter #{METER}", "data": True}]}},
+    "ajax_results_integer": {"Data": None, "AjaxResults": 7},
+    "ajax_results_bool": {"Data": None, "AjaxResults": True},
+}
+
+
+@pytest.mark.parametrize("shape", MALFORMED)
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe", "r6_aux"])
+async def test_backfill_parser_fault_quarantines_every_cookie(hass, shape, cookie):
+    portal = DispatchPortal()
+    portal.daily.extend([("__default__", ()), (MALFORMED[shape], [f"{cookie}={POISON}; Path=/"])])
+    client, entry, coord = build(hass, portal)
+    imported = []
+
+    async def no_stats(records, **kwargs):
+        imported.append(len(records))
+
+    coord.async_record_statistics = no_stats
+    try:
+        outcome = None
+        try:
+            await coord.async_backfill_history("2026-01-01", "2026-10-20")
+        except Exception as err:
+            outcome = type(err).__name__
+        assert portal.count("GET", "/Dashboard/ChartData") == 2
+        live = poisoned(client.export_cookies(), cookie)
+        persisted = poisoned(entry.data.get("cookies"), cookie)
+        snap = client.pending_confirmed_snapshot()
+        pending = snap is not None and poisoned(snap["cookies"], cookie)
+        trail = await follow_through_cold(hass, client, entry, coord, portal, cookie)
+        assert not (live or persisted or pending or any(trail) or portal.poison_dispatches), (
+            f"shape={shape} outcome={outcome} live={live} persisted={persisted} "
+            f"pending={pending} follow_persisted={trail} bad_dispatch_count={len(portal.poison_dispatches)} "
+            f"imports={imported}"
+        )
+    finally:
+        coord.stop_keepalive()
+
+
+@pytest.mark.parametrize("stage", ["daily", "hourly", "backfill", "renewal"])
+@pytest.mark.parametrize("known_points", [[], [{"y": "invalid", "hs": {"start": "bad"}}]])
+async def test_empty_expected_meter_does_not_prove_unrelated_records(hass, stage, known_points):
+    portal = DispatchPortal()
+    payload = hourly_payload("99999") if stage == "hourly" else daily_payload(meter="99999")
+    payload["Data"]["series"].insert(0, {"name": f"Meter #{METER}", "data": known_points})
+    marked = (payload, [f"MM_RememberMe={POISON}; Path=/"])
+    if stage == "hourly":
+        portal.hourly.append(marked)
+    else:
+        portal.daily.append(marked)
+    if stage == "renewal":
+        portal.dash.extend([{"kind": "login"}, {"kind": "dash"}])
+    client, entry, coord = build(hass, portal)
+    imported = []
+
+    async def no_stats(records, **kwargs):
+        imported.append(len(records))
+
+    coord.async_record_statistics = no_stats
+    try:
+        outcome = "ok"
+        try:
+            if stage == "backfill":
+                await coord.async_backfill_history("2026-10-01", "2026-10-20")
+            elif stage == "renewal":
+                await coord._async_keepalive(dt_util.utcnow())
+            else:
+                await coord._async_update_data()
+        except Exception as err:
+            outcome = type(err).__name__
+        after = poisoned(entry.data.get("cookies"), "MM_RememberMe")
+        renewals = client.sso_renewals
+        sequences = client._renewal_admission.sequences
+        trail = await follow_through_cold(hass, client, entry, coord, portal, "MM_RememberMe")
+        assert not (after or any(trail) or portal.poison_dispatches), (
+            f"stage={stage} outcome={outcome} persisted={after} follow={trail} "
+            f"renewals={renewals} sequences={sequences} bad_dispatch_count={len(portal.poison_dispatches)}"
+        )
+    finally:
+        coord.stop_keepalive()
+
+
+async def test_checkpoint_old_ack_preserves_new_publish(hass):
+    portal = DispatchPortal()
+    client, entry, coord = build(hass, portal)
+    try:
+        await coord._async_update_data()
+        client._note_confirmed_generation()
+        first = client.pending_confirmed_snapshot()
+        client.session.cookies.set("r7_meta", "new", domain=PORTAL_HOST, path="/")
+        client._note_confirmed_generation()
+        latest = client.pending_confirmed_snapshot()
+        assert latest["id"] > first["id"]
+        client.clear_confirmed_snapshot(first["id"])
+        assert client.pending_confirmed_snapshot() is latest
+    finally:
+        coord.stop_keepalive()
+
+
+async def test_same_cookie_human_epoch_retires_during_own_write(hass):
+    portal = DispatchPortal()
+    client, entry, coord = build(hass, portal)
+    try:
+        await coord._async_update_data()
+        original = hass.config_entries.async_update_entry
+        seen = []
+
+        def spy(target, **kwargs):
+            result = original(target, **kwargs)
+            rearm_entry_admission(hass, entry.entry_id, None, False, datetime.now(UTC))
+            seen.append(coord._renewal_runtime.is_active(coord._renewal_token))
+            return result
+
+        hass.config_entries.async_update_entry = spy
+        exported = [*copy.deepcopy(entry.data["cookies"]), {"name": "r7_meta", "value": "new", "domain": PORTAL_HOST, "path": "/", "secure": True}]
+        try:
+            coord._write_cookie_handoff(exported, frozenset({"MM_SID"}))
+        finally:
+            hass.config_entries.async_update_entry = original
+        before = len(portal.events)
+        with pytest.raises(PsegTransientError):
+            await hass.async_add_executor_job(client.ensure_session)
+        assert seen == [False]
+        assert len(portal.events) == before
+        assert coord._jar_writing_target is None
+    finally:
+        coord.stop_keepalive()
+
+
+async def test_rejected_daily_identity_cannot_teach_entry_new_account(hass):
+    portal = DispatchPortal()
+    portal.daily.append((daily_payload(meter="99999"), ()))
+    portal.hourly.append(({"Data": {"series": []}}, ()))
+    client, entry, coord = build(hass, portal)
+    try:
+        data = await coord._async_update_data()
+        known = set(entry.data.get(CONF_KNOWN_METER_IDS, []))
+        history = data["history_14d"]
+        coord.stop_keepalive()
+        hass.data.pop(f"{DOMAIN}_renewal_runtimes", None)
+        cold = PsegClient(cookie_list=copy.deepcopy(entry.data.get("cookies")))
+        cold.session.mount("https://", portal)
+        cold_coord = PsegDataUpdateCoordinator(hass, cold, dict(entry.data), config_entry=entry)
+        portal.daily.append((daily_payload(meter="99999"), [f"MM_RememberMe={POISON}; Path=/"]))
+        portal.hourly.append(({"Data": {"series": []}}, ()))
+        try:
+            await cold_coord._async_update_data()
+            accepted = poisoned(entry.data.get("cookies"), "MM_RememberMe")
+        finally:
+            cold_coord.stop_keepalive()
+        assert "99999" not in known and not history and not accepted, (
+            f"rejected daily identity was published: known_added={'99999' in known} "
+            f"unrelated_records={len(history)} cold_cookie_accepted={accepted}"
+        )
+    finally:
+        coord.stop_keepalive()
+
+
+@pytest.mark.parametrize("stage", ["daily", "hourly", "backfill", "renewal"])
+async def test_known_replacement_meter_with_empty_predecessor_remains_valid(hass, stage):
+    portal = DispatchPortal()
+    payload = hourly_payload("24680") if stage == "hourly" else daily_payload(meter="24680")
+    payload["Data"]["series"].insert(0, {"name": f"Meter #{METER}", "data": []})
+    marked = (payload, [f"MM_RememberMe={POISON}; Path=/"])
+    (portal.hourly if stage == "hourly" else portal.daily).append(marked)
+    if stage == "renewal":
+        portal.dash.extend([{"kind": "login"}, {"kind": "dash"}])
+    client, entry, coord = build(hass, portal)
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_KNOWN_METER_IDS: [METER, "24680"]})
+    client.set_expected_meter_ids({METER, "24680"})
+
+    async def no_stats(records, **kwargs):
+        return None
+
+    coord.async_record_statistics = no_stats
+    try:
+        if stage == "backfill":
+            await coord.async_backfill_history("2026-10-01", "2026-10-20")
+        elif stage == "renewal":
+            await coord._async_keepalive(dt_util.utcnow())
+        else:
+            await coord._async_update_data()
+        assert poisoned(entry.data.get("cookies"), "MM_RememberMe")
+    finally:
+        coord.stop_keepalive()
+
+
+@pytest.mark.parametrize("after_assignment", [False, True])
+async def test_own_write_failure_keeps_actual_baseline_coherent(hass, after_assignment):
+    portal = DispatchPortal()
+    client, entry, coord = build(hass, portal)
+    try:
+        await coord._async_update_data()
+        before = copy.deepcopy(entry.data["cookies"])
+        exported = [*before, {"name": "r7_meta", "value": "new", "domain": PORTAL_HOST, "path": "/", "secure": True}]
+        original = hass.config_entries.async_update_entry
+        original_notify = hass.config_entries._async_save_and_notify
+
+        def fault(target, **kwargs):
+            raise RuntimeError("synthetic entry handoff failure")
+
+        if after_assignment:
+            hass.config_entries._async_save_and_notify = fault
+        else:
+            hass.config_entries.async_update_entry = fault
+        try:
+            with pytest.raises(RuntimeError):
+                coord._write_cookie_handoff(exported, frozenset({"MM_SID"}))
+        finally:
+            hass.config_entries.async_update_entry = original
+            hass.config_entries._async_save_and_notify = original_notify
+        assert coord._jar_writing_target is None
+        assert not coord._jar_replaced(), (
+            f"own write exception falsely retired current owner: assigned={after_assignment} "
+            f"actual_is_export={entry.data['cookies'] == exported} baseline_is_export={coord._jar_baseline == exported}"
+        )
+    finally:
+        coord.stop_keepalive()

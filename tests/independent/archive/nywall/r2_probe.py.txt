@@ -1,0 +1,101 @@
+"""Offline R2 review: adapted R1 controls and independently extended adversarial cases."""
+from pathlib import Path
+import ast
+import asyncio
+from copy import deepcopy
+from datetime import timedelta
+import json
+from types import SimpleNamespace
+
+old = Path('/tmp/pseg-review-nywall-r1/probe.py').read_text()
+adapted = old.replace("run('fallback_25_aware', fall_aware, {fall: 25}, 0, 'label_mismatch')", "run('fallback_25_aware', fall_aware, {fall: 25}, 0, 'dst_ambiguous')")
+adapted = adapted.replace("assert all(r['interval_ok'] for r in new['hourly_records']), kind", "assert not any(r['interval_ok'] for r in new['hourly_records']), kind")
+adapted = adapted.replace("before=24 rejected; after=24 accepted", "before=24 rejected; after=24 rejected (R2 closure)")
+exec(compile(adapted, '<R1-controls-with-R2-expectations>', 'exec'), globals())
+
+for name, changes, reason in [
+    ('iso_date_only_end', {'end': '2026-10-15'}, 'timestamp_semantics_unverified'),
+    ('end_surrounding_text', {'end': 'from 10/15/2026 through'}, 'timestamp_semantics_unverified'),
+    ('end_missing_zero', {'end': '1/15/2026'}, 'timestamp_semantics_unverified'),
+    ('start_missing_zero', {'start': '1/15/2026'}, 'timestamp_semantics_unverified'),
+    ('previous_start_same_end', {'start': '10/14/2026', 'end': '10/15/2026'}, 'label_mismatch'),
+    ('missing_both_labels', {'start': None, 'end': None}, 'timestamp_semantics_unverified'),
+    ('end_basic_naive_datetime', {'end': '20261015T230000'}, 'timestamp_semantics_unverified'),
+    ('start_basic_aware_wrong', {'start': '20261015T230000-0400'}, 'label_mismatch'),
+]:
+    points = deepcopy(BASE)
+    for p in points:
+        p['hs'].update(changes)
+    run('R2_' + name, points, {DAY: TOTAL}, 0, reason)
+
+short_day = date(2026, 1, 5)
+for field in ('start', 'end'):
+    points = [point(short_day, h, 1) for h in range(24)]
+    for p in points:
+        p['hs'][field] = '1/05/2026'
+    run('R2_single_digit_month_' + field, points, {short_day: 24}, 0, 'timestamp_semantics_unverified')
+
+for name, mutate in [
+    ('missing_labels', lambda p: p.pop('hs')),
+    ('wrong_aware_end', lambda p: p['hs'].update(end='2026-10-15T12:00:00-04:00')),
+]:
+    other = deepcopy(BASE)
+    for p in other:
+        mutate(p)
+    for rev in (False, True):
+        series = [{'name': 'Meter #1', 'data': BASE}, {'name': 'Meter #2', 'data': other}]
+        if rev:
+            series.reverse()
+        parsed = client._parse_hourly_chart({'Data': {'series': series}})
+        checks = validate_hourly_days(parsed['hourly_records'], {DAY: TOTAL * 2}, datetime(2028, 1, 1, tzinfo=UTC), granularity=parsed['hourly_granularity'], days=[DAY])
+        check = checks[DAY]
+        assert not check.complete and check.reason == 'timestamp_semantics_unverified', (name, rev, check)
+        assert not any(p['interval_ok'] for p in parsed['hourly_records'])
+        print('R2_MIXED', name, 'reversed', rev, 'complete', check.complete, 'reason', check.reason)
+
+# Positive controls for legitimate aware labels and the allowed date-end convention.
+for name, mutate in [
+    ('matching_aware', lambda p: p.update(hs={'start': ny_wall_ms_to_utc(p['x'])[0].isoformat(), 'end': (ny_wall_ms_to_utc(p['x'])[0] + timedelta(hours=1)).isoformat()})),
+    ('strict_next_date_end', lambda p: p['hs'].update(end='10/16/2026')),
+    ('surrounding_whitespace', lambda p: p.update(hs={'start': ' 10/15/2026 ', 'end': '\n10/15/2026\t'})),
+]:
+    points = deepcopy(BASE)
+    for p in points:
+        mutate(p)
+    run('R2_' + name, points, {DAY: TOTAL}, 1)
+
+# Execute the exact captcha form methods in an isolated AST harness: no HA runtime.
+source = (ROOT / 'custom_components/pseg/config_flow.py').read_text()
+tree = ast.parse(source)
+names = {'_helper_url', '_async_show_captcha_form', 'async_step_captcha'}
+methods = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in names]
+module = ast.fix_missing_locations(ast.Module(body=methods, type_ignores=[]))
+env = {'_CAPTCHA_STEP_ID': 'captcha', 'HELPER_URL_PATH': '/api/pseg/helper.zip',
+       'PORTAL_BASE_URL': 'https://portal.example', 'CONF_CAPTCHA_RESPONSE': 'captcha_response',
+       'CONF_CAPTCHA_CANCEL': 'captcha_cancel', 'vol': SimpleNamespace(Schema=lambda x: x, Optional=lambda x, **kw: x),
+       'TextSelector': lambda x: x, 'TextSelectorConfig': lambda **kw: kw,
+       'TextSelectorType': SimpleNamespace(PASSWORD='password')}
+exec(compile('from __future__ import annotations\n', '<annotations>', 'exec'), env)
+exec(compile(module, '<captcha-methods>', 'exec', flags=__import__('__future__').annotations.compiler_flag), env)
+class Harness:
+    _helper_url = env['_helper_url']
+    _async_show_captcha_form = env['_async_show_captcha_form']
+    async_step_captcha = env['async_step_captcha']
+    hass = SimpleNamespace(config=SimpleNamespace(internal_url=None, external_url=None))
+    def _attempt_expired(self, pending):
+        return False
+    def async_show_form(self, **kwargs):
+        return kwargs
+
+for origin in ('user', 'reauth_confirm', 'reconfigure'):
+    h = Harness()
+    h._captcha_pending = {'step_id': origin}
+    form = asyncio.run(h.async_step_captcha())
+    assert form['step_id'] == 'captcha'
+    for fname in ['strings.json', 'translations/en.json']:
+        data = json.loads((ROOT / 'custom_components/pseg' / fname).read_text())
+        desc = data['config']['step']['captcha']['description']
+        rendered = desc.format(**form['description_placeholders'])
+        assert not __import__('re').search(r'\{[^{}]+\}', rendered)
+    print('CAPTCHA', origin, 'all four placeholders rendered')
+print('R2_PROBE_PASS')

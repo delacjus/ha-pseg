@@ -1,0 +1,100 @@
+"""R6 human-flow controls through the real client + new owner fence (no mocks of
+renew_remember_me/fetch_energy_data): cookie-only first sign-in, and a cookie-only
+human reauth that is the only thing clearing a durable CAPTCHA terminal."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from homeassistant.config_entries import SOURCE_USER
+from homeassistant.data_entry_flow import FlowResultType
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+import custom_components.pseg as pkg
+import custom_components.pseg.config_flow as flow_mod
+from custom_components.pseg.const import (
+    AUTH_REASON_CAPTCHA_REQUIRED,
+    CONF_OKTA_COOKIES,
+    CONF_PORTAL_COOKIES,
+    CONF_RENEWAL_ADMISSION,
+    DOMAIN,
+)
+from custom_components.pseg.pseg_client import PsegCaptchaRequired, PsegClient
+from test_r6_probes import METER, SEED, R6Portal
+
+REAL_CLIENT = PsegClient
+
+
+@pytest.fixture(autouse=True)
+def _enabled(enable_custom_integrations):
+    yield
+
+
+def factory(portal, made):
+    def make(**kwargs):
+        client = REAL_CLIENT(**kwargs)
+        client.session.mount("https://", portal)
+        made.append(client)
+        return client
+    return make
+
+
+async def test_cookie_only_first_sign_in_real_path(hass, monkeypatch):
+    portal = R6Portal()
+    made = []
+    monkeypatch.setattr(flow_mod, "PsegClient", factory(portal, made))
+    monkeypatch.setattr(pkg, "async_setup_entry", lambda *a, **k: _true())
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER},
+        data={CONF_OKTA_COOKIES: "", CONF_PORTAL_COOKIES: "MM_SID=r6-a; MM_RememberMe=r6-b"},
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY, result
+    assert result["result"].unique_id == METER
+    assert any(c["name"] == "MM_RememberMe" for c in result["data"]["cookies"])
+    assert portal.count("GET", "/Dashboard") >= 2 and portal.count("GET", "/Dashboard/ChartData") >= 1
+    assert made and all(c._renewal_runtime is None for c in made)
+
+
+async def _true():
+    return True
+
+
+async def test_human_cookie_reauth_is_only_captcha_reset(hass, monkeypatch):
+    portal = R6Portal()
+    made = []
+    monkeypatch.setattr(pkg, "PsegClient", factory(portal, made))
+    monkeypatch.setattr(flow_mod, "PsegClient", factory(portal, made))
+    clock = (datetime.now(UTC) - timedelta(minutes=5)).isoformat()
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={
+        CONF_PORTAL_COOKIES: SEED,
+        CONF_RENEWAL_ADMISSION: {"sequences": 1, "last_sequence_at": clock,
+                                 "terminal_reason": AUTH_REASON_CAPTCHA_REQUIRED, "retry_eligible": False},
+    })
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    old = hass.data[DOMAIN][entry.entry_id]
+    # Durable terminal: an ordinary keepalive must refuse without HTTP.
+    before = len(portal.events)
+    with pytest.raises(PsegCaptchaRequired):
+        await hass.async_add_executor_job(old.client.keepalive)
+    assert len(portal.events) == before
+    # Ordinary reload keeps the terminal (shared runtime), no automatic reset.
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    mid = hass.data[DOMAIN][entry.entry_id]
+    assert mid.client._renewal_admission.terminal_reason == AUTH_REASON_CAPTCHA_REQUIRED
+    # Completed human cookie-only sign-in for the same account clears it.
+    result = await entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_OKTA_COOKIES: "", CONF_PORTAL_COOKIES: "MM_SID=r6-h; MM_RememberMe=r6-h-gen"},
+    )
+    assert result["type"] == FlowResultType.ABORT and result["reason"] == "reauth_successful", result
+    await hass.async_block_till_done()
+    assert not mid._renewal_runtime.is_active(mid._renewal_token), "pre-human owner still active"
+    state = entry.data[CONF_RENEWAL_ADMISSION]
+    assert state["terminal_reason"] is None and state["sequences"] == 0
+    assert state["last_sequence_at"] is not None and datetime.fromisoformat(state["last_sequence_at"]) >= datetime.fromisoformat(clock)
+    new = hass.data[DOMAIN][entry.entry_id]
+    assert new is not mid and new._renewal_runtime.is_active(new._renewal_token)
+    assert any(c["value"] == "r6-h-gen" for c in entry.data["cookies"] if c["name"] == "MM_RememberMe")
+    await hass.config_entries.async_unload(entry.entry_id)

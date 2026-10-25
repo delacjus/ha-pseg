@@ -1,0 +1,530 @@
+"""R2 independent adversarial probes (Claude Opus reviewer). Synthetic, no network.
+
+Never prints cookie values: only booleans, counts and fixed reason strings.
+Each Vendor is an independent requests BaseAdapter (no requests_mock global lock).
+"""
+import asyncio
+from datetime import UTC, datetime, timedelta
+from http.client import HTTPMessage
+import json
+import threading
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from urllib.parse import urlparse
+
+import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+import requests
+from requests.adapters import BaseAdapter
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.helpers import issue_registry as ir
+
+import custom_components.pseg as pkg
+from custom_components.pseg.const import (
+    CONF_MYMETER_EMAIL,
+    CONF_MYMETER_PASSWORD,
+    CONF_PORTAL_COOKIES,
+    CONF_RENEWAL_ADMISSION,
+    DOMAIN,
+    PORTAL_BASE_URL,
+    PORTAL_HOST,
+)
+from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
+from custom_components.pseg.pseg_client import (
+    PsegClient,
+    PsegOktaSessionExpired,
+    PsegTransientError,
+)
+from custom_components.pseg.renewal_admission import (
+    rearm_entry_admission,
+    renewal_runtime_for,
+)
+
+METER = "12345"
+TOKEN_HTML = '<html><input name="__RequestVerificationToken" value="synthetic-af"/></html>'
+SEED = "MM_SID=synthetic-dead; MM_RememberMe=synthetic-gen-a"
+
+
+def chart(meter=METER):
+    return {"Data": {"series": [{"name": f"Meter #{meter}", "data": [
+        {"y": 4.0, "hs": {"start": "10/22/2026"}}]}]}}
+
+
+class Vendor(BaseAdapter):
+    """Scripted portal. dashboard: list of specs consumed per GET /Dashboard."""
+
+    def __init__(self, dashboard, *, chart_mode="ok", meter=METER):
+        super().__init__()
+        self.dashboard = list(dashboard)
+        self.chart_mode = chart_mode
+        self.meter = meter
+        self.events = []
+        self.entered = {}
+        self.release = {}
+
+    def gate(self, name):
+        self.entered[name] = threading.Event()
+        self.release[name] = threading.Event()
+
+    def _wait(self, name):
+        if name in self.entered:
+            self.entered[name].set()
+            assert self.release[name].wait(8), f"synthetic gate {name} timeout"
+
+    def send(self, request, **kwargs):
+        u = urlparse(request.url)
+        self.events.append((request.method, u.hostname, u.path))
+        r = requests.Response()
+        r.status_code = 200
+        r.url = request.url
+        r.request = request
+        r._content = b"ok"
+        r._content_consumed = True
+        msg = HTTPMessage()
+        r.raw = SimpleNamespace(_original_response=SimpleNamespace(msg=msg))
+        if u.hostname != PORTAL_HOST:
+            raise AssertionError("non-portal host contacted")
+        if request.method == "GET" and u.path == "/Dashboard":
+            spec = self.dashboard.pop(0) if self.dashboard else {"kind": "dash"}
+            if spec.get("gate"):
+                self._wait(spec["gate"])
+            for header in spec.get("set_cookie", ()):
+                msg.add_header("Set-Cookie", header)
+            kind = spec["kind"]
+            if kind == "login":
+                r.url = PORTAL_BASE_URL + "/"
+            elif kind == "dash":
+                r._content = TOKEN_HTML.encode()
+            elif kind == "maint":
+                r.url = PORTAL_BASE_URL + "/Maintenance"
+                r._content = b"<html>maintenance</html>"
+            elif kind == "status":
+                r.status_code = spec["status"]
+            elif kind == "timeout":
+                raise requests.Timeout("synthetic dashboard timeout")
+            else:
+                raise AssertionError("bad spec")
+        elif request.method == "GET" and u.path == "/":
+            pass
+        elif request.method == "POST" and u.path == "/Dashboard/Chart":
+            if self.chart_mode == "timeout":
+                raise requests.Timeout("synthetic chart timeout")
+        elif request.method == "GET" and u.path == "/Dashboard/ChartData":
+            r._content = json.dumps(chart(self.meter)).encode()
+        else:
+            raise AssertionError(f"unexpected synthetic route {request.method} {u.path}")
+        return r
+
+    def close(self):
+        pass
+
+    def posts_outside_chart(self):
+        return [e for e in self.events if e[0] == "POST" and e[2] != "/Dashboard/Chart"]
+
+
+def make_client(vendor, **kwargs):
+    c = PsegClient(portal_cookies=SEED, **kwargs)
+    c.set_expected_meter_ids({METER})
+    c.session.mount("https://", vendor)
+    return c
+
+
+def jar_state(c):
+    """(names present, remember-me values) without exposing values outside the test."""
+    names = sorted((ck.name, ck.value) for ck in c.session.cookies)
+    return names
+
+
+def sid_values(c):
+    return {ck.value for ck in c.session.cookies if ck.name == "MM_SID"}
+
+
+def rm_values(c):
+    return c._remember_me_values()
+
+
+# --------------------------------------------------------------------------------------
+# D1: poll rolls a VERIFIED renewal back to the pre-probe (dead) jar
+# --------------------------------------------------------------------------------------
+@pytest.mark.parametrize("second", [
+    {"kind": "maint"},
+    {"kind": "status", "status": 429},
+    {"kind": "status", "status": 404},
+])
+@pytest.mark.parametrize("rotate", [False, True])
+def test_d1_poll_keeps_verified_renewal_after_post_renewal_hiccup(second, rotate):
+    renew_cookies = ["MM_SID=synthetic-renewed; Path=/"]
+    if rotate:
+        renew_cookies.append("MM_RememberMe=synthetic-gen-b; Path=/")
+    vendor = Vendor([
+        {"kind": "login"},                               # poll probe: expired
+        {"kind": "dash", "set_cookie": renew_cookies},  # Remember Me renewal
+        dict(second),                                    # second token GET hiccup
+    ])
+    c = make_client(vendor)
+    with pytest.raises(PsegTransientError):
+        c._get_verification_token()
+    adm = c._renewal_admission
+    proof = {
+        "renewal_verified": c.sso_renewals == 1 or adm.sequences == 0 or not adm.retry_eligible,
+        "jar_has_renewed_sid": "synthetic-renewed" in sid_values(c),
+        "jar_has_dead_sid": "synthetic-dead" in sid_values(c),
+        "rm_is_gen_b": rm_values(c) == frozenset({"synthetic-gen-b"}),
+        "seen_is_gen_b": c._remember_me_seen == frozenset({"synthetic-gen-b"}),
+        "cookies_confirmed": c.cookies_confirmed,
+        "sso_renewals": c.sso_renewals,
+        "sequences": adm.sequences,
+        "retry_eligible": adm.retry_eligible,
+    }
+    print("D1_PROOF", second, "rotate" if rotate else "same", proof)
+    assert proof["jar_has_renewed_sid"], "verified renewal discarded; dead pre-probe jar restored"
+    if rotate:
+        assert proof["rm_is_gen_b"], "verified rotated Remember Me discarded while budget rearmed for it"
+
+
+def test_d1_followup_spurious_rotation_rearm_or_forced_reauth():
+    """After D1 rollback with rotation: the next verified renewal of the OLD cookie,
+    with no rotation at all, is detected as a rotation and rearms the budget."""
+    vendor = Vendor([
+        {"kind": "login"},
+        {"kind": "dash", "set_cookie": ["MM_SID=synthetic-renewed; Path=/",
+                                         "MM_RememberMe=synthetic-gen-b; Path=/"]},
+        {"kind": "maint"},
+        # later keepalive: old (rolled back) jar is dead, renewal with gen-a, no rotation
+        {"kind": "login"},
+        {"kind": "dash", "set_cookie": ["MM_SID=synthetic-renewed-2; Path=/"]},
+    ])
+    c = make_client(vendor)
+    with pytest.raises(PsegTransientError):
+        c._get_verification_token()
+    adm = c._renewal_admission
+    after_first = (adm.sequences, adm.last_sequence_at)
+    adm.last_sequence_at = (datetime.now(UTC) - timedelta(minutes=16)).isoformat()
+    assert c.keepalive() is True
+    print("D1_FOLLOWUP", {"after_first_sequences": after_first[0],
+                          "rm_gen_a_in_jar": rm_values(c) == frozenset({"synthetic-gen-a"}),
+                          "sequences_after_unrotated_renewal": adm.sequences})
+    assert adm.sequences == 1, "unrotated renewal of the old cookie counted as a rotation (rearm)"
+
+
+# --------------------------------------------------------------------------------------
+# D2: poll converts a pending transient-retry cooldown into terminal auth failure
+# --------------------------------------------------------------------------------------
+async def test_d2_runtime_poll_in_cooldown_is_auth_failure_and_kills_poll_schedule(hass):
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    vendor = Vendor([
+        {"kind": "login"}, {"kind": "dash"},     # keepalive: probe + renewal (chart times out)
+        {"kind": "login"},                       # poll probe during cooldown
+        {"kind": "login"}, {"kind": "dash"},     # keepalive retry after cooldown succeeds
+    ], chart_mode="timeout")
+    client = make_client(vendor)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    unsub = coord.async_add_listener(lambda: None)
+    try:
+        await coord._async_keepalive(None)
+        adm = coord._renewal_admission
+        assert adm.sequences == 1 and adm.retry_eligible, "transient did not earn its retry"
+        assert not coord.auth_required
+        await coord.async_refresh()
+        await hass.async_block_till_done()
+        flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+        poll_proof = {"auth_required": coord.auth_required, "status": coord.status,
+                      "reauth_flows": len(flows),
+                      "scheduled_poll": coord._unsub_refresh is not None,
+                      "retry_still_eligible": adm.retry_eligible,
+                      "renewal_http_in_poll": False}
+        # cooldown passes; the earned keepalive retry succeeds
+        vendor.chart_mode = "ok"
+        adm.last_sequence_at = (datetime.now(UTC) - timedelta(minutes=16)).isoformat()
+        await coord._async_keepalive(None)
+        after = {"auth_required": coord.auth_required, "status": coord.status,
+                 "scheduled_poll": coord._unsub_refresh is not None,
+                 "renewals": client.sso_renewals}
+        print("D2_PROOF", poll_proof, after)
+        assert not poll_proof["auth_required"] and poll_proof["reauth_flows"] == 0, (
+            "poll turned a pending transient retry (cooldown) into a reauth demand")
+        assert after["scheduled_poll"], "keepalive recovered but the poll schedule stays dead"
+    finally:
+        unsub()
+        coord.stop_keepalive()
+        for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN):
+            hass.config_entries.flow.async_abort(flow["flow_id"])
+
+
+async def test_d2_setup_in_cooldown_with_earned_retry_is_setup_error(hass, monkeypatch):
+    """A transient attempt persisted 5 minutes before a restart earned a retry; the
+    first refresh finds the expired session inside the cooldown."""
+    clients = []
+    real = PsegClient
+
+    def factory(**kwargs):
+        c = real(**kwargs)
+        c.session.mount("https://", Vendor([{"kind": "login"}]))
+        clients.append(c)
+        return c
+
+    monkeypatch.setattr(pkg, "PsegClient", factory)
+    state = {"sequences": 1,
+             "last_sequence_at": (datetime.now(UTC) - timedelta(minutes=5)).isoformat(),
+             "terminal_reason": None, "retry_eligible": True}
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={
+        CONF_PORTAL_COOKIES: SEED, CONF_RENEWAL_ADMISSION: state})
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    print("D2_SETUP_PROOF", {"state": str(entry.state), "reauth_flows": len(flows),
+                             "renewal_sent": any(e[2] == "/" for e in clients[0].session.adapters["https://"].events),
+                             "persisted_retry_eligible": entry.data[CONF_RENEWAL_ADMISSION]["retry_eligible"]})
+    for flow in flows:
+        hass.config_entries.flow.async_abort(flow["flow_id"])
+    assert entry.state is ConfigEntryState.SETUP_RETRY, (
+        "earned transient retry pending in cooldown made setup a terminal auth error")
+
+
+# --------------------------------------------------------------------------------------
+# D3: uncertain/corrupt admission silently stalls: no reauth prompt ever appears
+# --------------------------------------------------------------------------------------
+async def test_d3_uncertain_state_never_prompts_human(hass):
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={
+        CONF_PORTAL_COOKIES: SEED, CONF_RENEWAL_ADMISSION: "corrupt"})
+    entry.add_to_hass(hass)
+    vendor = Vendor([{"kind": "login"}] * 6)
+    client = make_client(vendor)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    unsub = coord.async_add_listener(lambda: None)
+    try:
+        for _ in range(3):
+            await coord._async_keepalive(None)
+        await coord.async_refresh()
+        await hass.async_block_till_done()
+        flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+        issue = ir.async_get(hass).async_get_issue(DOMAIN, "reauth_required_" + entry.entry_id)
+        proof = {"auth_required": coord.auth_required, "status": coord.status,
+                 "reauth_flows": len(flows), "issue": issue is not None,
+                 "renewal_http": sum(1 for e in vendor.events if e[2] == "/"),
+                 "stored_untouched": entry.data[CONF_RENEWAL_ADMISSION] == "corrupt"}
+        print("D3_PROOF", proof)
+        assert proof["renewal_http"] == 0 and proof["stored_untouched"]
+        assert proof["reauth_flows"] or proof["issue"] or proof["auth_required"], (
+            "corrupt budget refuses renewal forever but never asks for the repairing sign-in")
+    finally:
+        unsub()
+        coord.stop_keepalive()
+
+
+# --------------------------------------------------------------------------------------
+# D4: rotation attribution: a Remember Me value changed by an ordinary GET is credited
+# to the next renewal as a "rotation" and forgives that renewal's slot.
+# --------------------------------------------------------------------------------------
+def test_d4_rotation_seen_on_plain_dashboard_rearms_next_renewal():
+    vendor = Vendor([
+        {"kind": "dash", "set_cookie": ["MM_RememberMe=synthetic-gen-b; Path=/"]},
+        {"kind": "login"},
+        {"kind": "dash", "set_cookie": ["MM_SID=synthetic-renewed; Path=/"]},
+    ])
+    c = make_client(vendor)
+    assert c.keepalive() is True       # healthy GET, vendor slides the cookie
+    assert c.keepalive() is True       # expiry -> renewal with gen-b, NO rotation in renewal
+    print("D4_PROOF", {"sequences": c._renewal_admission.sequences})
+    assert c._renewal_admission.sequences == 1, "renewal without rotation rearmed the budget"
+
+
+# --------------------------------------------------------------------------------------
+# Controls requested by the brief
+# --------------------------------------------------------------------------------------
+@pytest.mark.parametrize("path", ["keepalive", "poll"])
+def test_c1_preprobe_jar_restored_after_transient(path):
+    vendor = Vendor([
+        {"kind": "login", "set_cookie": ["MM_RememberMe=synthetic-probe-poison; Path=/"]},
+        {"kind": "dash", "set_cookie": ["MM_RememberMe=synthetic-gen-b; Path=/"]},
+    ], chart_mode="timeout")
+    c = make_client(vendor)
+    before = jar_state(c)
+    if path == "keepalive":
+        assert c.keepalive() is False
+    else:
+        with pytest.raises(PsegTransientError):
+            c._get_verification_token()
+    adm = c._renewal_admission
+    assert jar_state(c) == before
+    assert (adm.sequences, adm.retry_eligible, c.sso_renewals) == (1, True, 0)
+    assert adm.blocked_reason(datetime.now(UTC)) == "cooldown"
+
+
+@pytest.mark.parametrize("meter_mode", ["mismatch", "timeout"])
+def test_c2_no_success_or_rearm_before_meter_proof(meter_mode):
+    vendor = Vendor([
+        {"kind": "login"},
+        {"kind": "dash", "set_cookie": ["MM_SID=synthetic-renewed; Path=/",
+                                         "MM_RememberMe=synthetic-gen-b; Path=/"]},
+    ], chart_mode="timeout" if meter_mode == "timeout" else "ok",
+        meter="99999" if meter_mode == "mismatch" else METER)
+    c = make_client(vendor)
+    before = jar_state(c)
+    assert c.keepalive() is False
+    adm = c._renewal_admission
+    assert jar_state(c) == before and c.sso_renewals == 0
+    assert adm.sequences == 1 and c._remember_me_seen == frozenset({"synthetic-gen-a"})
+
+
+@pytest.mark.parametrize("prep", ["cooldown", "exhausted1", "exhausted2", "terminal",
+                                  "uncertain", "transient", "rejected", "no_cookie"])
+def test_c3_keepalive_never_posts_password_or_okta_with_saved_login(prep):
+    seed = SEED if prep != "no_cookie" else "MM_SID=synthetic-dead"
+    script = [{"kind": "login"}, {"kind": "login"}, {"kind": "login"}]
+    if prep == "transient":
+        script = [{"kind": "login"}, {"kind": "dash"}]
+    vendor = Vendor(script, chart_mode="timeout" if prep == "transient" else "ok")
+    c = PsegClient(portal_cookies=seed, email="synthetic@example.invalid", password="synthetic")
+    c.set_expected_meter_ids({METER})
+    c.session.mount("https://", vendor)
+    adm = c._renewal_admission
+    now = datetime.now(UTC)
+    if prep == "cooldown":
+        adm.sequences, adm.retry_eligible, adm.last_sequence_at = 1, True, now.isoformat()
+    elif prep == "exhausted1":
+        adm.sequences, adm.last_sequence_at = 1, (now - timedelta(hours=1)).isoformat()
+    elif prep == "exhausted2":
+        adm.sequences, adm.last_sequence_at = 2, (now - timedelta(hours=1)).isoformat()
+    elif prep == "terminal":
+        adm.sequences, adm.terminal_reason = 1, "remember_me_rejected"
+        adm.last_sequence_at = (now - timedelta(hours=1)).isoformat()
+    elif prep == "uncertain":
+        adm.uncertain = True
+    try:
+        c.keepalive()
+    except PsegOktaSessionExpired:
+        pass
+    assert c.has_login
+    assert vendor.posts_outside_chart() == [], "keepalive posted credentials"
+
+
+async def test_c4_failed_setup_terminal_survives_process_restart(hass, monkeypatch):
+    vendors = []
+    real = PsegClient
+
+    def factory(**kwargs):
+        c = real(**kwargs)
+        v = Vendor([{"kind": "login"}, {"kind": "login"}, {"kind": "login"}])
+        c.session.mount("https://", v)
+        vendors.append(v)
+        return c
+
+    monkeypatch.setattr(pkg, "PsegClient", factory)
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    persisted = dict(entry.data.get(CONF_RENEWAL_ADMISSION) or {})
+    # Simulate a process restart: the in-memory runtime registry is gone.
+    hass.data.pop(f"{DOMAIN}_renewal_runtimes", None)
+    await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    print("C4_PROOF", {"persisted": persisted, "second_renewal_http":
+                       sum(1 for e in vendors[-1].events if e[2] == "/")})
+    assert persisted.get("terminal_reason") == "remember_me_rejected"
+    assert sum(1 for e in vendors[-1].events if e[2] == "/") == 0
+    for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN):
+        hass.config_entries.flow.async_abort(flow["flow_id"])
+
+
+async def test_c5_human_rearm_preserves_cooldown_and_rejects_inflight_outcome(hass):
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    vendor = Vendor([{"kind": "login"},
+                     {"kind": "dash", "gate": "renew",
+                      "set_cookie": ["MM_SID=synthetic-renewed; Path=/",
+                                     "MM_RememberMe=synthetic-gen-b; Path=/"]}])
+    vendor.gate("renew")
+    client = make_client(vendor)
+    old = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    task = asyncio.create_task(old._async_keepalive(None))
+    try:
+        assert await asyncio.to_thread(vendor.entered["renew"].wait, 4)
+        runtime = renewal_runtime_for(hass, entry.entry_id)
+        reserved_at = runtime.admission.last_sequence_at
+        new_state = rearm_entry_admission(hass, entry.entry_id,
+                                          entry.data.get(CONF_RENEWAL_ADMISSION),
+                                          CONF_RENEWAL_ADMISSION in entry.data)
+        assert new_state["last_sequence_at"] == reserved_at, "human rearm shortened the gap"
+        assert old._is_stale(), "old coordinator still owns the entry after human rearm"
+        vendor.release["renew"].set()
+        await asyncio.wait_for(task, 6)
+        # The rotated in-flight success must not rearm/settle the human generation.
+        assert runtime.admission.as_dict() == new_state
+        new_client = make_client(Vendor([{"kind": "login"}]))
+        new = PsegDataUpdateCoordinator(hass, new_client, dict(entry.data), config_entry=entry)
+        with pytest.raises(PsegTransientError):
+            await hass.async_add_executor_job(new_client.ensure_session)
+        # The human rearm's conservative global gap is a PENDING retry, not a second
+        # re-auth demand: no new failure is recorded and no slot is spent.
+        assert new_client.auth_reason is None
+        assert runtime.admission.blocked_reason(datetime.now(UTC)) == "cooldown"
+        new.stop_keepalive()
+    finally:
+        for gate in vendor.release.values():
+            gate.set()
+        if not task.done():
+            await asyncio.wait_for(task, 6)
+        old.stop_keepalive()
+
+
+async def test_c6_reload_during_reserved_renewal_new_setup_retries_not_overlaps(hass, monkeypatch):
+    vendors = []
+    real = PsegClient
+    real_fetch = PsegClient.fetch_energy_data
+
+    def factory(**kwargs):
+        c = real(**kwargs)
+        if not vendors:
+            v = Vendor([{"kind": "login"}, {"kind": "dash", "gate": "renew"}])
+            v.gate("renew")
+        else:
+            v = Vendor([{"kind": "login"}, {"kind": "dash"}])
+        c.session.mount("https://", v)
+        vendors.append(v)
+        return c
+
+    def fetch(c, days):
+        if not getattr(c, "_r2_started", False):
+            c._r2_started = True
+            if len(vendors) == 1:
+                return {"meter": "Meter #12345", "meter_ids": [METER], "history_14d": []}
+        return real_fetch(c, days)
+
+    monkeypatch.setattr(pkg, "PsegClient", factory)
+    monkeypatch.setattr(real, "fetch_energy_data", fetch)
+    monkeypatch.setattr(PsegDataUpdateCoordinator, "async_record_statistics", AsyncMock())
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    old = hass.data[DOMAIN][entry.entry_id]
+    task = asyncio.create_task(old._async_keepalive(None))
+    try:
+        assert await asyncio.to_thread(vendors[0].entered["renew"].wait, 4)
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        state_during = entry.state
+        new_renewal_http = sum(1 for e in vendors[1].events if e[2] == "/") if len(vendors) > 1 else 0
+        new_dash = sum(1 for e in vendors[1].events if e[2] == "/Dashboard") if len(vendors) > 1 else 0
+        vendors[0].release["renew"].set()
+        await asyncio.wait_for(task, 6)
+        print("C6_PROOF", {"state_during": str(state_during), "new_dash": new_dash,
+                           "new_renewal_http": new_renewal_http,
+                           "after_old_finish": renewal_runtime_for(hass, entry.entry_id).admission.as_dict()["sequences"]})
+        assert state_during is ConfigEntryState.SETUP_RETRY
+        assert new_dash == 1 and new_renewal_http == 0
+    finally:
+        for v in vendors:
+            for gate in v.release.values():
+                gate.set()
+        if not task.done():
+            await asyncio.wait_for(task, 6)
+        await hass.config_entries.async_unload(entry.entry_id)

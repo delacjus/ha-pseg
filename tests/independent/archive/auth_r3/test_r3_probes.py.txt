@@ -1,0 +1,713 @@
+"""R3 independent adversarial probes (Claude Opus reviewer). Synthetic, no network.
+
+Fresh harness, written independently of the builder's and earlier reviewers' adapters.
+Each Portal is its own requests BaseAdapter (no requests_mock global lock). Only
+booleans, counts, fixed reasons and synthetic markers are printed; never real data.
+"""
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from http.client import HTTPMessage
+import json
+import threading
+from types import SimpleNamespace
+from urllib.parse import urlparse
+
+import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+import requests
+from requests.adapters import BaseAdapter
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.update_coordinator import UpdateFailed
+
+import custom_components.pseg as pkg
+from custom_components.pseg.const import (
+    AUTH_REASON_SECURITY_STEP,
+    CONF_MYMETER_EMAIL,
+    CONF_MYMETER_PASSWORD,
+    CONF_PORTAL_COOKIES,
+    CONF_RENEWAL_ADMISSION,
+    DOMAIN,
+    PORTAL_BASE_URL,
+    PORTAL_HOST,
+)
+from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
+from custom_components.pseg.pseg_client import (
+    PsegClient,
+    PsegOktaSessionExpired,
+    PsegSecurityStepRequired,
+    PsegTransientError,
+)
+from custom_components.pseg.renewal_admission import (
+    rearm_entry_admission,
+    renewal_runtime_for,
+)
+
+METER = "24680"
+SEED = "MM_SID=r3-dead-sid; MM_RememberMe=r3-gen-a"
+TOKEN_PAGE = '<html><input name="__RequestVerificationToken" value="r3-af"/>Dashboard</html>'
+LOGIN_FORM = (
+    '<html><form action="/Home/Login"><input name="LoginEmail"/><input id="LoginPassword"/>'
+    '<input name="__RequestVerificationToken" value="r3-form"/></form></html>'
+)
+LOGIN_REPLIES = {
+    "ok": {"AjaxResults": [], "Data": {}},
+    "security": {"Data": {"SecretQuestionError": True}},
+    "captcha": {"Data": {"RecaptchaOnLogin": True}},
+}
+
+
+def chart_payload(meter: str) -> dict:
+    return {"Data": {"series": [{"name": f"Meter #{meter}", "data": [
+        {"y": 3.0, "hs": {"start": "10/21/2026"}}]}]}}
+
+
+class Portal(BaseAdapter):
+    """Scripted MyMeter. Dashboard specs and chart modes are consumed per request."""
+
+    def __init__(self, dashboard=(), *, charts=(), logins=(), meter=METER):
+        super().__init__()
+        self.dashboard = list(dashboard)
+        self.charts = list(charts)
+        self.logins = list(logins)
+        self.meter = meter
+        self.events: list[tuple[str, str]] = []
+        self.dash_cookies: list[str] = []   # Cookie header of each GET /Dashboard
+        self.entered: dict[str, threading.Event] = {}
+        self.release: dict[str, threading.Event] = {}
+
+    def gate(self, name: str) -> None:
+        self.entered[name] = threading.Event()
+        self.release[name] = threading.Event()
+
+    def send(self, request, **kwargs):
+        u = urlparse(request.url)
+        self.events.append((request.method, u.path))
+        if u.hostname != PORTAL_HOST:
+            raise AssertionError("non-portal host contacted")
+        r = requests.Response()
+        r.status_code = 200
+        r.url = request.url
+        r.request = request
+        r._content = b"ok"
+        r._content_consumed = True
+        msg = HTTPMessage()
+        r.raw = SimpleNamespace(_original_response=SimpleNamespace(msg=msg))
+        if request.method == "GET" and u.path == "/Dashboard":
+            self.dash_cookies.append(request.headers.get("Cookie", ""))
+            spec = self.dashboard.pop(0) if self.dashboard else {"kind": "dash"}
+            if spec.get("gate"):
+                self.entered[spec["gate"]].set()
+                assert self.release[spec["gate"]].wait(8), "synthetic gate timeout"
+            for header in spec.get("set_cookie", ()):
+                msg.add_header("Set-Cookie", header)
+            kind = spec["kind"]
+            if kind == "login":
+                r.url = PORTAL_BASE_URL + "/"
+                r._content = LOGIN_FORM.encode()
+            elif kind == "dash":
+                r._content = TOKEN_PAGE.encode()
+            elif kind == "maint":
+                r.url = PORTAL_BASE_URL + "/Maintenance"
+                r._content = b"<html>maintenance</html>"
+            elif kind == "timeout":
+                raise requests.Timeout("synthetic dashboard timeout")
+            else:
+                raise AssertionError("bad dashboard spec")
+        elif request.method == "GET" and u.path == "/":
+            r._content = LOGIN_FORM.encode()
+        elif request.method == "POST" and u.path == "/Home/Login":
+            mode = self.logins.pop(0) if self.logins else "ok"
+            r._content = json.dumps(LOGIN_REPLIES[mode]).encode()
+        elif request.method == "POST" and u.path == "/Dashboard/Chart":
+            mode = self.charts.pop(0) if self.charts else "ok"
+            if mode == "timeout":
+                raise requests.Timeout("synthetic chart timeout")
+        elif request.method == "GET" and u.path == "/Dashboard/ChartData":
+            r._content = json.dumps(chart_payload(self.meter)).encode()
+        else:
+            raise AssertionError(f"unexpected route {request.method} {u.path}")
+        return r
+
+    def close(self):
+        pass
+
+    def count(self, method: str, path: str) -> int:
+        return sum(1 for e in self.events if e == (method, path))
+
+    def renewal_like_http(self) -> int:
+        """Requests that only a renewal (cookie landing GET) or a sign-in sends."""
+        return self.count("GET", "/") + self.count("POST", "/Home/Login")
+
+
+def make_client(portal: Portal, *, login: bool = False, cookie_list=None) -> PsegClient:
+    kwargs = {"portal_cookies": SEED, "cookie_list": cookie_list}
+    if login:
+        kwargs.update(email="r3@example.invalid", password="r3-synthetic")
+    client = PsegClient(**kwargs)
+    client.set_expected_meter_ids({METER})
+    client.session.mount("https://", portal)
+    return client
+
+
+def jar_values(client: PsegClient, name: str) -> set[str]:
+    return {c.value for c in client.session.cookies if c.name == name}
+
+
+def persisted_values(entry, name: str) -> set[str]:
+    return {c["value"] for c in (entry.data.get("cookies") or []) if c["name"] == name}
+
+
+def shift_clock(admission, minutes: int) -> None:
+    admission.last_sequence_at = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
+
+
+def abort_flows(hass) -> None:
+    for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN):
+        hass.config_entries.flow.async_abort(flow["flow_id"])
+
+
+# ======================================================================================
+# P1  verified renewal + later transient in the SAME poll: the jar is never persisted
+# ======================================================================================
+@pytest.mark.parametrize("rotate", [False, True])
+async def test_p1_setup_verified_renewal_then_daily_timeout_loses_jar(hass, monkeypatch, rotate):
+    """Setup poll: expiry probe -> verified renewal (Dashboard + DAILY proof) -> token
+    GET ok -> the poll's own DAILY chart times out. SETUP_RETRY's new client must not
+    start from the dead pre-renewal jar while the spent budget is durable."""
+    portals: list[Portal] = []
+    renew_cookies = ["MM_SID=r3-renewed-sid; Path=/"]
+    if rotate:
+        renew_cookies.append("MM_RememberMe=r3-gen-b; Path=/")
+    scripts = [
+        dict(dashboard=[{"kind": "login"}, {"kind": "dash", "set_cookie": renew_cookies},
+                        {"kind": "dash"}], charts=["ok", "timeout"]),
+        dict(dashboard=[{"kind": "login"}]),
+        # stage 3 (after 16 min): an unrotated generation is exhausted; a rotated one
+        # renews again with the stale persisted cookie (vendor accepts it here).
+        dict(dashboard=[{"kind": "login"}, {"kind": "dash"}, {"kind": "dash"}]),
+    ]
+    clients: list[PsegClient] = []
+    real = PsegClient
+
+    def factory(**kwargs):
+        client = real(**kwargs)
+        portal = Portal(**scripts[len(portals)])
+        client.session.mount("https://", portal)
+        portals.append(portal)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(pkg, "PsegClient", factory)
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    try:
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        first = clients[0]
+        stage1 = {
+            "state": entry.state.name,
+            "in_memory_renewed_sid": "r3-renewed-sid" in jar_values(first, "MM_SID"),
+            "in_memory_confirmed": first.cookies_confirmed,
+            "sso_renewals": first.sso_renewals,
+            "entry_has_cookies": "cookies" in entry.data,
+            "persisted_renewed_sid": "r3-renewed-sid" in persisted_values(entry, "MM_SID"),
+            "persisted_admission": dict(entry.data.get(CONF_RENEWAL_ADMISSION) or {}),
+        }
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        second = portals[1]
+        stage2 = {
+            "state": entry.state.name,
+            "retry_probe_carried_renewed_sid": "r3-renewed-sid" in second.dash_cookies[0],
+            "retry_probe_carried_dead_sid": "r3-dead-sid" in second.dash_cookies[0],
+            "retry_renewal_http": second.renewal_like_http(),
+            "retry_dashboard_gets": second.count("GET", "/Dashboard"),
+        }
+        runtime = renewal_runtime_for(hass, entry.entry_id)
+        shift_clock(runtime.admission, 16)
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        third = portals[2]
+        stage3 = {
+            "state": entry.state.name,
+            "reauth_flows": len(hass.config_entries.flow.async_progress_by_handler(DOMAIN)),
+            "renewal_http": third.renewal_like_http(),
+            "dashboard_gets": third.count("GET", "/Dashboard"),
+            "admission": runtime.admission.as_dict() | {"last_sequence_at": "<ts>"},
+        }
+        print("P1_PROOF", {"rotate": rotate, "stage1": stage1, "stage2": stage2,
+                           "stage3": stage3})
+        # Expected-correct behaviour: the verified renewed jar is durable before the
+        # failed setup hands off; the retry must use it instead of the dead SID.
+        assert stage1["in_memory_renewed_sid"] and stage1["in_memory_confirmed"]
+        assert stage1["persisted_renewed_sid"], (
+            "verified renewal was never persisted; spent budget is durable without its jar"
+        )
+    finally:
+        abort_flows(hass)
+        if entry.state is ConfigEntryState.LOADED:
+            await hass.config_entries.async_unload(entry.entry_id)
+            await hass.async_block_till_done()
+
+
+async def test_p1b_runtime_poll_renewal_then_daily_timeout_then_reload(hass):
+    """Runtime variant: the poll renews and verifies, its DAILY chart times out, and an
+    ordinary reload/unload happens before the next 3-minute keepalive persisted it."""
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    portal = Portal([{"kind": "login"},
+                     {"kind": "dash", "set_cookie": ["MM_SID=r3-renewed-sid; Path=/"]},
+                     {"kind": "dash"}], charts=["ok", "timeout"])
+    client = make_client(portal)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    unsub = coord.async_add_listener(lambda: None)
+    coord2 = None
+    try:
+        await coord.async_refresh()
+        await hass.async_block_till_done()
+        before_reload = {
+            "status": coord.status,
+            "auth_required": coord.auth_required,
+            "in_memory_renewed": "r3-renewed-sid" in jar_values(client, "MM_SID"),
+            "persisted_renewed": "r3-renewed-sid" in persisted_values(entry, "MM_SID"),
+            "admission": coord._renewal_admission.as_dict() | {"last_sequence_at": "<ts>"},
+        }
+        unsub()
+        coord.stop_keepalive()
+        await hass.async_block_till_done()
+        portal2 = Portal([{"kind": "login"}, {"kind": "login"}])
+        client2 = make_client(portal2, cookie_list=entry.data.get("cookies"))
+        coord2 = PsegDataUpdateCoordinator(hass, client2, dict(entry.data), config_entry=entry)
+        await coord2._async_keepalive(None)
+        within = {"auth_required": coord2.auth_required,
+                  "probe_carried_dead_sid": "r3-dead-sid" in portal2.dash_cookies[0],
+                  "renewal_http": portal2.renewal_like_http()}
+        shift_clock(coord2._renewal_admission, 16)
+        await coord2._async_keepalive(None)
+        await hass.async_block_till_done()
+        after = {"auth_required": coord2.auth_required,
+                 "reauth_flows": len(hass.config_entries.flow.async_progress_by_handler(DOMAIN)),
+                 "renewal_http": portal2.renewal_like_http()}
+        print("P1B_PROOF", {"before_reload": before_reload, "within_15m": within,
+                            "after_15m": after})
+        assert before_reload["persisted_renewed"], "verified renewal lost by a reload"
+    finally:
+        if coord2 is not None:
+            coord2.stop_keepalive()
+        abort_flows(hass)
+
+
+async def test_p1c_control_next_keepalive_persists_the_kept_jar(hass):
+    """Control: without a reload, the next keepalive persists the verified jar."""
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    portal = Portal([{"kind": "login"},
+                     {"kind": "dash", "set_cookie": ["MM_SID=r3-renewed-sid; Path=/"]},
+                     {"kind": "dash"}, {"kind": "dash"}], charts=["ok", "timeout"])
+    client = make_client(portal)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    unsub = coord.async_add_listener(lambda: None)
+    try:
+        await coord.async_refresh()
+        await coord._async_keepalive(None)
+        await hass.async_block_till_done()
+        print("P1C_PROOF", {"persisted_renewed": "r3-renewed-sid" in persisted_values(entry, "MM_SID"),
+                            "auth_required": coord.auth_required, "status": coord.status})
+        assert "r3-renewed-sid" in persisted_values(entry, "MM_SID")
+    finally:
+        unsub()
+        coord.stop_keepalive()
+
+
+# ======================================================================================
+# P2  a cooldown with NO earned retry is reported as "a later attempt is available"
+# ======================================================================================
+async def test_p2_cooldown_without_earned_retry_is_a_fake_wait(hass):
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    portal = Portal([{"kind": "login"}] * 6)
+    client = make_client(portal)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    adm = coord._renewal_admission
+    # State left by a verified renewal whose cookie did not rotate: no retry earned.
+    adm.sequences, adm.retry_eligible = 1, False
+    shift_clock(adm, 5)
+    unsub = coord.async_add_listener(lambda: None)
+    try:
+        poll_error = None
+        try:
+            await coord._async_update_data()
+        except Exception as err:  # noqa: BLE001 - classification is the probe
+            poll_error = err
+        await coord._async_keepalive(None)
+        within = {
+            "poll_error": type(poll_error).__name__,
+            "poll_says_later_attempt": "later attempt is still available" in str(poll_error),
+            "auth_required": coord.auth_required,
+            "reauth_flows": len(hass.config_entries.flow.async_progress_by_handler(DOMAIN)),
+            "blocked_now": adm.blocked_reason(datetime.now(UTC)),
+            "blocked_after_window": adm.blocked_reason(datetime.now(UTC) + timedelta(minutes=11)),
+            "renewal_http": portal.renewal_like_http(),
+        }
+        shift_clock(adm, 16)
+        await coord._async_keepalive(None)
+        await hass.async_block_till_done()
+        after = {"auth_required": coord.auth_required,
+                 "reauth_flows": len(hass.config_entries.flow.async_progress_by_handler(DOMAIN)),
+                 "renewal_http": portal.renewal_like_http()}
+        print("P2_PROOF", {"within_15m": within, "after_15m": after})
+        # No automatic attempt can ever follow: the only honest result is re-auth now.
+        assert within["blocked_after_window"] == "exhausted"
+        assert within["renewal_http"] == 0 and after["renewal_http"] == 0
+        assert within["auth_required"], (
+            "a spent generation with no earned retry is reported as a pending wait"
+        )
+    finally:
+        unsub()
+        coord.stop_keepalive()
+        abort_flows(hass)
+
+
+# ======================================================================================
+# P3  C5 intent, independently: human rearm keeps the gap, rejects the in-flight
+#     rotated outcome, sends no renewal during the gap, and the gap is a REAL wait
+# ======================================================================================
+async def test_p3_human_rearm_same_cookie_gap_is_a_real_pending_attempt(hass):
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    old_portal = Portal([{"kind": "login"},
+                         {"kind": "dash", "gate": "renew",
+                          "set_cookie": ["MM_SID=r3-old-renewed; Path=/",
+                                         "MM_RememberMe=r3-gen-b; Path=/"]}])
+    old_portal.gate("renew")
+    old_client = make_client(old_portal)
+    old = PsegDataUpdateCoordinator(hass, old_client, dict(entry.data), config_entry=entry)
+    task = asyncio.create_task(old._async_keepalive(None))
+    new = None
+    try:
+        assert await asyncio.to_thread(old_portal.entered["renew"].wait, 4)
+        runtime = renewal_runtime_for(hass, entry.entry_id)
+        reserved_at = runtime.admission.last_sequence_at
+        # Human sign-in that leaves the SAME cookies in entry.data (no jar change).
+        state = rearm_entry_admission(hass, entry.entry_id,
+                                      entry.data.get(CONF_RENEWAL_ADMISSION),
+                                      CONF_RENEWAL_ADMISSION in entry.data)
+        cookies_before = entry.data.get("cookies")
+        old_portal.release["renew"].set()
+        await asyncio.wait_for(task, 6)
+        await hass.async_block_till_done()
+        stale = {
+            "old_is_stale": old._is_stale(),
+            "admission_unchanged_by_inflight": runtime.admission.as_dict() == state,
+            "gap_preserved": state["last_sequence_at"] == reserved_at,
+            "old_persisted_cookies": entry.data.get("cookies") != cookies_before,
+            "old_status": old.status,
+            "old_auth_required": old.auth_required,
+        }
+        new_portal = Portal([{"kind": "login"}, {"kind": "login"},
+                             {"kind": "dash", "set_cookie": ["MM_SID=r3-human-renewed; Path=/"]}])
+        new_client = make_client(new_portal, cookie_list=entry.data.get("cookies"))
+        new = PsegDataUpdateCoordinator(hass, new_client, dict(entry.data), config_entry=entry)
+        err = None
+        try:
+            await hass.async_add_executor_job(new_client.ensure_session)
+        except Exception as caught:  # noqa: BLE001
+            err = caught
+        during_gap = {"error": type(err).__name__, "auth_reason": new_client.auth_reason,
+                      "dashboard_gets": new_portal.count("GET", "/Dashboard"),
+                      "renewal_http": new_portal.renewal_like_http()}
+        shift_clock(runtime.admission, 16)
+        renewed = await hass.async_add_executor_job(new_client.ensure_session)
+        after_gap = {"renewed": renewed, "sequences": runtime.admission.sequences,
+                     "retry_eligible": runtime.admission.retry_eligible,
+                     "auth_reason": new_client.auth_reason}
+        print("P3_PROOF", {"stale": stale, "during_gap": during_gap, "after_gap": after_gap})
+        assert stale["old_is_stale"] and stale["admission_unchanged_by_inflight"]
+        assert stale["gap_preserved"] and not stale["old_persisted_cookies"]
+        assert during_gap["error"] == "PsegTransientError" and during_gap["auth_reason"] is None
+        assert during_gap["dashboard_gets"] == 1 and during_gap["renewal_http"] == 0
+        assert after_gap["renewed"] is True and after_gap["sequences"] == 1
+    finally:
+        for gate in old_portal.release.values():
+            gate.set()
+        if not task.done():
+            await asyncio.wait_for(task, 6)
+        old.stop_keepalive()
+        if new is not None:
+            new.stop_keepalive()
+
+
+# ======================================================================================
+# P4  ordinary keepalive slide is persisted and does not become a rotation
+# ======================================================================================
+async def test_p4_keepalive_slide_persists_and_next_unrotated_renewal_not_rearmed(hass):
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    portal = Portal([
+        {"kind": "dash", "set_cookie": ["MM_RememberMe=r3-gen-slid; Path=/",
+                                        "MM_SID=r3-slid-sid; Path=/"]},
+        {"kind": "login"},
+        {"kind": "dash", "set_cookie": ["MM_SID=r3-renewed-sid; Path=/"]},
+    ])
+    client = make_client(portal)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    try:
+        await coord._async_keepalive(None)
+        await hass.async_block_till_done()
+        slide = {"persisted_slid_rm": persisted_values(entry, "MM_RememberMe") == {"r3-gen-slid"},
+                 "persisted_slid_sid": "r3-slid-sid" in persisted_values(entry, "MM_SID"),
+                 "seen_is_slid": client._remember_me_seen == frozenset({"r3-gen-slid"})}
+        await coord._async_keepalive(None)
+        await hass.async_block_till_done()
+        adm = coord._renewal_admission
+        renewal = {"sequences": adm.sequences, "retry_eligible": adm.retry_eligible,
+                   "persisted_renewed_sid": "r3-renewed-sid" in persisted_values(entry, "MM_SID"),
+                   "auth_required": coord.auth_required}
+        print("P4_PROOF", {"slide": slide, "renewal": renewal})
+        assert all(slide.values())
+        assert renewal["sequences"] == 1 and renewal["persisted_renewed_sid"]
+    finally:
+        coord.stop_keepalive()
+
+
+# ======================================================================================
+# P5  a REAL security-step reply on the poll's password fallback latches everything
+#     in this client; document what survives an ordinary reload
+# ======================================================================================
+async def test_p5_real_security_reply_latches_then_reload_limit(hass):
+    data = {CONF_PORTAL_COOKIES: SEED, CONF_MYMETER_EMAIL: "r3@example.invalid",
+            CONF_MYMETER_PASSWORD: "r3-synthetic"}
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data=data)
+    entry.add_to_hass(hass)
+    portal = Portal([{"kind": "login"}] * 8, logins=["security"])
+    client = make_client(portal, login=True)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    adm = coord._renewal_admission
+    adm.sequences, adm.retry_eligible = 1, True       # earned retry, in its window
+    shift_clock(adm, 5)
+    unsub = coord.async_add_listener(lambda: None)
+    coord2 = None
+    try:
+        poll1 = None
+        try:
+            await coord._async_update_data()
+        except Exception as err:  # noqa: BLE001
+            poll1 = err
+        posts_after_poll1 = portal.count("POST", "/Home/Login")
+        mark = len(portal.events)
+        await coord._async_keepalive(None)                 # latched
+        shift_clock(adm, 16)                               # earned retry now due
+        await coord._async_keepalive(None)                 # still latched
+        keepalive_requests = portal.events[mark:]
+        mark = len(portal.events)
+        poll2 = None
+        try:
+            await coord._async_update_data()
+        except Exception as err:  # noqa: BLE001
+            poll2 = err
+        poll2_requests = portal.events[mark:]
+        in_process = {
+            "poll1": type(poll1).__name__, "poll2": type(poll2).__name__,
+            "posts_after_poll1": posts_after_poll1,
+            "keepalive_requests_after_latch": keepalive_requests,
+            "poll2_requests_after_latch": poll2_requests,
+            "auth_reason": client.auth_reason, "auth_required": coord.auth_required,
+            "admission_terminal": adm.terminal_reason, "retry_eligible": adm.retry_eligible,
+        }
+        unsub()
+        coord.stop_keepalive()
+        await hass.async_block_till_done()
+        abort_flows(hass)
+        portal2 = Portal([{"kind": "login"}] * 8, logins=["security"])
+        client2 = make_client(portal2, login=True, cookie_list=entry.data.get("cookies"))
+        coord2 = PsegDataUpdateCoordinator(hass, client2, dict(entry.data), config_entry=entry)
+        await coord2._async_keepalive(None)
+        keepalive2 = list(portal2.events)
+        mark = len(portal2.events)
+        try:
+            await coord2._async_update_data()
+        except Exception:  # noqa: BLE001
+            pass
+        after_reload = {"keepalive_requests": keepalive2,
+                        "poll_requests": portal2.events[mark:],
+                        "password_posts": portal2.count("POST", "/Home/Login"),
+                        "latched_again": client2._security_step_latched,
+                        "terminal": coord2._renewal_admission.terminal_reason}
+        print("P5_PROOF", {"in_process": in_process, "after_reload": after_reload})
+        assert in_process["posts_after_poll1"] == 1
+        assert keepalive_requests == []
+        assert all(path == "/Dashboard" for _, path in poll2_requests)
+        assert isinstance(poll1, ConfigEntryAuthFailed)
+    finally:
+        if coord2 is not None:
+            coord2.stop_keepalive()
+        abort_flows(hass)
+
+
+# ======================================================================================
+# P6  the keepalive never posts the password / contacts Okta, in every state
+# ======================================================================================
+def _prep(state: str, client: PsegClient) -> None:
+    adm = client._renewal_admission
+    if state == "fresh":
+        return
+    if state == "cooldown_earned":
+        adm.sequences, adm.retry_eligible = 1, True
+        shift_clock(adm, 5)
+    elif state == "cooldown_spent":
+        adm.sequences = 1
+        shift_clock(adm, 5)
+    elif state == "exhausted1":
+        adm.sequences = 1
+        shift_clock(adm, 30)
+    elif state == "exhausted2":
+        adm.sequences = 2
+        shift_clock(adm, 30)
+    elif state == "terminal":
+        adm.sequences, adm.terminal_reason = 1, "remember_me_rejected"
+        shift_clock(adm, 30)
+    elif state == "uncertain":
+        adm.uncertain = True
+    elif state == "captcha":
+        client._captcha_latched = True
+    elif state == "security":
+        client._mark_auth_failure(AUTH_REASON_SECURITY_STEP)
+    else:
+        raise AssertionError(state)
+
+
+@pytest.mark.parametrize("state", ["fresh", "cooldown_earned", "cooldown_spent", "exhausted1",
+                                   "exhausted2", "terminal", "uncertain", "captcha", "security"])
+def test_p6_keepalive_never_posts_password(state):
+    portal = Portal([{"kind": "login"}] * 4)
+    client = make_client(portal, login=True)
+    _prep(state, client)
+    try:
+        client.keepalive()
+    except Exception:  # noqa: BLE001 - only the traffic matters
+        pass
+    assert portal.count("POST", "/Home/Login") == 0
+    assert all(path in ("/Dashboard", "/", "/Dashboard/Chart", "/Dashboard/ChartData")
+               for _, path in portal.events)
+
+
+# ======================================================================================
+# P7  poll password-fallback exposure per deferred state (documentation of R2E2)
+# ======================================================================================
+@pytest.mark.parametrize("state", ["cooldown_earned", "cooldown_spent", "exhausted1",
+                                   "terminal", "uncertain", "captcha", "security", "busy",
+                                   "retired"])
+def test_p7_poll_password_fallback_per_state(state):
+    portal = Portal([{"kind": "login"}, {"kind": "dash"}, {"kind": "dash"}])
+    client = make_client(portal, login=True)
+    if state in ("busy", "retired"):
+        class Runtime:
+            def reserve(self, token, now):
+                return state
+            def can_dispatch(self, token):
+                return False
+            def finish(self, *a, **k):
+                pass
+        client.attach_renewal_admission(client._renewal_admission, Runtime(), 1)
+    else:
+        _prep(state, client)
+    outcome = "ok"
+    try:
+        client._get_verification_token()
+    except Exception as err:  # noqa: BLE001
+        outcome = type(err).__name__
+    print("P7_PROOF", state, {"outcome": outcome,
+                              "password_posts": portal.count("POST", "/Home/Login"),
+                              "cookie_landing_gets": portal.count("GET", "/")})
+
+
+# ======================================================================================
+# P8  characterization: a post-renewal maintenance page's Set-Cookie is kept as
+#     confirmed and is not observed as the generation
+# ======================================================================================
+def test_p8_post_renewal_maintenance_set_cookie_characterization():
+    portal = Portal([
+        {"kind": "login"},
+        {"kind": "dash", "set_cookie": ["MM_SID=r3-renewed-sid; Path=/",
+                                        "MM_RememberMe=r3-gen-b; Path=/"]},
+        {"kind": "maint", "set_cookie": ["MM_RememberMe=r3-gen-maint; Path=/"]},
+        {"kind": "login"},
+        {"kind": "dash", "set_cookie": ["MM_SID=r3-renewed-2; Path=/"]},
+    ])
+    client = make_client(portal)
+    with pytest.raises(PsegTransientError):
+        client._get_verification_token()
+    kept = {"jar_rm_is_maint": jar_values(client, "MM_RememberMe") == {"r3-gen-maint"},
+            "confirmed": client.cookies_confirmed,
+            "seen_is_gen_b": client._remember_me_seen == frozenset({"r3-gen-b"}),
+            "sequences_after_rotated_renewal": client._renewal_admission.sequences}
+    # Next expiry 16 min later; this renewal does NOT rotate the cookie.
+    shift_clock(client._renewal_admission, 16)
+    try:
+        client.ensure_session()
+    except Exception:  # noqa: BLE001
+        pass
+    print("P8_PROOF", {"kept": kept,
+                       "after_unrotated_renewal_sequences": client._renewal_admission.sequences})
+
+
+# ======================================================================================
+# P1d  saved-login entry: the lost verified jar turns the setup retry into a password POST
+# ======================================================================================
+@pytest.mark.parametrize("hiccup", ["daily_timeout", "token_maintenance"])
+async def test_p1d_saved_login_setup_retry_posts_password_after_verified_cookie_renewal(
+    hass, monkeypatch, hiccup
+):
+    portals: list[Portal] = []
+    if hiccup == "daily_timeout":
+        first = dict(dashboard=[{"kind": "login"},
+                                {"kind": "dash", "set_cookie": ["MM_SID=r3-renewed-sid; Path=/"]},
+                                {"kind": "dash"}], charts=["ok", "timeout"])
+    else:
+        first = dict(dashboard=[{"kind": "login"},
+                                {"kind": "dash", "set_cookie": ["MM_SID=r3-renewed-sid; Path=/"]},
+                                {"kind": "maint"}], charts=["ok"])
+    scripts = [first, dict(dashboard=[{"kind": "login"}, {"kind": "dash"}, {"kind": "dash"}])]
+    real = PsegClient
+
+    def factory(**kwargs):
+        client = real(**kwargs)
+        portal = Portal(**scripts[len(portals)])
+        client.session.mount("https://", portal)
+        portals.append(portal)
+        return client
+
+    monkeypatch.setattr(pkg, "PsegClient", factory)
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={
+        CONF_PORTAL_COOKIES: SEED, CONF_MYMETER_EMAIL: "r3@example.invalid",
+        CONF_MYMETER_PASSWORD: "r3-synthetic"})
+    entry.add_to_hass(hass)
+    try:
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+        stage1 = {"state": entry.state.name,
+                  "password_posts": portals[0].count("POST", "/Home/Login"),
+                  "persisted_renewed": "r3-renewed-sid" in persisted_values(entry, "MM_SID")}
+        await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        stage2 = {"state": entry.state.name,
+                  "probe_carried_dead_sid": "r3-dead-sid" in portals[1].dash_cookies[0],
+                  "password_posts": portals[1].count("POST", "/Home/Login")}
+        print("P1D_PROOF", {"hiccup": hiccup, "stage1": stage1, "stage2": stage2})
+        assert stage2["password_posts"] == 0, (
+            "a verified cookie renewal was lost, so the retry posted the saved password"
+        )
+    finally:
+        abort_flows(hass)
+        if entry.state is ConfigEntryState.LOADED:
+            await hass.config_entries.async_unload(entry.entry_id)
+            await hass.async_block_till_done()

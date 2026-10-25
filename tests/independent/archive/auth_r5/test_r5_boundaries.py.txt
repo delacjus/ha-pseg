@@ -1,0 +1,334 @@
+"""Independent R5 synthetic payload/cookie and real-entry retirement probes."""
+import asyncio
+import copy
+from datetime import UTC, datetime
+from http.client import HTTPMessage
+import json
+import threading
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+import requests
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+import custom_components.pseg as pkg
+from custom_components.pseg.const import CONF_PORTAL_COOKIES, DOMAIN, USAGE_INTERVAL_HOURLY
+from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
+from custom_components.pseg.pseg_client import PsegClient
+from custom_components.pseg.renewal_admission import rearm_entry_admission
+from test_auth_review_r3_regressions import METER, SEED, Portal, abort_flows, make_client
+
+
+@pytest.fixture(autouse=True)
+def enabled(enable_custom_integrations):
+    yield
+
+
+PAYLOADS = {
+    "empty_json": {},
+    "empty_series": {"Data": {"series": []}},
+    "no_matching_meter": {"Data": {"series": [{"name": "Temperature", "data": []}]}},
+    "empty_meter": {"Data": {"series": [{"name": "Meter #" + METER, "data": []}]}},
+    "invalid_points": {"Data": {"series": [{"name": "Meter #" + METER, "data": [{"x": None, "y": -1}]}]}},
+    "root_list": [],
+    "healthy": {"Data": {"series": [{"name": "Meter #" + METER, "data": [{
+        "x": 1792540800000, "y": 3.0,
+        "hs": {"start": "2026-10-21T00:00:00+00:00", "end": "2026-10-21T01:00:00+00:00"},
+    }]}]}},
+}
+
+
+class PayloadPortal(Portal):
+    def __init__(self, payload, name, renewal=True):
+        super().__init__([
+            *([{"kind": "login"}, {"kind": "dash", "set_cookie": [
+                "MM_SID=r5-proven; Path=/", "MM_RememberMe=r5-proven-generation; Path=/",
+                "review_aux=r5-proven-aux; Path=/",
+            ]}] if renewal else []),
+            {"kind": "dash"},
+        ])
+        self.payload = payload
+        self.name = name
+        self.hourly = False
+        self.injected = 0
+
+    def send(self, request, **kwargs):
+        path = urlparse(request.url).path
+        if request.method == "POST" and path == "/Dashboard/Chart":
+            body = request.body.decode() if isinstance(request.body, bytes) else request.body
+            self.hourly = parse_qs(body or "").get("UsageInterval") == [str(USAGE_INTERVAL_HOURLY)]
+        response = super().send(request, **kwargs)
+        if self.hourly and path == "/Dashboard/ChartData":
+            self.injected += 1
+            response._content = json.dumps(PAYLOADS[self.payload]).encode()
+            response.raw._original_response.msg.add_header("Set-Cookie", f"{self.name}=r5-new-response; Path=/")
+        return response
+
+
+@pytest.mark.parametrize("payload", ["empty_json", "empty_series", "no_matching_meter", "empty_meter", "invalid_points", "root_list"])
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe", "review_aux"])
+async def test_invalid_hourly_200_does_not_replace_proven_whole_jar(hass, payload, cookie):
+    portal = PayloadPortal(payload, cookie)
+    client = make_client(portal)
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    proof = []
+    capture = client._capture_confirmed_session
+
+    def captured():
+        capture()
+        proof.append(copy.deepcopy(client.pending_confirmed_snapshot()))
+
+    client._capture_confirmed_session = captured
+    try:
+        data = await coord._async_update_data()
+        assert portal.injected == 1
+        assert data["daily_records"] and data["statistics_granularity"] == "daily"
+        assert proof and proof[0]["cookies_confirmed"]
+        assert entry.data["cookies"] == proof[0]["cookies"], "invalid optional 200 response overwrote the proven whole jar"
+        assert client.export_cookies() == proof[0]["cookies"], "invalid optional 200 response stayed in the live whole jar"
+        assert client._remember_me_seen == frozenset(c["value"] for c in proof[0]["cookies"] if c["name"] == "MM_RememberMe")
+    finally:
+        coord.stop_keepalive()
+        abort_flows(hass)
+
+
+class RedirectSsoPortal(Portal):
+    def __init__(self):
+        super().__init__([{"kind": "login"}])
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def send(self, request, **kwargs):
+        path = urlparse(request.url).path
+        if path not in {"/Saml/okta-prod/SignIn", "/Saml/r5-acs", "/Saml/r5-next"}:
+            return super().send(request, **kwargs)
+        self.events.append((request.method, path))
+        response = requests.Response()
+        response.status_code = 200
+        response.url = request.url
+        response.request = request
+        response._content_consumed = True
+        response._content = b"ok"
+        response.raw = SimpleNamespace(_original_response=SimpleNamespace(msg=HTTPMessage()))
+        if path == "/Saml/okta-prod/SignIn":
+            response._content = b'<form action="/Saml/r5-acs"><input name="SAMLResponse" value="r5-synthetic"></form>'
+        elif path == "/Saml/r5-acs":
+            self.entered.set()
+            assert self.release.wait(5), "scratch in-flight SAML POST gate timed out"
+            response.status_code = 307
+            response.headers["Location"] = "/Saml/r5-next"
+        return response
+
+
+@pytest.mark.parametrize("boundary", ["current_owner", "real_unload", "human_same_cookies"])
+async def test_saml_redirect_cannot_dispatch_new_post_after_retirement(hass, monkeypatch, boundary):
+    from custom_components.pseg.const import CONF_OKTA_COOKIES
+
+    portal = RedirectSsoPortal()
+    client = PsegClient(portal_cookies="MM_SID=r5-sso", okta_cookies="idx=r5-synthetic-okta")
+    client.set_expected_meter_ids({METER})
+    client.session.mount("https://", portal)
+    original_fetch = PsegClient.fetch_energy_data
+    monkeypatch.setattr(pkg, "PsegClient", lambda **kwargs: client)
+    monkeypatch.setattr(client, "fetch_energy_data", lambda days: {
+        "meter": "Meter #" + METER, "meter_ids": [METER], "daily_records": [], "history_14d": [], "hourly_records": [],
+    })
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={
+        CONF_PORTAL_COOKIES: "MM_SID=r5-sso", CONF_OKTA_COOKIES: "idx=r5-synthetic-okta",
+    })
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    coord = hass.data[DOMAIN][entry.entry_id]
+    client.fetch_energy_data = lambda days: original_fetch(client, days)
+    task = asyncio.create_task(coord._async_update_data())
+    try:
+        assert await asyncio.to_thread(portal.entered.wait, 3)
+        assert portal.count("POST", "/Saml/r5-acs") == 1
+        if boundary == "real_unload":
+            assert await hass.config_entries.async_unload(entry.entry_id)
+        elif boundary == "human_same_cookies":
+            state = rearm_entry_admission(hass, entry.entry_id, entry.data.get("renewal_admission"), "renewal_admission" in entry.data, now=datetime.now(UTC))
+            hass.config_entries.async_update_entry(entry, data={**entry.data, "renewal_admission": state})
+        if boundary != "current_owner":
+            assert not coord._renewal_runtime.is_active(coord._renewal_token)
+        portal.release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        expected = 1 if boundary == "current_owner" else 0
+        assert portal.count("POST", "/Saml/r5-next") == expected, "requests replayed a new SAML assertion POST after actual retirement"
+    finally:
+        portal.release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        if boundary != "real_unload":
+            await hass.config_entries.async_unload(entry.entry_id)
+        coord.stop_keepalive()
+        abort_flows(hass)
+
+
+@pytest.mark.parametrize("renewal", [False, True])
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe", "review_aux"])
+async def test_healthy_hourly_rotation_is_persisted(hass, renewal, cookie):
+    portal = PayloadPortal("healthy", cookie, renewal)
+    client = make_client(portal)
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    try:
+        data = await coord._async_update_data()
+        assert data["daily_records"] and data["hourly_records"]
+        assert entry.data["cookies"] == client.export_cookies()
+        assert any(c["name"] == cookie and c["value"] == "r5-new-response" for c in entry.data["cookies"])
+    finally:
+        coord.stop_keepalive()
+        abort_flows(hass)
+
+
+@pytest.mark.parametrize("failure", ["maint", "notoken", "404", "429", "500"])
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe", "review_aux"])
+async def test_postproof_failed_dashboard_cookie_cannot_be_promoted_by_next_poll(hass, failure, cookie):
+    from homeassistant.helpers.update_coordinator import UpdateFailed
+
+    class LaterDashboardPortal(Portal):
+        def __init__(self):
+            super().__init__([
+                {"kind": "login"},
+                {"kind": "dash", "set_cookie": [
+                    "MM_SID=r5-proven; Path=/", "MM_RememberMe=r5-proven-generation; Path=/",
+                    "review_aux=r5-proven-aux; Path=/",
+                ]},
+                {"kind": failure if failure in {"maint", "notoken"} else "dash",
+                 "set_cookie": [f"{cookie}=r5-failed-dashboard; Path=/"]},
+            ])
+            self.dash_count = 0
+
+        def send(self, request, **kwargs):
+            response = super().send(request, **kwargs)
+            if urlparse(request.url).path == "/Dashboard":
+                self.dash_count += 1
+                if self.dash_count == 3 and failure.isnumeric():
+                    response.status_code = int(failure)
+            return response
+
+    portal = LaterDashboardPortal()
+    client = make_client(portal)
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    proof = []
+    capture = client._capture_confirmed_session
+
+    def captured():
+        capture()
+        proof.append(copy.deepcopy(client.pending_confirmed_snapshot()))
+
+    client._capture_confirmed_session = captured
+    try:
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
+        assert proof and entry.data["cookies"] == proof[0]["cookies"], "existing immutable failure-exit handoff must remain intact"
+        data = await coord._async_update_data()
+        assert data["daily_records"]
+        assert entry.data["cookies"] == proof[0]["cookies"], "a failed post-proof Dashboard cookie was promoted and persisted by the next ordinary successful poll"
+    finally:
+        coord.stop_keepalive()
+        abort_flows(hass)
+
+
+@pytest.mark.parametrize("renewal", [False, True])
+@pytest.mark.parametrize("boundary", ["cancel_poll", "real_unload"])
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe", "review_aux"])
+async def test_latest_valid_hourly_jar_survives_cancel_or_stop(hass, monkeypatch, renewal, boundary, cookie):
+    portal = PayloadPortal("healthy", cookie, renewal)
+    client = make_client(portal)
+    original_fetch = PsegClient.fetch_energy_data
+    monkeypatch.setattr(pkg, "PsegClient", lambda **kwargs: client)
+    monkeypatch.setattr(client, "fetch_energy_data", lambda days: {
+        "meter": "Meter #" + METER, "meter_ids": [METER], "daily_records": [], "history_14d": [], "hourly_records": [],
+    })
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    coord = hass.data[DOMAIN][entry.entry_id]
+    client.fetch_energy_data = lambda days: original_fetch(client, days)
+    entered = threading.Event()
+    release = threading.Event()
+    original_export = client.export_cookies_and_auth_reason
+
+    def gated_export():
+        entered.set()
+        assert release.wait(5), "scratch valid-jar export gate timed out"
+        return original_export()
+
+    client.export_cookies_and_auth_reason = gated_export
+    task = asyncio.create_task(coord._async_update_data())
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        confirmed = copy.deepcopy(client.confirmed_cookies())
+        assert confirmed and any(c["name"] == cookie and c["value"] == "r5-new-response" for c in confirmed)
+        if boundary == "cancel_poll":
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        else:
+            assert await hass.config_entries.async_unload(entry.entry_id)
+        assert entry.data.get("cookies") == confirmed, "ordinary cancellation/stop lost the latest successfully validated whole jar"
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        if boundary == "cancel_poll":
+            await hass.config_entries.async_unload(entry.entry_id)
+        coord.stop_keepalive()
+        abort_flows(hass)
+
+
+class ChartGatePortal(Portal):
+    def __init__(self, renewal):
+        super().__init__([{"kind": "login"}, {"kind": "dash"}] if renewal else [{"kind": "dash"}])
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.gated = False
+
+    def send(self, request, **kwargs):
+        if request.method == "POST" and urlparse(request.url).path == "/Dashboard/Chart" and not self.gated:
+            self.gated = True
+            self.entered.set()
+            assert self.release.wait(5), "scratch chart gate timed out"
+        return super().send(request, **kwargs)
+
+
+@pytest.mark.parametrize("renewal", [False, True])
+@pytest.mark.parametrize("boundary", ["real_unload", "human_same_cookies"])
+async def test_no_new_chart_dispatch_after_retirement(hass, monkeypatch, renewal, boundary):
+    portal = ChartGatePortal(renewal)
+    client = make_client(portal)
+    original_fetch = PsegClient.fetch_energy_data
+    monkeypatch.setattr(pkg, "PsegClient", lambda **kwargs: client)
+    monkeypatch.setattr(client, "fetch_energy_data", lambda days: {
+        "meter": "Meter #" + METER, "meter_ids": [METER], "daily_records": [], "history_14d": [], "hourly_records": [],
+    })
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    coord = hass.data[DOMAIN][entry.entry_id]
+    client.fetch_energy_data = lambda days: original_fetch(client, days)
+    task = asyncio.create_task(coord._async_update_data())
+    try:
+        assert await asyncio.to_thread(portal.entered.wait, 3)
+        if boundary == "real_unload":
+            assert await hass.config_entries.async_unload(entry.entry_id)
+        else:
+            state = rearm_entry_admission(hass, entry.entry_id, entry.data.get("renewal_admission"), "renewal_admission" in entry.data, now=datetime.now(UTC))
+            hass.config_entries.async_update_entry(entry, data={**entry.data, "renewal_admission": state})
+        assert not coord._renewal_runtime.is_active(coord._renewal_token)
+        before = portal.count("GET", "/Dashboard/ChartData")
+        portal.release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        assert portal.count("GET", "/Dashboard/ChartData") == before, "retired owner dispatched ChartData after its in-flight Chart POST returned"
+    finally:
+        portal.release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        if boundary == "human_same_cookies":
+            await hass.config_entries.async_unload(entry.entry_id)
+        coord.stop_keepalive()
+        abort_flows(hass)
