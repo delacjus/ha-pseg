@@ -215,9 +215,15 @@ def test_verify_independent_of_original_paths(tmp_path: Path) -> None:
 def _make_valid_group(
     temp_root: Path, group_name: str = "auth_r1"
 ) -> tuple[Path, Path, dict[str, Any]]:
-    """Create a valid promoted group with provenance.json for testing."""
+    """Create a valid promoted group with provenance.json for testing.
+
+    The copied tree may already hold this group's real promoted suite (P1-05+);
+    start from an empty group directory so the synthetic metadata is complete.
+    """
     grp = temp_root / group_name
-    grp.mkdir(parents=True, exist_ok=True)
+    if grp.exists():
+        shutil.rmtree(grp)
+    grp.mkdir(parents=True)
     promoted_file = grp / "test_promoted.py"
     promoted_file.write_text("def test_ok(): pass\n", encoding="utf-8")
     promoted_hash = compute_file_sha256(promoted_file)
