@@ -7,6 +7,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       matrix:
         python-version: ["3.14"]
@@ -19,17 +20,78 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Assert Python version >= 3.14.2
+        run: |
+          python -c 'import sys; assert sys.version_info >= (3, 14, 2), f"Python >= 3.14.2 required, got {sys.version}"'
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
 
       - name: Install dependencies
         run: |
-          uv pip install --system "homeassistant==2026.10.2" "pytest-homeassistant-custom-component==0.13.373" "requests-mock==1.12.1" "requests==2.34.2" "beautifulsoup4==4.15.0" "ruff==0.17.1" "pytest==9.0.3"
+          uv pip install --system -r requirements_test.txt
 
-      - name: Run Ruff
+      - name: Run release check (fast)
         run: |
-          ruff check .
+          python tools/release_check.py fast --source . --python "$(which python)"
 
-      - name: Run Pytest
+      - name: Collect evidence logs on failure
+        if: failure()
         run: |
-          pytest
+          mkdir -p evidence-logs
+          for log in /tmp/pseg-release-*/runtime/*/output.log; do
+            if [ -f "$log" ]; then
+              step_name=$(basename "$(dirname "$log")")
+              tail -c 1048576 "$log" > "evidence-logs/${step_name}.log"
+            fi
+          done
+
+      - name: Upload evidence logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-evidence-${{ matrix.python-version }}
+          path: evidence-logs/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Run release check (node)
+        run: |
+          python tools/release_check.py node --source . --python "$(which python)"
+
+      - name: Collect evidence logs on failure
+        if: failure()
+        run: |
+          mkdir -p evidence-logs
+          for log in /tmp/pseg-release-*/runtime/*/output.log; do
+            if [ -f "$log" ]; then
+              step_name=$(basename "$(dirname "$log")")
+              tail -c 1048576 "$log" > "evidence-logs/${step_name}.log"
+            fi
+          done
+
+      - name: Upload evidence logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-evidence
+          path: evidence-logs/
+          retention-days: 7
+          if-no-files-found: ignore

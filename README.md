@@ -356,6 +356,21 @@ Entity ids below are for the first registered account in Home Assistant's entity
 - `sensor.pseg_connection_status`: Connection status with session telemetry attributes
 - `button.pseg_refresh_data`: Button to trigger an immediate portal sync
 
+## Testing
+
+The integration includes a test suite covering authentication lifecycles, hourly statistics, parser contracts, offline guards, and copy-only mutation testing.
+
+Run local release check profiles using the test environment:
+
+```sh
+export PSEG_TEST_PYTHON=/home/tacoriffic/ha-pseg/.venv/bin/python
+export PYTHONDONTWRITEBYTECODE=1 RUFF_NO_CACHE=true
+"$PSEG_TEST_PYTHON" tools/release_check.py fast --source . --python "$PSEG_TEST_PYTHON"
+"$PSEG_TEST_PYTHON" tools/release_check.py node --source . --python "$PSEG_TEST_PYTHON"
+```
+
+For the complete testing workflow—including `independent`, `mutation`, and `all` profiles, snapshot verification, and test markers—see [Testing Documentation](docs/testing.md).
+
 ## License
 
 MIT

@@ -7,26 +7,34 @@ They do not establish that the vendor will accept a real Remember Me cookie.
 ## Preconditions
 
 Use the repository's `.venv` with its installed test dependencies. Run from the
-repository root. Keep the checkout idle with one writer. The optional mutation
-runner temporarily changes one source file at a time and restores its exact bytes
-in `finally`; each pytest child has a 35-second timeout. Do not run another test,
-editor, deployment or source writer alongside that runner.
+repository root. Keep the checkout idle with one writer. The mutation
+runner (`tools/release_check.py mutation` or `tools/mutation_check.py`) executes
+each mutant in a fresh, disposable copy created by `tools/_snapshot.py`; source
+files are never modified in place. Each pytest child has a 35-second timeout.
+The legacy `tests/auth_guard_mutations.py` entry point is a safe compatibility wrapper
+around the same copy-only engine.
 
 ## Run the checks
 
 ```sh
 timeout 90 .venv/bin/python -m pytest -q --tb=short -p no:cacheprovider
 timeout 15 .venv/bin/ruff check . --no-cache
-timeout 15 node --test tests/test_captcha_helper.js tests/test_captcha_extension.js
-timeout 600 .venv/bin/python tests/auth_guard_mutations.py
+timeout 15 node --require ./tests/support/node_offline.cjs --test tests/test_node_offline.js tests/test_captcha_helper.js tests/test_captcha_extension.js
+timeout 600 .venv/bin/python tools/release_check.py mutation --source . --python .venv/bin/python
 timeout 5 git diff --check
+```
+
+Or run the unified release verification suite:
+
+```sh
+.venv/bin/python tools/release_check.py all --source . --python .venv/bin/python
 ```
 
 The mutation runner's sixty children are each bounded independently (35
 seconds per child). Stop if a mutation reports `INVALID / survived`; a test import
 error is not a valid proof. The runner requires the exact guard text and refuses
-to mutate an ambiguous match. After an interrupted run, inspect `git diff` before
-allowing any other writer.
+to mutate an ambiguous match. Because the runner operates strictly in isolated
+snapshots, the source checkout is never modified.
 
 Observed on the R9 candidate on 2026-10-24: 740 Python tests passed (647 pre-R7B
 + 75 R7B, 11 R8 and 6 R9 cases in `tests/test_auth_review_r5_regressions.py` + 1
@@ -42,31 +50,34 @@ by the reviewer-approved adapted copy, 29/29); the independent R8 probe set pass
 all 22 unchanged; the independent R9 probe set passed all 8 (7 passed / 1 failed
 before this round); and the preserved R5 physical-storage set passed all 60.
 
-### Independent probe sets
+### Promoted independent probe suites
 
-These live outside the repository and are not part of the offline suite. Run them
-only from an idle checkout, with the repository and its `tests` directory on
-`PYTHONPATH`; the asyncio overrides are required because external scratch files do
-not inherit this project's pytest configuration.
+These probes have been formally promoted to repo-owned, hermetic test suites under
+`tests/independent/`, backed by provenance manifests in `tests/independent/*/provenance.json`
+and validated by `tools/probe_provenance.py`. They run using standard pytest or
+via the `independent` profile in `tools/release_check.py`:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests timeout 80 .venv/bin/python -m pytest -q -p no:cacheprovider -o asyncio_mode=auto -o asyncio_default_fixture_loop_scope=function /tmp/pseg-auth-review-r1/test_adversarial.py
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests:/tmp/pseg-auth-review-r2-opus timeout 80 .venv/bin/python -m pytest -q -p no:cacheprovider -o asyncio_mode=auto -o asyncio_default_fixture_loop_scope=function /tmp/pseg-auth-review-r2-opus/test_r2_adversarial.py /tmp/pseg-auth-review-r2-opus/test_r2_extra.py
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests:/tmp/pseg-auth-review-r3-opus/probes timeout 150 .venv/bin/python -m pytest -q -p no:cacheprovider -o asyncio_mode=auto -o asyncio_default_fixture_loop_scope=function /tmp/pseg-auth-review-r3-opus/probes/test_r3_probes.py
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests:/tmp/pseg-auth-final-review-20261023/probes timeout 90 .venv/bin/python -m pytest -q -p no:cacheprovider -o asyncio_mode=auto -o asyncio_default_fixture_loop_scope=function /tmp/pseg-auth-final-review-20261023/probes/test_final_lifecycle.py
-timeout 80 python3 /tmp/pseg-auth-review-r5-20261023/verify_r5.py
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests:/tmp/pseg-independent-r5 timeout 120 .venv/bin/python -m pytest -q -p no:cacheprovider -o asyncio_mode=auto -o asyncio_default_fixture_loop_scope=function /tmp/pseg-independent-r5
-timeout 600 python3 /tmp/pseg-auth-review-r6-20261023/run_preserved.py
-timeout 150 python3 /tmp/pseg-auth-review-r6-20261023/verify_r6.py test_r6_probes.py
-timeout 90 python3 /tmp/pseg-auth-review-r6-20261023/verify_r6.py test_r6_extra.py
-timeout 90 python3 /tmp/pseg-auth-review-r6-20261023/verify_r6.py test_r6_flows.py
-timeout 90 python3 /tmp/pseg-auth-review-r6-20261023/verify_r6.py test_r6_race.py
-timeout 150 python3 /tmp/pseg-auth-review-r7b-20261023/verify_r7b.py
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests:/tmp/pseg-auth-review-r6-20261023 timeout 120 .venv/bin/python -m pytest -q -p no:cacheprovider -o asyncio_mode=auto -o asyncio_default_fixture_loop_scope=function /tmp/pseg-auth-review-r9-20261024/test_r9_probes.py
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests timeout 120 .venv/bin/python -m pytest -q -p no:cacheprovider -o asyncio_mode=auto -o asyncio_default_fixture_loop_scope=function /tmp/pseg-auth-review-r8-20261024/test_r8_probes.py
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -q -p no:cacheprovider tests/independent
+.venv/bin/python tools/release_check.py independent --source . --python .venv/bin/python
+.venv/bin/python tools/probe_provenance.py verify --root tests/independent
 ```
 
-If a scratch path is gone, say so; do not substitute a rewritten test.
+Individual promoted suites can be run directly:
+
+```sh
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/independent/auth_r1
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/independent/auth_r2
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/independent/auth_r3
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/independent/auth_r4
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/independent/hourly_r5
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/independent/auth_r5
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/independent/auth_r6
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/independent/auth_r7b
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/independent/auth_r8
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/independent/auth_r9
+.venv/bin/python -m pytest -q -p no:cacheprovider tests/independent/nywall
+```
 
 ## What each regression proves
 
@@ -136,19 +147,17 @@ five independent R2 findings, and the mutation runner adds eight R2 guards
    merely inside its cooldown. R3 makes the CAPTCHA/security terminal durable
    across reload and cold process; see the R3 section below.
 
-The external R2 probe set (`/tmp/pseg-auth-review-r2-opus/test_r2_adversarial.py`
-plus `test_r2_extra.py`, 29 cases) passes. One control's *exception expectation* was
+The promoted R2 probe suite (`tests/independent/auth_r2/`, 29 cases across
+`test_independent_auth_r2.py` and `test_independent_auth_r2_extra.py`) passes. One control's *exception expectation* was
 adapted to the corrected policy: a human rearm's conservative 15-minute gap is a
 pending retry (`PsegTransientError`, no failure reason) rather than a second
 re-authentication demand (`PsegOktaSessionExpired`). Its generation and cooldown
 assertions are unchanged.
 
-The separate preserved R5 scratch tests (`test_physical_failure.py`,
-`test_independent.py`, `test_r5.py` under `/tmp/pseg-independent-r5`) passed all
-60 cases, including real Store write failures, cold replay and timeouts. External
-scratch pytest runs need `PYTHONPATH` containing this repository and `tests`, plus
-`-o asyncio_mode=auto -o asyncio_default_fixture_loop_scope=function`; otherwise
-pytest does not apply this repository's asyncio fixture configuration. The real
+The separate preserved R5 physical-storage tests (`tests/independent/hourly_r5/`,
+60 cases across `test_independent_hourly_r5.py`, `test_independent_hourly_physical_failure.py`,
+and `test_independent_hourly_guards.py`) passed all 60 cases, including real Store write failures,
+cold replay and timeouts. The real
 Store error boundary is unchanged. `statistics_hourly.py`, `statistics_state.py`
 and `manifest.json` are byte-identical to reviewed hourly base `2285845`. Of the 25
 coordinator statistics/journal/backfill functions, 24 have identical ASTs to
@@ -198,13 +207,13 @@ mutations in total):
    known terminal reason with zero spent sequences is now accepted so a challenge
    seen before any renewal can be stored.
 
-The independent R3 probe set (`/tmp/pseg-auth-review-r3-opus/probes/test_r3_probes.py`,
+The independent R3 probe set (`tests/independent/auth_r3/test_independent_auth_r3.py`,
 29 cases) changed from 6 failed/23 passed before this round to 29 passed. It was
 not edited. One existing R2 builder assertion changed with the N2 policy: a
 settled unrotated renewal's budget is now `exhausted` inside its window instead of
 `cooldown` (original:
 `assert client._renewal_admission.blocked_reason(datetime.now(UTC)) == "cooldown"`).
-The R2 external probes were unchanged and remained green.
+The R2 probes were unchanged and remained green.
 
 ## R4 regressions
 
@@ -239,7 +248,7 @@ R4 guards (34 mutations in total):
    password POST, SAML SignIn GET, or SAML ACS POST. Fresh unattached `PsegClient`
    instances in interactive config flows remain unaffected.
 
-The independent R4 probe set (`/tmp/pseg-auth-final-review-20261023/probes/test_final_lifecycle.py`,
+The independent R4 probe set (`tests/independent/auth_r4/test_independent_auth_r4.py`,
 29 cases) changed from 22 failed/7 passed before this round to 29 passed without
 editing the probe file.
 
@@ -310,11 +319,10 @@ the mutation runner includes 60 guards in total (46 prior + 7 R7B + 6 R8 + 1 R9)
    and `_confirmed_cookies` publication, reads and `clear_confirmed_snapshot`
    compare-and-clear without taking the network `RLock` on the event loop.
 
-The independent R5 probe set (`/tmp/pseg-auth-review-r5-20261023/test_r5_boundaries.py`
-via `/tmp/pseg-auth-review-r5-20261023/verify_r5.py`, 58 cases) and the
-independent R6 probe sets (`test_r6_probes.py` 38 cases, `test_r6_extra.py` 7
-cases, `test_r6_flows.py` 2 cases, `test_r6_race.py` 1 case via
-`/tmp/pseg-auth-review-r6-20261023/verify_r6.py`, 48 cases total) all pass without
+The independent R5 probe set (`tests/independent/auth_r5/test_independent_auth_r5.py`,
+58 cases) and the independent R6 probe sets (`tests/independent/auth_r6/`,
+48 cases total across `test_independent_auth_r6.py`, `test_independent_auth_r6_extra.py`,
+`test_independent_auth_r6_flows.py`, and `test_independent_auth_r6_race.py`) all pass without
 editing any probe file.
 
 ## R7B regressions
