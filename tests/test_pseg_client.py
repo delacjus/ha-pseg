@@ -1765,3 +1765,396 @@ def test_hourly_login_redirect_is_typed_auth_loss(mode, leg) -> None:
         else AUTH_REASON_PORTAL_SESSION_EXPIRED
     )
     assert client.auth_reason == expected
+
+
+
+def test_hourly_contract_sample_projection_allowed_fields() -> None:
+    """The sample keeps only the allowed fields and strips extra metadata."""
+    client = PsegClient()
+    payload = {
+        "cookies": "secret_cookie",
+        "token": "secret_token",
+        "extra_root_field": "secret_root",
+        "AjaxResults": [
+            {"Action": "Redirect", "Extra": "secret_action"},
+            {"NonAction": "ignore"},
+        ],
+        "Data": {
+            "unit": "kWh",
+            "extra_data_key": "secret_data",
+            "series": [
+                {
+                    "name": "Meter #99999",
+                    "unit": "kWh",
+                    "extra_series_key": "secret_series",
+                    "data": [
+                        {
+                            "x": 1788259200000,
+                            "y": 1.25,
+                            "extra_point_key": "secret_point",
+                            "hs": {
+                                "start": "2026-09-01T00:00:00Z",
+                                "end": "2026-09-01T01:00:00Z",
+                                "extra_hs_key": "secret_hs",
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    client._capture_hourly_contract_sample(payload, "2026-09-01", "2026-09-02")
+    sample = client.hourly_contract_sample
+    assert sample is not None
+
+    allowed_top_keys = {
+        "sample_version",
+        "captured_at",
+        "request",
+        "payload_keys",
+        "data_keys",
+        "chart",
+        "non_meter_series_count",
+        "point_extra_keys",
+        "hs_extra_keys",
+        "truncated_points",
+    }
+    assert set(sample.keys()) == allowed_top_keys
+    assert sample["sample_version"] == 1
+    assert set(sample["request"].keys()) == {"start", "end", "usage_interval"}
+    assert sample["request"]["start"] == "2026-09-01"
+    assert sample["request"]["end"] == "2026-09-02"
+
+    assert set(sample["chart"].keys()) == {"AjaxResults", "Data"}
+    assert sample["chart"]["AjaxResults"] == [{"Action": "Redirect"}]
+    assert set(sample["chart"]["Data"].keys()) == {"unit", "series"}
+    assert sample["chart"]["Data"]["unit"] == "kWh"
+
+    series_list = sample["chart"]["Data"]["series"]
+    assert len(series_list) == 1
+    series = series_list[0]
+    assert set(series.keys()) == {"name", "data"}
+    assert series["name"] == "Meter #1"
+
+    points = series["data"]
+    assert len(points) == 1
+    point = points[0]
+    assert set(point.keys()) == {"x", "y", "hs"}
+    assert point["x"] == 1788259200000
+    assert point["y"] == 1.25
+    assert set(point["hs"].keys()) == {"start", "end"}
+    assert point["hs"]["start"] == "2026-09-01T00:00:00Z"
+    assert point["hs"]["end"] == "2026-09-01T01:00:00Z"
+
+    dumped = json.dumps(sample)
+    for forbidden in (
+        "secret_cookie",
+        "secret_token",
+        "secret_root",
+        "secret_action",
+        "secret_data",
+        "secret_series",
+        "secret_point",
+        "secret_hs",
+        "99999",
+    ):
+        assert forbidden not in dumped
+
+
+def test_hourly_contract_sample_meter_ids_replaced_and_duplicates() -> None:
+    """Meter ids are replaced with sequential placeholders; duplicates share placeholder."""
+    client = PsegClient()
+    payload = {
+        "Data": {
+            "unit": "kWh",
+            "series": [
+                {
+                    "name": "Meter #88888",
+                    "data": [{"x": 1000, "y": 0.5}],
+                },
+                {
+                    "name": "Meter #77777",
+                    "data": [{"x": 1000, "y": 0.6}],
+                },
+                {
+                    "name": "Meter #88888",
+                    "data": [{"x": 2000, "y": 0.7}],
+                },
+                {
+                    "name": "Temperature (F)",
+                    "data": [{"x": 1000, "y": 72.0}],
+                },
+            ],
+        }
+    }
+    client._capture_hourly_contract_sample(payload, "2026-09-01", "2026-09-02")
+    sample = client.hourly_contract_sample
+    assert sample is not None
+
+    series = sample["chart"]["Data"]["series"]
+    assert len(series) == 3
+    assert series[0]["name"] == "Meter #1"
+    assert series[1]["name"] == "Meter #2"
+    assert series[2]["name"] == "Meter #1"
+    assert sample["non_meter_series_count"] == 1
+
+    dumped = json.dumps(sample)
+    assert "88888" not in dumped
+    assert "77777" not in dumped
+
+
+def test_hourly_contract_sample_extra_keys_listed_without_values() -> None:
+    """Extra point and hs keys are collected by name only into sorted lists."""
+    client = PsegClient()
+    payload = {
+        "Data": {
+            "series": [
+                {
+                    "name": "Meter #12345",
+                    "data": [
+                        {
+                            "x": 1000,
+                            "y": 1.0,
+                            "custom_field": "secret_custom",
+                            "alpha_field": "secret_alpha",
+                            "hs": {
+                                "start": "2026-09-01T00:00:00Z",
+                                "end": "2026-09-01T01:00:00Z",
+                                "custom_hs": "secret_hs_val",
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    client._capture_hourly_contract_sample(payload, "2026-09-01", "2026-09-02")
+    sample = client.hourly_contract_sample
+    assert sample is not None
+    assert sample["point_extra_keys"] == ["alpha_field", "custom_field"]
+    assert sample["hs_extra_keys"] == ["custom_hs"]
+
+    dumped = json.dumps(sample)
+    assert "secret_custom" not in dumped
+    assert "secret_alpha" not in dumped
+    assert "secret_hs_val" not in dumped
+
+
+def test_hourly_contract_sample_caps_and_sanitization() -> None:
+    """String lengths, list lengths, point caps and invalid points are strictly capped."""
+    client = PsegClient()
+    long_key = "a" * 100
+    long_action = "a" * 100
+    long_unit = "u" * 100
+    long_hs_start = "s" * 100
+    long_hs_end = "e" * 100
+
+    payload = {
+        long_key: "val",
+        **{f"extra_{i:02d}": "val" for i in range(60)},
+        "AjaxResults": [{"Action": long_action}] * 15,
+        "Data": {
+            "unit": long_unit,
+            long_key: "data_val",
+            "series": [
+                {
+                    "name": "Meter #11111",
+                    "data": [
+                        "invalid_string_point",
+                        {
+                            "x": True,
+                            "y": "not_a_number",
+                            "hs": {"start": long_hs_start, "end": long_hs_end},
+                        },
+                    ]
+                    + [{"x": 1000 + i, "y": 1.0, "hs": None} for i in range(1600)],
+                }
+            ],
+        },
+    }
+    client._capture_hourly_contract_sample(payload, "2026-09-01", "2026-09-02")
+    sample = client.hourly_contract_sample
+    assert sample is not None
+
+    assert len(sample["payload_keys"]) == 50
+    assert any(len(k) == 64 for k in sample["payload_keys"])
+    assert long_key[:64] in sample["data_keys"]
+
+    ajax = sample["chart"]["AjaxResults"]
+    assert len(ajax) == 10
+    assert ajax[0]["Action"] == long_action[:32]
+
+    assert sample["chart"]["Data"]["unit"] == long_unit[:16]
+
+    series = sample["chart"]["Data"]["series"][0]
+    assert series["invalid_points"] == 1
+
+    assert len(series["data"]) == 1500
+    assert sample["truncated_points"] == 101
+
+    first_pt = series["data"][0]
+    assert first_pt["x"] == "<bool>"
+    assert first_pt["y"] == "<str>"
+    assert first_pt["hs"]["start"] == long_hs_start[:64]
+    assert first_pt["hs"]["end"] == long_hs_end[:64]
+
+    second_pt = series["data"][1]
+    assert "hs" not in second_pt
+
+
+def test_hourly_contract_sample_shape_notes_and_types() -> None:
+    """Non-dict payload or Data records shape_note; non-list AjaxResults records type."""
+    client = PsegClient()
+
+    client._capture_hourly_contract_sample("string_payload", "2026-09-01", "2026-09-02")
+    s1 = client.hourly_contract_sample
+    assert s1 is not None
+    assert s1["shape_note"] == "payload_not_object"
+    assert s1["chart"]["Data"]["series"] == []
+
+    client._capture_hourly_contract_sample({"Data": 12345}, "2026-09-01", "2026-09-02")
+    s2 = client.hourly_contract_sample
+    assert s2 is not None
+    assert s2["shape_note"] == "data_not_object"
+    assert s2["chart"]["Data"]["series"] == []
+
+    client._capture_hourly_contract_sample(
+        {"AjaxResults": "not_a_list", "Data": {}}, "2026-09-01", "2026-09-02"
+    )
+    s3 = client.hourly_contract_sample
+    assert s3 is not None
+    assert s3["ajax_results_type"] == "str"
+    assert "AjaxResults" not in s3["chart"]
+
+
+def test_hourly_contract_sample_capture_raising_does_not_fail_poll(caplog) -> None:
+    """If capture raises, the error is swallowed and logged at DEBUG with class name only."""
+    day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
+    daily = _daily_chart(day, 24.0)
+    hourly = _hourly_chart(day, 1.0)
+    client = PsegClient(portal_cookies="MM_SID=valid_sid")
+
+    with (
+        requests_mock.Mocker(session=client.session) as mock,
+        patch.object(client, "_get_verification_token", return_value="token"),
+        patch.object(
+            client,
+            "_capture_hourly_contract_sample",
+            side_effect=RuntimeError("capture_test_failure"),
+        ),
+        caplog.at_level(logging.DEBUG),
+    ):
+        mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/ChartData",
+            [{"json": daily}, {"json": hourly}],
+        )
+        data = client.fetch_energy_data(14)
+
+    assert data["latest_kwh"] == 24.0
+    assert "Failed to capture hourly contract sample: RuntimeError" in caplog.text
+    assert "capture_test_failure" not in caplog.text
+
+
+def test_hourly_contract_sample_hourly_leg_calls_parser_with_identical_object() -> None:
+    """The hourly leg passes the exact, unmodified payload object to _parse_hourly_chart."""
+    day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
+    daily = _daily_chart(day, 24.0)
+    hourly = _hourly_chart(day, 1.0)
+    client = PsegClient(portal_cookies="MM_SID=valid_sid")
+
+    fetched_payload: dict | None = None
+    parsed_arg: dict | None = None
+    real_fetch = client._fetch_chart_json
+    real_parse = client._parse_hourly_chart
+
+    def spy_fetch(*args, **kwargs):
+        nonlocal fetched_payload
+        fetched_payload = real_fetch(*args, **kwargs)
+        return fetched_payload
+
+    def spy_parse(payload):
+        nonlocal parsed_arg
+        parsed_arg = payload
+        return real_parse(payload)
+
+    with (
+        requests_mock.Mocker(session=client.session) as mock,
+        patch.object(client, "_get_verification_token", return_value="token"),
+        patch.object(client, "_fetch_chart_json", side_effect=spy_fetch),
+        patch.object(client, "_parse_hourly_chart", side_effect=spy_parse),
+    ):
+        mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/ChartData",
+            [{"json": daily}, {"json": hourly}],
+        )
+        client.fetch_energy_data(14)
+
+    assert fetched_payload is not None
+    assert parsed_arg is not None
+    # Identity check: exact same object instance passed from fetch to parse
+    assert parsed_arg is fetched_payload
+    assert parsed_arg == hourly
+
+
+def test_hourly_contract_sample_comparator_consumable_shape() -> None:
+    """The captured sample chart field matches the comparator's expected document format."""
+    client = PsegClient()
+    payload = {
+        "AjaxResults": [],
+        "Data": {
+            "unit": "kWh",
+            "series": [
+                {
+                    "name": "Meter #99999 (RS)",
+                    "data": [
+                        {
+                            "x": 1788259200000,
+                            "y": 1.23,
+                            "hs": {
+                                "start": "2026-09-01T00:00:00Z",
+                                "end": "2026-09-01T01:00:00Z",
+                            },
+                        }
+                    ],
+                }
+            ],
+        },
+    }
+    client._capture_hourly_contract_sample(payload, "2026-08-30", "2026-09-06")
+    sample = client.hourly_contract_sample
+    assert sample is not None
+
+    document = {
+        "document_version": 1,
+        "chart_schema_version": 1,
+        "chart": sample["chart"],
+        "context": {
+            "context_version": 2,
+            "expected_meter_ids": ["1"],
+            "unit": "kWh",
+            "chart_display": {
+                "resolution_kwh": "0.01",
+                "rounding": "half_up",
+                "contributors": 1,
+            },
+            "request": {"start": "2026-08-30", "end": "2026-09-06"},
+        },
+    }
+
+    assert document["document_version"] == 1
+    assert document["chart_schema_version"] == 1
+    assert "chart" in document
+    assert "Data" in document["chart"]
+    assert document["chart"]["Data"]["unit"] == "kWh"
+    series = document["chart"]["Data"]["series"]
+    assert isinstance(series, list)
+    assert len(series) == 1
+    assert series[0]["name"] == "Meter #1"
+    pt = series[0]["data"][0]
+    assert pt["x"] == 1788259200000
+    assert pt["y"] == 1.23
+    assert pt["hs"]["start"] == "2026-09-01T00:00:00Z"
+    assert pt["hs"]["end"] == "2026-09-01T01:00:00Z"
+    assert document["context"]["expected_meter_ids"] == ["1"]

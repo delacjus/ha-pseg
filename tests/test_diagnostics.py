@@ -1,11 +1,14 @@
 """Tests for PSE&G diagnostics redaction and telemetry output."""
 
+import json
+
 from homeassistant.components.diagnostics import REDACTED
 from homeassistant.core import HomeAssistant
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.pseg.const import (
     CONF_COOKIE,
+    CONF_METER_ID,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
     CONF_STATISTICS_IMPORT_ENABLED,
@@ -288,3 +291,100 @@ async def test_diagnostics_has_remember_me_is_a_boolean_only(hass: HomeAssistant
     assert "remember-value-4c1" not in str(diag)
     assert "session-value-9d2" not in str(diag)
     assert "MM_RememberMe" not in str(diag)
+
+
+async def test_diagnostics_includes_hourly_contract_sample_without_real_meter_id(
+    hass: HomeAssistant,
+) -> None:
+    """Diagnostics exposes privacy-stripped hourly sample with no real meter id."""
+    real_meter = "987654321"
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id=real_meter,
+        data={CONF_METER_ID: real_meter},
+    )
+    entry.add_to_hass(hass)
+
+    client = PsegClient(portal_cookies="MM_SID=sess")
+    payload = {
+        "Data": {
+            "unit": "kWh",
+            "series": [
+                {
+                    "name": f"Meter #{real_meter} (RS)",
+                    "data": [
+                        {
+                            "x": 1788259200000,
+                            "y": 1.5,
+                            "hs": {
+                                "start": "2026-09-01T00:00:00Z",
+                                "end": "2026-09-01T01:00:00Z",
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    client._capture_hourly_contract_sample(payload, "2026-09-01", "2026-09-02")
+    assert client.hourly_contract_sample is not None
+
+    coord = PsegDataUpdateCoordinator(
+        hass, client, dict(entry.data), config_entry=entry
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+
+    # hourly_contract_sample is present in diagnostics
+    assert "hourly_contract_sample" in diag
+    sample = diag["hourly_contract_sample"]
+    assert sample is not None
+    assert sample["chart"]["Data"]["series"][0]["name"] == "Meter #1"
+
+    # Whole diagnostics serialization contains NO real meter id string anywhere
+    serialized = json.dumps(diag)
+    assert real_meter not in serialized
+
+    # When coordinator is None, hourly_contract_sample is None
+    hass.data[DOMAIN][entry.entry_id] = None
+    diag_none = await async_get_config_entry_diagnostics(hass, entry)
+    assert diag_none["hourly_contract_sample"] is None
+
+
+async def test_hourly_contract_sample_never_written_to_config_entry_or_store(
+    hass: HomeAssistant, tmp_path
+) -> None:
+    """The hourly contract sample is in-memory only and never persisted to entry or store."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        version=2,
+        unique_id="12345",
+        data={CONF_METER_ID: "12345"},
+        options={CONF_STATISTICS_IMPORT_ENABLED: True},
+    )
+    entry.add_to_hass(hass)
+
+    client = PsegClient(portal_cookies="MM_SID=sess")
+    client._capture_hourly_contract_sample(
+        {"Data": {"unit": "kWh", "series": []}}, "2026-09-01", "2026-09-02"
+    )
+    assert client.hourly_contract_sample is not None
+
+    coord = PsegDataUpdateCoordinator(
+        hass, client, dict(entry.data), config_entry=entry
+    )
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
+
+    # Verify not in entry.data or entry.options
+    assert "hourly_contract_sample" not in entry.data
+    assert "hourly_contract_sample" not in entry.options
+
+    # Verify store data never has hourly_contract_sample
+    store_file = tmp_path / "stats_store.json"
+    coord._stats_state._store.__dict__["path"] = str(store_file)
+    await coord._stats_state.async_commit(1)
+    if store_file.exists():
+        content = store_file.read_text()
+        assert "hourly_contract_sample" not in content

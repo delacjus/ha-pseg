@@ -92,6 +92,7 @@ async def async_get_config_entry_diagnostics(
             "session_telemetry": None,
             "coordinator": None,
             "statistics": None,
+            "hourly_contract_sample": None,
         }
     client = coordinator.client
 
@@ -117,4 +118,5 @@ async def async_get_config_entry_diagnostics(
         },
         # Counts, fixed reason codes and booleans only: no raw points or meter ids.
         "statistics": await coordinator.async_statistics_summary(),
+        "hourly_contract_sample": client.hourly_contract_sample,
     }

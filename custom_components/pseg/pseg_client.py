@@ -343,6 +343,9 @@ class PsegClient:
         # False after a failed renewal rolled the jar back: the coordinator must not
         # persist an unconfirmed transaction.
         self.cookies_confirmed = True
+        # Passive in-memory hourly contract sample for diagnostic inspection and
+        # offline contract verification.
+        self._hourly_contract_sample: dict[str, Any] | None = None
         # Immutable jar captured at the exact moment a renewal or sign-in was
         # confirmed (Dashboard plus meter proof where required). The coordinator
         # persists THIS snapshot on every failure/unload exit, so a later failed
@@ -757,6 +760,14 @@ class PsegClient:
     def has_okta_session(self) -> bool:
         """An Okta session cookie is present (SAML SSO renewal is possible)."""
         return any(self._has_cookie(name, OKTA_HOST) for name in ("idx", "sid"))
+
+    @property
+    def hourly_contract_sample(self) -> dict[str, Any] | None:
+        """Return a copy of the latest hourly contract sample, if captured."""
+        sample = self._hourly_contract_sample
+        if sample is None:
+            return None
+        return copy.deepcopy(sample)
 
     def _remember_me_values(self) -> frozenset[str]:
         """Current MM_RememberMe values, for the in-memory rotation check only."""
@@ -2060,6 +2071,13 @@ class PsegClient:
             hourly_payload = self._fetch_chart_json(
                 token, USAGE_INTERVAL_HOURLY, start_str, end_str
             )
+            try:
+                self._capture_hourly_contract_sample(hourly_payload, start_str, end_str)
+            except Exception as exc:
+                _LOGGER.debug(
+                    "Failed to capture hourly contract sample: %s",
+                    type(exc).__name__,
+                )
             hourly = self._parse_hourly_chart(hourly_payload)
             if not self._has_valid_meter_read(
                 hourly["hourly_records"],
@@ -2283,6 +2301,193 @@ class PsegClient:
                 raise PsegOktaSessionExpired(
                     f"Session expired during {context}: Redirected to login"
                 )
+
+    def _capture_hourly_contract_sample(
+        self,
+        payload: Any,
+        start_str: str,
+        end_str: str,
+    ) -> None:
+        """Capture a passive, privacy-stripped hourly chart sample in memory."""
+        try:
+            sample: dict[str, Any] = {
+                "sample_version": 1,
+                "captured_at": datetime.now(UTC).isoformat(),
+                "request": {
+                    "start": start_str,
+                    "end": end_str,
+                    "usage_interval": USAGE_INTERVAL_HOURLY,
+                },
+            }
+
+            if not isinstance(payload, dict):
+                sample["payload_keys"] = []
+                sample["data_keys"] = []
+                sample["chart"] = {
+                    "Data": {
+                        "series": [],
+                    }
+                }
+                sample["non_meter_series_count"] = 0
+                sample["point_extra_keys"] = []
+                sample["hs_extra_keys"] = []
+                sample["truncated_points"] = 0
+                sample["shape_note"] = "payload_not_object"
+                self._hourly_contract_sample = sample
+                return
+
+            sample["payload_keys"] = sorted(
+                str(k)[:64] for k in payload.keys() if isinstance(k, str)
+            )[:50]
+
+            chart_dict: dict[str, Any] = {}
+            if "AjaxResults" in payload:
+                ajax_results = payload["AjaxResults"]
+                if isinstance(ajax_results, list):
+                    filtered_ajax: list[dict[str, str]] = []
+                    for item in ajax_results:
+                        if isinstance(item, dict) and isinstance(item.get("Action"), str):
+                            filtered_ajax.append({"Action": str(item["Action"])[:32]})
+                            if len(filtered_ajax) == 10:
+                                break
+                    chart_dict["AjaxResults"] = filtered_ajax
+                else:
+                    sample["ajax_results_type"] = type(ajax_results).__name__
+
+            raw_data = payload.get("Data")
+            if not isinstance(raw_data, dict):
+                sample["data_keys"] = []
+                chart_dict["Data"] = {"series": []}
+                sample["chart"] = chart_dict
+                sample["non_meter_series_count"] = 0
+                sample["point_extra_keys"] = []
+                sample["hs_extra_keys"] = []
+                sample["truncated_points"] = 0
+                sample["shape_note"] = "data_not_object"
+                self._hourly_contract_sample = sample
+                return
+
+            sample["data_keys"] = sorted(
+                str(k)[:64] for k in raw_data.keys() if isinstance(k, str)
+            )[:50]
+
+            data_dict: dict[str, Any] = {}
+            if isinstance(raw_data.get("unit"), str):
+                data_dict["unit"] = raw_data["unit"][:16]
+
+            raw_series = raw_data.get("series")
+            meter_series_out: list[dict[str, Any]] = []
+            non_meter_count = 0
+            point_extra_keys_set: set[str] = set()
+            hs_extra_keys_set: set[str] = set()
+            total_kept_points = 0
+            truncated_points = 0
+            meter_placeholders: dict[str, str] = {}
+
+            if isinstance(raw_series, list):
+                for series_item in raw_series:
+                    if not isinstance(series_item, dict):
+                        non_meter_count += 1
+                        continue
+                    name = str(series_item.get("name") or "")
+                    match = _METER_SERIES.match(name)
+                    if not match:
+                        non_meter_count += 1
+                        continue
+
+                    real_meter_id = match.group(1)
+                    if real_meter_id not in meter_placeholders:
+                        placeholder = str(len(meter_placeholders) + 1)
+                        meter_placeholders[real_meter_id] = placeholder
+                    else:
+                        placeholder = meter_placeholders[real_meter_id]
+
+                    series_points: list[dict[str, Any]] = []
+                    invalid_points = 0
+                    raw_points = series_item.get("data")
+                    if isinstance(raw_points, list):
+                        for pt in raw_points:
+                            if not isinstance(pt, dict):
+                                invalid_points += 1
+                                continue
+
+                            for k in pt.keys():
+                                if isinstance(k, str) and k not in ("x", "y", "hs"):
+                                    point_extra_keys_set.add(k[:64])
+
+                            raw_hs = pt.get("hs")
+                            if isinstance(raw_hs, dict):
+                                for k in raw_hs.keys():
+                                    if isinstance(k, str) and k not in ("start", "end"):
+                                        hs_extra_keys_set.add(k[:64])
+
+                            if total_kept_points >= 1500:
+                                truncated_points += 1
+                                continue
+
+                            pt_x: Any
+                            raw_x = pt.get("x")
+                            if isinstance(raw_x, bool):
+                                pt_x = f"<{type(raw_x).__name__}>"
+                            elif isinstance(raw_x, (int, float)) or raw_x is None:
+                                pt_x = raw_x
+                            else:
+                                pt_x = f"<{type(raw_x).__name__}>"
+
+                            pt_y: Any
+                            raw_y = pt.get("y")
+                            if isinstance(raw_y, bool):
+                                pt_y = f"<{type(raw_y).__name__}>"
+                            elif isinstance(raw_y, (int, float)) or raw_y is None:
+                                pt_y = raw_y
+                            else:
+                                pt_y = f"<{type(raw_y).__name__}>"
+
+                            point_obj: dict[str, Any] = {"x": pt_x, "y": pt_y}
+                            if isinstance(raw_hs, dict):
+                                raw_start = raw_hs.get("start")
+                                if isinstance(raw_start, str):
+                                    s_val: str | None = raw_start[:64]
+                                elif raw_start is None:
+                                    s_val = None
+                                else:
+                                    s_val = f"<{type(raw_start).__name__}>"
+
+                                raw_end = raw_hs.get("end")
+                                if isinstance(raw_end, str):
+                                    e_val: str | None = raw_end[:64]
+                                elif raw_end is None:
+                                    e_val = None
+                                else:
+                                    e_val = f"<{type(raw_end).__name__}>"
+
+                                point_obj["hs"] = {"start": s_val, "end": e_val}
+
+                            series_points.append(point_obj)
+                            total_kept_points += 1
+
+                    series_dict: dict[str, Any] = {
+                        "name": f"Meter #{placeholder}",
+                        "data": series_points,
+                    }
+                    if invalid_points > 0:
+                        series_dict["invalid_points"] = invalid_points
+                    meter_series_out.append(series_dict)
+
+            data_dict["series"] = meter_series_out
+            chart_dict["Data"] = data_dict
+            sample["chart"] = chart_dict
+            sample["non_meter_series_count"] = non_meter_count
+            sample["point_extra_keys"] = sorted(point_extra_keys_set)[:50]
+            sample["hs_extra_keys"] = sorted(hs_extra_keys_set)[:50]
+            sample["truncated_points"] = truncated_points
+
+            self._hourly_contract_sample = sample
+        except Exception as exc:
+            _LOGGER.debug(
+                "Failed to capture hourly contract sample: %s",
+                type(exc).__name__,
+            )
 
     def _parse_hourly_chart(self, data: dict[str, Any]) -> dict[str, Any]:
         """Extract timestamped hourly points without trusting the vendor contract.
