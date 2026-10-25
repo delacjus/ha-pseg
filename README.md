@@ -7,223 +7,153 @@
 
 Home Assistant integration for Public Service Electric and Gas (PSE&G) customers in New Jersey. Retrieves daily electric meter readings, costs, and historical energy trends directly from the PSE&G MySmartEnergy portal (MyMeter).
 
-Includes a built-in Lovelace card with 7-day and 14-day history views and kWh / cost switching.
+Includes a built-in Lovelace card with 7-day and 14-day history views and kWh / cost switching. The card loads automatically into Home Assistant dashboards since release 1.6.1.
 
 ![PSEG Energy Card](docs/card.png)
 
-## Fork Differences (Crestwood Hardening)
+## About This Fork (`delacjus/ha-pseg`)
 
-This fork (`delacjus/ha-pseg`, forked from `sidprax/ha-pseg`) hardens the integration for security and long-term stability:
+This project (`delacjus/ha-pseg`, current release **1.6.1**) is an independent fork of `sidprax/ha-pseg`. It hardens the integration for security, authentication reliability, and long-term statistics integrity:
 
-- **Security Hardening**: This fork does not ship or support the upstream companion add-on; that path is removed here, and the integration talks to PSE&G directly. Hard-coded fallback URLs are gone. The MyMeter email/password you enter is stored in this integration's config entry so Home Assistant can sign in with it — it does not stay in the browser.
-- **Strict Host Allowlist**: Every HTTP request, redirect, and form submission is strictly restricted to `{mysmartenergy.nj.pseg.com, id.myaccount.pseg.com}`. With a saved MyMeter email/password, the client is narrowed further to `mysmartenergy.nj.pseg.com` only, so local sign-in never sends anything to Okta.
-- **Background Renewal**: Uses a domain-scoped cookie jar. With a saved MyMeter login or `MM_RememberMe` cookie, Home Assistant renews the portal session itself and does not use Okta. The 3-minute background check for those portal-only sessions is a credential-free `GET /Dashboard` probe, not a sign-in. Only when that probe is answered with the sign-in page does a bounded, cookie-only renewal run: MyMeter re-issues its session cookie, at most twice per `MM_RememberMe` generation and at least 15 minutes apart, and the result is kept only after a read-only meter check. Network errors, 5xx answers and maintenance pages never start a renewal. Okta-only setups renew through standard SAML auto-post flows, with a 10-minute keepalive check. PSE&G does not document how long a portal session lasts; one observed lapse (~9 minutes without an accepted request) is not a vendor contract. When MyMeter asks for a CAPTCHA, security question or password change, automatic sign-in stops until you re-authenticate: the integration never posts the saved password from the background timer. Renewal reduces re-prompts; it is not a promise of a permanent session.
-- **Statistics Corruption Fix**: Uses Home Assistant External Statistics (`pseg:<meter_id>_energy_consumption` and `pseg:<meter_id>_energy_cost`) with strict cumulative sum preservation across rolling windows and backfills.
-- **Hourly Statistics with a Daily Gate**: Recent closed New York days are promoted to hourly External Statistics only when all 23/24/25 expected hours are present and their sum agrees with the independently fetched daily total. Incomplete days keep their current daily row.
-- **Transparent Cost Estimation**: Accurately describes cost calculations as estimates based on a configurable electric rate ($0.247/kWh default), adjustable at any time via integration Options.
-- **Statistics Kill Switch**: One option stops automatic, deferred and manual statistics imports while sign-in and keepalive keep running.
-- **HA Entity Best Practices**: Removed hardcoded `entity_id` overrides and entity registry hacks. Fully leverages `_attr_has_entity_name` and translation keys.
-- **Frontend XSS Protection**: Sanitizes dynamic data and error messages rendered inside `pseg-energy-card`.
+- **Direct local MyMeter sign-in**: Home Assistant signs into MyMeter directly. There is no companion add-on, and credentials are never sent over HTTP to a `localhost:8000` helper.
+- **Strict host allowlist**: Every HTTP request, redirect, and form submission is strictly restricted to `{mysmartenergy.nj.pseg.com, id.myaccount.pseg.com}`. When signing in with a MyMeter email and password, requests are narrowed to `mysmartenergy.nj.pseg.com` only, preventing any credentials or tokens from being sent to Okta.
+- **Bounded cookie-only renewal**: Portal sessions renew in the background without re-sending passwords. The integration runs a credential-free `GET /Dashboard` check every 3 minutes. If the session has lapsed, it performs a bounded cookie renewal (at most 2 attempts per cookie generation, spaced at least 15 minutes apart) and verifies access with a read-only meter check before saving cookies.
+- **Diagnostics redaction**: Diagnostic downloads automatically redact email addresses, passwords, session cookies, and meter serial numbers.
+- **Stable statistics with correction guards**: Uses Home Assistant External Statistics (`pseg:<meter_id>_energy_consumption` and `pseg:<meter_id>_energy_cost`) with strict cumulative sum preservation across rolling windows and backfills. Gaps are preserved and existing data is never wiped out.
+- **Hourly statistics**: Live since release 1.6.0. Promotes complete recent days to hourly resolution while safely falling back to daily rows when data is incomplete.
+
+### Upstream Synchronization
+
+From upstream `sidprax/ha-pseg`, this fork has adopted:
+- **Official PSE&G logos** (upstream 1.0.4): High-resolution `icon.png` and `logo.png` assets.
+- **Automatic card loading** (upstream 1.0.1): Automatically registers `pseg-energy-card` with Home Assistant dashboards upon startup.
+
+This fork deliberately does **not** adopt:
+- **Companion auth server**: Upstream transmits plaintext credentials over unencrypted HTTP to a local helper server. This fork communicates directly with PSE&G over encrypted HTTPS.
+- **Mixed cost statistic**: Upstream (1.0.2) mixes portal-reported dollars with a rate-based estimate inside one cost statistic, and derives a floating 7-day average rate. This fork keeps its cost statistic a stable configured-rate estimate until real portal cost has been verified, and will then add real cost as a **separate** series (see the cost roadmap below).
+- **OptionsFlow update listeners** (upstream 1.0.3): The fork already uses `OptionsFlowWithReload` to reload configuration cleanly on save without update listener races.
 
 ## Features
 
-- **Daily Smart Meter Readings**: Captures daily electricity usage (`sensor.pseg_electricity_consumption`).
-- **Hourly Statistics**: Promotes complete recent days to hourly External Statistics, with an explicit daily fallback and per-day provenance.
-- **Cost Estimation**: Estimates daily electricity costs in USD (`sensor.pseg_electricity_cost`).
-- **Home Assistant Energy Dashboard**: External Long-Term Statistics (LTS) support for both consumption and cost.
-- **Historical Backfill**: Built-in action (`pseg.backfill_history`) to backfill up to 2 years of historical daily usage and cost directly into Home Assistant Energy statistics.
-- **Configurable Rate**: Set your estimated electricity rate ($/kWh) in integration Options.
+- **Daily Smart Meter Readings**: Captures daily electricity usage in kWh (`sensor.pseg_electricity_consumption`).
+- **Hourly Statistics**: Live since release 1.6.0. Automatically promotes complete days to hourly External Statistics with strict validation guards.
+- **Cost Estimation**: Estimates daily electricity costs in USD (`sensor.pseg_electricity_cost`) using your configured $/kWh rate.
+- **Home Assistant Energy Dashboard**: Native External Long-Term Statistics (LTS) support for both consumption and cost.
+- **Historical Backfill**: Built-in action (`pseg.backfill_history`) to backfill up to 2 years of historical daily usage and cost into Home Assistant Energy statistics.
+- **Configurable Rate**: Set your estimated electricity rate ($/kWh) in integration Options at any time.
 - **Outdoor Temperature**: Records daily low, average, and high temperatures reported alongside meter readings (`sensor.pseg_outdoor_temperature`).
 - **14-Day History**: Provides 14 days of interval usage and cost data in entity state attributes for local charting.
-- **Manual Refresh**: Includes a refresh button (`button.pseg_refresh_data`) to trigger an immediate data fetch.
-- **Session Telemetry**: Monitors session lifespan and renewal metrics (including SAML SSO renewals for the legacy Okta path) directly on the Connection Status sensor.
-- **Built-in Lovelace Card**: Bundles `pseg-energy-card` ready to add from the card picker.
-
-## Signing In: Your MyMeter Email and Password (non-Okta)
-
-The recommended way is to let Home Assistant sign in for you with a MyMeter
-email/password. MyMeter is the portal at `https://mysmartenergy.nj.pseg.com`; its
-**Email** and **Password** boxes are a separate login from the "Sign in Via My
-Account" button (that one is PSE&G's Okta account). This is the non-Okta route:
-Home Assistant never sends that saved login through Okta, so Okta's SMS/email
-two-factor prompt is not used. It does **not** promise that PSE&G will never ask
-for another security check (for example a CAPTCHA, or a password change on the
-MyMeter account); those still have to be answered by you. If MyMeter answers the
-email/password sign-in with a redirect to Okta, Home Assistant refuses to follow
-it rather than silently signing in through Okta.
-
-1. Open `https://mysmartenergy.nj.pseg.com` and create (or use) a MyMeter login in
-   the **Email** / **Password** boxes on that page.
-2. Use a password you don't use anywhere else. Home Assistant has to store it in
-   its config so it can sign in for you.
-3. In Home Assistant, add the integration and enter that same email and password.
-   Home Assistant stores that login in the integration's config and uses it for
-   MyMeter's own sign-in whenever the portal session ends. How long that keeps
-   working unattended is not verified: PSE&G can still ask for another check, for
-   example a CAPTCHA, and the dialog then asks you.
-
-If MyMeter ever asks for a captcha, a security question, or a password change, Home
-Assistant cannot answer that. Instead of retrying (which could lock the account),
-it shows a **Re-authenticate** prompt. Answer the question in your browser, then
-submit the Home Assistant prompt with the boxes left empty: it retries the saved
-login. A CAPTCHA is handled by the dedicated step below.
-
-### If PSE&G asks for a CAPTCHA
-
-MyMeter's login is protected by an invisible reCAPTCHA. You solve it in your own
-browser; Home Assistant never asks you for the proof until it actually needs one.
-
-1. In the Home Assistant dialog, note the helper address it shows
-   (`<your-home-assistant>/api/pseg/captcha-helper`) and open it in a **desktop**
-   browser.
-2. On that page, download the helper extension ZIP and extract it. The ZIP
-   contains exactly `manifest.json`, `service-worker.js` and
-   `pseg-captcha-helper.js`; the page and the ZIP are public and static.
-3. Open `chrome://extensions` (or `edge://extensions`), enable **Developer
-   mode**, choose **Load unpacked**, and select the extracted folder. Pin
-   "PSE&G verification helper" if you like.
-4. In another tab, open `https://mysmartenergy.nj.pseg.com`, click the helper's
-   toolbar button (the panel shows **Ready**), then click **Login** and solve
-   the CAPTCHA yourself. While active, the helper blocks the portal's own sign-in
-   request so the proof stays unused.
-5. If the panel says **Verification captured**, the portal staying on its sign-in
-   screen is expected: the helper is holding the proof for Home Assistant.
-   If it still says **Ready**, nothing has been captured yet. Press **Copy
-   verification** in the panel, then return to the Home Assistant dialog, paste it
-   into the masked **CAPTCHA proof** field, and submit. Google's reCAPTCHA response
-   is only valid for about two minutes, so capture and paste it promptly; Home
-   Assistant drops the pending sign-in after ten minutes without a proof. **Close
-   helper** (or reloading the tab) removes the panel and restores the portal's
-   login.
-
-When a local MyMeter sign-in succeeds for an account already in Home Assistant,
-the Add integration dialog updates that entry's saved sign-in. It confirms
-**The saved sign-in for this PSE&G account was updated.** An existing disabled
-entry stays disabled; its energy history and settings are preserved.
-
-The proof is single-use: Home Assistant sends it once, never saves it, and never
-reuses it after a timeout or a lost reply. Capture a fresh one instead. You can
-press **Cancel this sign-in** in the dialog to drop the attempt.
-
-The helper page also keeps the older bookmarklet as an explicitly unverified
-fallback. The portal's page policy may block a `javascript:` bookmark, so prefer
-the extension (see `docs/captcha-extension-testing.md`).
-
-> **Experimental.** The extension has been seen showing **Ready** and closing
-> cleanly on one desktop browser (browser name/version not recorded); that is not
-> browser acceptance. Handing a proof solved in your browser to Home Assistant has
-> not been verified against a live PSE&G account, and other browsers, portability
-> and unattended renewal are unverified. PSE&G may still refuse a proof solved
-> elsewhere than Home Assistant; the reason is not known yet. If that happens, the
-> dialog asks for a fresh proof; re-authenticating in the browser remains the
-> fallback.
-
-A CAPTCHA-assisted sign-in proves the account works *now* and gives the current
-access only. It does not create a permanent renewable session, so a later CAPTCHA
-prompt needs you again.
-
-### How background renewal works
-
-Three different things can happen, and they have different limits:
-
-1. **A keepalive probe** — every 3 minutes for a portal-only session, a
-   credential-free `GET /Dashboard`. It only checks whether the portal still
-   accepts the session; it never signs in, posts a password or contacts Okta.
-2. **A confirmed cookie renewal** — only when that probe lands on the sign-in page
-   *and* the jar holds `MM_RememberMe`: Home Assistant asks the portal to re-issue
-   its own session cookie (no email/password, no Okta, no CAPTCHA solving). The
-   result is published only if a short read-only daily chart read still shows this
-   entry's meter; otherwise the previous cookies and telemetry are restored. A jar
-   that passed that proof is saved even when a later read in the same poll fails,
-   and a later failed response's own `Set-Cookie` is never saved as if the renewal
-   had issued it. The product limit is two attempts per cookie generation (one
-   initial attempt and one retry after a *transient* failure), at least 15 minutes
-   apart, including across generations. A refused cookie, a CAPTCHA demand or a
-   security step ends that generation until the cookie is replaced or you sign in
-   again.
-3. **Human re-authentication** — required when the cookie is unusable, a CAPTCHA
-   appears, or PSE&G asks for a security step or password change. Completing the
-   prompt starts a fresh renewal generation; it does not reset the 15-minute gap.
-   A CAPTCHA or security step met by an automatic attempt is remembered across an
-   ordinary reload, a failed startup and a process restart; it stops every later
-   automatic sign-in and cookie renewal until a confirmed sign-in clears it.
-
-These limits are not a TTL. PSE&G publishes neither the portal session lifetime nor
-the `MM_RememberMe` lifetime, and an anonymous sign-in response cannot distinguish
-an expired cookie from a dropped one, a revoked one, or a vendor-side fault. So the
-integration acts only on the typed sign-in response and never assumes a fixed
-number of minutes.
-
-Polling, background checks and an ordinary integration reload share one renewal
-budget. A failed startup also keeps its spent attempt and any terminal refusal;
-reloading cannot retry the same refused cookie. Only an actual transient failure
-earns the second attempt. A successful renewal with an unchanged Remember Me
-cookie, an unfinished request or an unknown outcome earns no retry. While an
-earned retry is still inside its 15-minute window and no saved sign-in is
-available, the poll reports an ordinary transient wait: Home Assistant keeps
-retrying for it instead of stopping the poll schedule and asking you to sign in
-again. A settled generation that has no retry left asks for sign-in immediately,
-even inside that window. A normal dashboard response that merely re-issues the
-Remember Me cookie is not a new generation; only a cookie replaced during a
-verified renewal, or a completed sign-in, restarts the generation.
-
-The budget contains only an attempt count, a timestamp, a fixed terminal reason
-and a retry flag. Invalid stored budget data stops automatic cookie renewal;
-complete the normal re-authentication prompt to repair it. Do not delete the
-budget to force another attempt. Home Assistant saves the budget with the
-confirmed cookie jar in the same entry update, so a reload cannot pair a rearmed
-budget with a replaced cookie. A renewal-verified jar, a spent attempt, and a
-CAPTCHA or security step seen by an automatic attempt survive an ordinary reload
-or failed startup; an abrupt process or disk failure can still lose a recent save,
-so crash durability is best effort. Only a completed sign-in clears the terminal
-step. The diagnostic `has_remember_me` field reports presence as a boolean only.
-
-For maintainers, the offline regression and guard-removal checks are documented in
-[`docs/auth-review-verification.md`](docs/auth-review-verification.md). To roll back
-only this auth change, use reviewed hourly base `2285845` and retain every hourly
-statistics row, provenance record and pending journal. Do not reinstall 1.4.2.
-
-### Older methods
-
-Both still work, but they are worse:
-
-- **Okta cookies** ("Sign in Via My Account"). PSE&G's Okta session has no "keep me
-  signed in" and ends about an hour after login, so the cookies need re-pasting
-  hourly.
-- **MyMeter cookie paste** (`MM_RememberMe`). PSE&G issues this cookie to your
-  browser, and pasted copies have stopped working outside it in practice; if a
-  pasted copy is refused, the dialog asks for the MyMeter email/password instead.
+- **Manual Refresh**: Includes a refresh button (`button.pseg_refresh_data`) to trigger an immediate portal sync.
+- **Session Telemetry**: Monitors session lifespan and renewal status directly on the Connection Status sensor (`sensor.pseg_connection_status`).
+- **Built-in Lovelace Card**: Bundles `pseg-energy-card`, auto-registered and ready to add to any dashboard since 1.6.1.
 
 ## Installation
 
 ### Via HACS (Recommended)
 
-1. In Home Assistant, open **HACS** > **Integrations**.
-2. Click the three dots in the top right and select **Custom repositories**.
-3. Add the repository:
+Install `delacjus/ha-pseg` as a custom repository in HACS:
+
+1. In Home Assistant, navigate to **HACS** > **Integrations**.
+2. Click the three dots (top right) and select **Custom repositories**.
+3. In the **Repository** field, enter:
    ```text
    https://github.com/delacjus/ha-pseg
    ```
-4. Set category to **Integration** and click **Add**.
-5. Find **PSE&G Energy (New Jersey)**, click **Download**, and restart Home Assistant.
+4. Set the **Category** to **Integration** and click **Add**.
+5. Find **PSE&G Energy (New Jersey)** in the integrations list.
+6. Click **Download**, select the latest release (**1.6.1** or newer), and click **Download**.
+7. Restart Home Assistant.
+
+> **Note**: Do not search for or install the default upstream listing (`sidprax/ha-pseg`). This fork must be added as a custom repository using the URL above.
 
 ### Manual Installation
 
-1. Copy the `custom_components/pseg` directory to your Home Assistant `config/custom_components/` folder.
-2. Restart Home Assistant.
+1. Download the latest release from [GitHub Releases](https://github.com/delacjus/ha-pseg/releases).
+2. Copy the `custom_components/pseg` directory into your Home Assistant `config/custom_components/` folder.
+3. Restart Home Assistant.
 
 ## Configuration
 
 1. In Home Assistant, go to **Settings** > **Devices & Services** > **Add Integration**.
 2. Search for **PSE&G Energy (New Jersey)**.
-3. Enter your MyMeter **Email** and **Password** (the ones from
-   `https://mysmartenergy.nj.pseg.com`).
+3. Enter your MyMeter **Email** and **Password** (the login credentials from `https://mysmartenergy.nj.pseg.com`).
 4. Click **Submit**.
 
-Home Assistant signs in with that login whenever the portal session ends and renews
-in the background. How long unattended renewal keeps working is not verified, and
-PSE&G can still ask for a CAPTCHA or security step. The optional **Okta Cookies**
-and **Portal Cookies** boxes are only for the older methods above.
+Home Assistant securely stores your credentials in the integration config entry and uses them to authenticate directly with MyMeter.
+
+## Signing In and the CAPTCHA Helper Extension
+
+The recommended login method uses your MyMeter email and password directly on `https://mysmartenergy.nj.pseg.com`. These credentials are separate from PSE&G's "Sign in Via My Account" button (which routes through Okta with two-factor SMS/email). Home Assistant signs in directly through MyMeter and never follows redirects to Okta.
+
+### Solving CAPTCHAs with the Browser Extension
+
+MyMeter protects logins with an invisible reCAPTCHA. Home Assistant cannot solve CAPTCHAs automatically. When PSE&G presents a challenge, Home Assistant pauses and asks you to capture a verification token using a lightweight browser helper extension.
+
+The extension consists of three files in `custom_components/pseg/frontend/`:
+- `manifest.json`: Manifest V3 configuration.
+- `service-worker.js`: Background script that activates only when you click the toolbar icon.
+- `pseg-captcha-helper.js`: Injected script that holds the verification token on the page.
+
+*(Note: `pseg-energy-card.js` also resides in the frontend folder for dashboard display, but it is not part of the extension).*
+
+**Security and permissions:**
+- The extension requests only `activeTab` and `scripting` permissions.
+- It has no host permissions, runs no background network requests, and stores no data.
+- It only acts when you explicitly click its toolbar button, and only on `https://mysmartenergy.nj.pseg.com`.
+
+#### Step 1: Obtain the Extension ZIP
+
+You can download the helper extension ZIP in either of two ways:
+1. **From your Home Assistant instance**: Navigate to `<your-ha-url>/api/pseg/captcha-helper` in a desktop browser and click **Download helper extension (ZIP)**.
+2. **From GitHub Releases**: Download `pseg-captcha-helper-extension.zip` directly from the latest [GitHub Release](https://github.com/delacjus/ha-pseg/releases). A matching `.sha256` checksum file is provided to verify file integrity.
+
+#### Step 2: Install the Extension in Chrome or Edge
+
+1. Extract the downloaded ZIP file into a dedicated folder on your computer.
+2. Open your desktop browser and go to `chrome://extensions` (in Google Chrome) or `edge://extensions` (in Microsoft Edge).
+3. Enable **Developer mode** (toggle switch in the top right or left).
+4. Click **Load unpacked** and select the folder where you extracted the extension.
+5. Pin the "PSE&G verification helper" icon to your browser toolbar for easy access.
+
+#### Step 3: Capture the Verification Proof
+
+1. In a new tab, open `https://mysmartenergy.nj.pseg.com`.
+2. Click the helper extension button in your toolbar. The panel in the bottom-right corner will show **Ready**.
+3. Click the MyMeter **Sign In** button and solve the CAPTCHA challenge in your browser.
+4. While active, the helper intentionally holds the response and pauses the website's login request so the token remains unspent.
+5. When the helper panel displays **Verification captured**, click **Copy verification**.
+6. Switch back to the Home Assistant setup dialog, paste the token into the masked **CAPTCHA proof** field, and click **Submit**.
+7. Click **Close helper** in the browser panel (or reload the tab) to restore normal portal behavior.
+
+> **Important Caveats:**
+> - The helper extension requires a desktop browser (Chrome or Edge).
+> - Google reCAPTCHA tokens expire in approximately 2 minutes; copy and submit the token promptly.
+> - A CAPTCHA-assisted sign-in verifies your session for current access; it does not guarantee permanent unattended access. PSE&G may periodically request another security check or CAPTCHA.
+
+### How Background Renewal Works
+
+Once signed in, Home Assistant maintains the session in the background:
+1. **Keepalive probe**: Every 3 minutes, Home Assistant sends a credential-free `GET /Dashboard` request to check if the session is alive.
+2. **Cookie renewal**: If the portal prompts for a renewed session and a `MM_RememberMe` cookie is present, Home Assistant requests a refreshed session cookie without re-sending your password. Renewals are bounded to at most 2 attempts per cookie generation, spaced at least 15 minutes apart, and verified with a read-only meter reading before being saved.
+3. **Re-authentication prompt**: If a session expires completely, or if PSE&G demands a new CAPTCHA or security question, automatic attempts stop safely. Home Assistant alerts you to re-authenticate rather than risking account lockout.
+
+### Older Authentication Methods
+
+The integration retains backward-compatible support for legacy login methods:
+- **Okta cookies**: Paste cookies obtained after signing in via "Sign in Via My Account". These sessions expire after approximately one hour and require periodic manual pasting.
+- **MyMeter cookie paste (`MM_RememberMe`)**: Browser-exported `MM_RememberMe` cookies often fail outside the browser. If rejected, Home Assistant prompts for your MyMeter email and password.
+
+## Hourly and Daily Statistics
+
+Hourly statistics are **live since release 1.6.0**:
+
+- **New York Wall-Clock Starts**: Hourly data points from PSE&G represent `America/New_York` wall-clock hour starts (verified against portal CSV exports and official daily totals).
+- **Strict Date Validation**: An hourly interval is accepted only when both interval boundary labels strictly match `MM/DD/YYYY` format with matching local dates.
+- **Daily Total Guard**: A completed day is promoted from daily to hourly statistics only when the sum of its hourly readings matches the independently reported daily total within rounding tolerance.
+- **DST Handling**: Daylight Saving Time transitions are handled strictly according to New York local time. Spring-forward days have 23 hourly intervals. Fall-back days (such as November 1, 2026) remain recorded as daily totals by design to prevent ambiguous local hour collisions.
+- **Sensor Attributes**: The consumption sensor exposes `statistics_granularity` (`hourly`, `mixed`, or `daily`), `statistics_hourly_complete_days`, and `statistics_hourly_incomplete_days`.
+
+For detailed architecture and verification procedures, see [Hourly Statistics Documentation](docs/hourly-statistics.md).
 
 ## Home Assistant Energy Dashboard
 
@@ -235,66 +165,48 @@ The integration imports external long-term statistics for both electricity consu
 4. Select **Use an existing statistic with total energy costs** and choose `pseg:<meter_id>_energy_cost`.
 5. Click **Save**.
 
-The Energy Dashboard will reflect daily consumption and costs seamlessly.
+The Energy Dashboard will reflect your electricity consumption and estimated costs.
 
-### Hourly and daily statistics
+### Cost Estimation and Roadmap
 
-Recent usage is requested at hourly resolution on each poll, but the integration
-keeps the existing daily rows unless an hourly day can be proven complete. PSE&G's
-real hourly start/end and zero semantics are not yet verified against a live
-account, so the rules are deliberately conservative:
+- **Estimated Cost Today**: The current cost entity (`sensor.pseg_electricity_cost`) and statistics series (`pseg:<meter_id>_energy_cost`) calculate costs as an estimate: `kWh × configured rate` (set in integration Options, defaulting to $0.247/kWh).
+- **Roadmap (Real PSE&G Cost — Not Yet Released)**:
+  - **Release 1.7.0 (Planned)**: Portal-reported dollar evidence capture, disabled by default and controlled via a new `pseg.set_cost_mode` action.
+  - **Release 1.8.0 (Planned)**: A separate actual-cost statistics series (`pseg:<meter_id>_energy_cost_actual`) with a dedicated toggle for the Energy Dashboard.
 
-- A day is a **New York calendar day** (America/New_York), never the Home Assistant
-  host time zone. A normal day has 24 expected UTC hourly starts; the spring DST
-  day has 23 and the fall DST day 25.
-- A closed day is promoted only when it has **exactly** those starts, every value is
-  finite (an explicit zero counts as data), **both** raw labels carry an explicit
-  timezone/offset and name `[x, x+1h)`, and its sum matches the separately fetched
-  **daily** total within rounding tolerance. Date-only or bare wall-clock labels are
-  `timestamp_semantics_unverified`; they never promote. Point count alone never
-  promotes a day.
-- The first hourly value overwrites the existing New York-midnight daily row in the
-  same statistic id; the rest of the day is replaced by its full hourly set. An
-  incomplete or sparse day keeps its stored contribution unchanged.
-- `pseg.backfill_history` remains daily-only. A daily retry of an already promoted
-  day keeps the hourly rows. If a daily total contradicts a promoted day and no
-  complete hourly replacement is available, the whole import is rejected **before
-  any write** and logged; nothing is silently skipped.
-- The journal is written durably before any recorder write. The exact snapshot is
-  read back from the Store path, because Home Assistant's Store can swallow a real
-  write error. While a physical save is outstanding, failed, stale or unreadable,
-  recovery refuses rather than replaying in-memory state; it retries after the bytes
-  persist. A chart login redirect is an authentication
-  failure, not a daily fallback.
-- Cost remains an estimate: `kWh × configured rate`. Hourly cost states keep six
-  decimals, so a day of hours never accumulates cent rounding. The Energy Dashboard
-  cost is still an estimate, not a bill.
-- Sensor history and `latest_*` values remain the authoritative **daily** series;
-  hourly rows are used only for long-term statistics and provenance. A promoted
-  day never changes the values the card or daily sensors show.
+## Lovelace Card
 
-The consumption sensor reports `statistics_granularity` (`hourly`, `mixed` or
-`daily`), `statistics_hourly_complete_days` and `statistics_hourly_incomplete_days`
-for the last poll. Until the first normal poll after an approved deployment proves
-the vendor's hourly contract, `daily` is the expected, safe result. See
-[`docs/hourly-statistics.md`](docs/hourly-statistics.md) for the full migration,
-verification and rollback runbook.
+The `pseg-energy-card` bundles with the integration and **auto-loads automatically since release 1.6.1**. No manual Lovelace resource registration is needed (existing manual resource entries are harmless and do not conflict).
+
+Add the card to any dashboard:
+
+```yaml
+type: custom:pseg-energy-card
+entity: sensor.pseg_electricity_consumption
+```
+
+### Card Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `entity` | string | `sensor.pseg_electricity_consumption` | Primary consumption entity |
+| `toggle_entity` | string | `input_boolean.pseg_display_dollars` | Optional helper entity to switch between kWh and dollar view |
+| `range_toggle_entity` | string | `input_boolean.pseg_chart_14d` | Optional helper entity to switch between 7-day and 14-day chart view |
+| `cost_per_kwh` | number | `0.247` | Override effective rate in card calculations |
+| `next_update_entity` | string | `sensor.pseg_next_update` | Entity holding the next scheduled fetch timestamp |
+| `connection_status_entity` | string | `sensor.pseg_connection_status` | Connection status entity; shows re-authentication banner when `auth_required` |
+| `show_next_update` | boolean | `false` | Display next scheduled fetch timestamp beside the meter label |
+| `popup_hash` | string | `null` | URL hash to open a custom popup card on tap. When omitted, tapping opens standard entity dialog. |
 
 ## Stopping Statistics Imports (Rollback)
 
-After hourly data exists, reinstalling the old 1.4.2 daily importer is **not** a
-safe rollback: it would add a daily row beside the hourly rows or overwrite the
-first hour, double-counting or corrupting the day. The supported stop is the
-integration option:
+After hourly data exists, reinstalling the legacy 1.4.2 daily importer is **not** supported: it would corrupt or double-count days. To stop statistics imports safely:
 
 1. Open **Settings** > **Devices & Services** > **PSE&G** > **Configure**.
-2. Turn off **Import Long-Term Statistics** and save.
-3. The entry reloads. Sign-in, cookie renewal and the keepalive continue; automatic,
-   startup-deferred and manual statistics imports stop.
+2. Turn off **Import Long-Term Statistics** and click **Save**.
+3. The entry automatically reloads. Authentication keepalives and entity sensors continue updating, while automatic and manual statistics imports stop cleanly.
 
-The choice is stored in the config entry and survives restarts. Restoring recorder
-data is outside this integration: export it first with your own recorder/statistics
-backup. Never clear statistics or run a history reset as a rollback.
+To resume imports at any time, re-enable the option in the same menu.
 
 ## Historical Backfill
 
@@ -314,40 +226,13 @@ data:
   end_date: "2026-10-19"
 ```
 
-The backfill action stays daily. It uses the same reconciliation as the poll: older
-and newer stored rows are re-chained, gaps are kept, and an existing promoted hourly
-day is never downgraded. If the requested daily range contradicts a promoted day and
-there is no complete hourly replacement, the action logs an explicit rejection and
-writes nothing for that entry. While **Import Long-Term Statistics** is off, the
-action returns `0` without contacting the portal.
-
-## Lovelace Card
-
-The integration registers `pseg-energy-card` automatically. Add it to any dashboard:
-
-```yaml
-type: custom:pseg-energy-card
-entity: sensor.pseg_electricity_consumption
-```
-
-### Card Options
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `entity` | string | `sensor.pseg_electricity_consumption` | Primary consumption entity |
-| `toggle_entity` | string | `input_boolean.pseg_display_dollars` | Optional helper entity to switch between kWh and dollar view |
-| `range_toggle_entity` | string | `input_boolean.pseg_chart_14d` | Optional helper entity to switch between 7-day and 14-day chart view |
-| `cost_per_kwh` | number | `0.247` | Override effective rate in card calculations |
-| `next_update_entity` | string | `sensor.pseg_next_update` | Entity holding the next scheduled fetch timestamp |
-| `connection_status_entity` | string | `sensor.pseg_connection_status` | Connection status entity; the card shows the re-authenticate banner when it reads `auth_required` |
-| `show_next_update` | boolean | `false` | Display the next scheduled fetch timestamp beside the meter label |
-| `popup_hash` | string | `null` | URL hash to open a custom popup card on tap. When omitted, tapping opens standard entity dialog. |
+The backfill action operates at daily resolution and preserves existing hourly days. If **Import Long-Term Statistics** is disabled, the action exits immediately without contacting the portal.
 
 ## Entities Provided
 
-Entity ids below are for the first registered account in Home Assistant's entity registry (device name `PSEG`). When multiple accounts are present, Home Assistant may initialize entries concurrently on first load, so whichever account registers its entities first receives the base ids and a second account gets the `_2` suffix; once registered, entity ids remain stable across restarts and each account's entities stay uniquely bound to its config entry. Point the card's `entity`, `next_update_entity` and `connection_status_entity` options at the account's registered entity ids.
+Entities created for the registered meter account:
 
-- `sensor.pseg_electricity_consumption`: Latest daily electric usage in kWh (contains `history_14d`, `statistics_granularity`, and hourly completeness attributes)
+- `sensor.pseg_electricity_consumption`: Latest daily electric usage in kWh (includes `history_14d`, `statistics_granularity`, and hourly completeness attributes)
 - `sensor.pseg_electricity_cost`: Latest daily estimated cost in USD
 - `sensor.pseg_meter_id`: Meter serial number / identification
 - `sensor.pseg_latest_reading_date`: Date of the most recent recorded reading
@@ -358,18 +243,17 @@ Entity ids below are for the first registered account in Home Assistant's entity
 
 ## Testing
 
-The integration includes a test suite covering authentication lifecycles, hourly statistics, parser contracts, offline guards, and copy-only mutation testing.
+The integration maintains a comprehensive test suite covering authentication lifecycles, parser contracts, hourly statistics invariants, and copy-only mutation testing.
 
-Run local release check profiles using the test environment:
+- **Automated CI**: GitHub Actions runs `test (3.14)` (fast pytest suite and ruff linting), `node` (Node 22 offline suite), and `hassfest`.
+- **Local Testing**: Run the complete local test suite in disposable snapshots:
+  ```sh
+  # from the repository root, with a Python 3.14 environment that has requirements_test.txt installed
+  python -B tools/release_check.py all --source . --python "$(command -v python)"
+  ```
+  The `all` profile runs `fast`, `node`, `independent`, and `mutation` suites in isolated temporary directories.
 
-```sh
-export PSEG_TEST_PYTHON=/home/tacoriffic/ha-pseg/.venv/bin/python
-export PYTHONDONTWRITEBYTECODE=1 RUFF_NO_CACHE=true
-"$PSEG_TEST_PYTHON" tools/release_check.py fast --source . --python "$PSEG_TEST_PYTHON"
-"$PSEG_TEST_PYTHON" tools/release_check.py node --source . --python "$PSEG_TEST_PYTHON"
-```
-
-For the complete testing workflow—including `independent`, `mutation`, and `all` profiles, snapshot verification, and test markers—see [Testing Documentation](docs/testing.md).
+For complete testing details, see [Testing Documentation](docs/testing.md).
 
 ## License
 

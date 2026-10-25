@@ -1,0 +1,32 @@
+name: Release Assets
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  upload-extension-assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Build extension archive and checksum
+        run: |
+          mkdir -p dist
+          python tools/build_extension_zip.py --out dist
+
+      - name: Upload extension assets to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" dist/pseg-captcha-helper-extension.zip dist/pseg-captcha-helper-extension.zip.sha256 --clobber
