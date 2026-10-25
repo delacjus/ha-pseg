@@ -109,6 +109,17 @@ Filter to a single mutant label for quick diagnosis:
 "$PSEG_TEST_PYTHON" -B tools/mutation_check.py --source . --python "$PSEG_TEST_PYTHON" --table tests/mutations/auth_guards.py --only 1-entry-shared-admission --json
 ```
 
+## Contract Testing Suites
+
+- **`tests/test_cost_contract.py`**: Offline pure contract test suite freezing the
+  PSE&G portal dollar contract (`UsageType: "2"`) and non-authoritative request seam.
+  It enforces preservation of the 13 canonical Chart form fields, verifies the current
+  production consumption request baseline, enumerates the 8 non-authoritative evidence
+  statuses, validates authoritative meter matching (rejecting upstream `series[0]` and
+  unauthoritative discovery), verifies that zero is a valid numeric observation
+  (rejecting upstream zero-to-estimate substitution), and quarantines booleans, NaN/Inf,
+  negative credits, duplicates, and non-USD units.
+
 ## Freeze and Snapshot Utilities
 
 The underlying snapshot engine in `tools/_snapshot.py` is accessible directly via `release_check`:

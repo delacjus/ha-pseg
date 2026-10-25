@@ -168,6 +168,11 @@ reason to clear history.
 - Promotion requires an independent daily total; point count alone is never enough.
 - Cost is an estimate, never a PSE&G bill. Changing the rate affects future imports;
   it does not rewrite already promoted days through a daily-only retry.
+- Portal-reported actual dollar cost (`UsageType: "2"`) is governed by the
+  independent portal cost contract in `docs/portal-cost.md`. In v1.7.0, cost evidence
+  is non-authoritative and isolated; it does not write to recorder statistics or
+  alter the estimated cost series (`_energy_cost`). A zero observation in portal cost
+  is valid data and is never replaced by an estimate.
 - Statistic ids, metadata and the existing history are preserved. No history clear
   or reset is performed.
 - Authentication, CAPTCHA handling and keepalive are unchanged by this migration.
