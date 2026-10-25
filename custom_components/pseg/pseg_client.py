@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterable
 import copy
 from datetime import UTC, date, datetime, timedelta
 import functools
+import hashlib
 import json
 import logging
 import math
@@ -67,7 +68,7 @@ def _parse_iso_day(value: Any) -> date | None:
     """Parse a chart day label, returning None instead of raising."""
     try:
         return date.fromisoformat(str(value))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -136,6 +137,7 @@ def _contributing_meter_ids(records: Iterable[Any]) -> list[str]:
             if meter_id not in seen:
                 seen.append(meter_id)
     return seen
+
 
 # Path fragments that mean "you were sent to sign in" (portal or Okta).
 _SIGNIN_PATH_MARKERS = ("/signin", "/sign-in", "/login")
@@ -256,7 +258,12 @@ class AllowlistedSession(requests.Session):
         # Diagnostics only: host/path/status of each hop, never queries or cookies.
         # First path segment only: deeper segments could carry ids or tokens.
         route = "/" + parsed.path.strip("/").split("/", 1)[0]
-        set_names = sorted({h.split("=", 1)[0].strip() for h in resp.raw.headers.getlist("Set-Cookie")}) if hasattr(getattr(resp, "raw", None), "headers") and hasattr(resp.raw.headers, "getlist") else []
+        set_names = (
+            sorted({h.split("=", 1)[0].strip() for h in resp.raw.headers.getlist("Set-Cookie")})
+            if hasattr(getattr(resp, "raw", None), "headers")
+            and hasattr(resp.raw.headers, "getlist")
+            else []
+        )
         self.trace.append(
             f"{request.method} {parsed.hostname}{route} -> {resp.status_code}"
             + (f" sets={set_names}" if set_names else "")
@@ -299,14 +306,16 @@ class PsegClient:
         """Initialize the client with domain-scoped cookies."""
         self._lock = threading.RLock()
         self.session = AllowlistedSession(owner_check=self._check_active_owner)
-        self.session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": f"{PORTAL_BASE_URL}/Dashboard",
-        })
+        self.session.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": f"{PORTAL_BASE_URL}/Dashboard",
+            }
+        )
         self.price_per_kwh = price_per_kwh
         # MyMeter local login. Never logged; only sent to PORTAL_HOST/Home/Login.
         self._email = email.strip()
@@ -356,6 +365,9 @@ class PsegClient:
         # Passive in-memory hourly contract sample for diagnostic inspection and
         # offline contract verification.
         self._hourly_contract_sample: dict[str, Any] | None = None
+        self._cost_contract_samples: dict[str, Any] = {}
+        self._consumed_permits: set[str] = set()
+        self._meter_placeholders: dict[str, str] = {}
         # Immutable jar captured at the exact moment a renewal or sign-in was
         # confirmed (Dashboard plus meter proof where required). The coordinator
         # persists THIS snapshot on every failure/unload exit, so a later failed
@@ -446,13 +458,15 @@ class PsegClient:
         self._dedupe_domain_variants()
         cookie_data = []
         for c in self.session.cookies:
-            cookie_data.append({
-                "name": c.name,
-                "value": c.value,
-                "domain": c.domain,
-                "path": c.path,
-                "secure": c.secure,
-            })
+            cookie_data.append(
+                {
+                    "name": c.name,
+                    "value": c.value,
+                    "domain": c.domain,
+                    "path": c.path,
+                    "secure": c.secure,
+                }
+            )
         return cookie_data
 
     @_locked
@@ -779,6 +793,15 @@ class PsegClient:
             return None
         return copy.deepcopy(sample)
 
+    @property
+    def cost_contract_sample(self) -> dict[str, Any] | None:
+        """Return a copy of the latest cost contract sample slots, if captured."""
+        if not self._cost_contract_samples:
+            return None
+        from .cost_evidence import bound_cost_contract_sample
+
+        return bound_cost_contract_sample(self._cost_contract_samples)
+
     def _remember_me_values(self) -> frozenset[str]:
         """Current MM_RememberMe values, for the in-memory rotation check only."""
         return frozenset(
@@ -848,9 +871,7 @@ class PsegClient:
         if runtime is None or self._renewal_token is None:
             admission.reserve(now)
 
-    def _policy_finish(
-        self, *, reason: str | None, transient: bool, rotated: bool
-    ) -> None:
+    def _policy_finish(self, *, reason: str | None, transient: bool, rotated: bool) -> None:
         """Settle the reservation through the runtime, or the local budget.
 
         ``transient`` is the only outcome that may earn the second (retry) sequence.
@@ -1140,9 +1161,7 @@ class PsegClient:
             raise PsegCaptchaRequired("MyMeter requires a solved CAPTCHA")
         if result.get("SecretQuestionError") or result.get("PasswordExpiredModalData"):
             self._mark_auth_failure(AUTH_REASON_SECURITY_STEP)
-            raise PsegSecurityStepRequired(
-                "MyMeter wants a security question or password change"
-            )
+            raise PsegSecurityStepRequired("MyMeter wants a security question or password change")
         if message:
             self._mark_auth_failure(AUTH_REASON_REMEMBER_ME_REJECTED)
             raise PsegLoginRejected("MyMeter rejected the email/password")
@@ -1377,8 +1396,7 @@ class PsegClient:
                 # A poll may still sign in; a lapsed keepalive asks the user instead.
                 self._mark_auth_failure(AUTH_REASON_PORTAL_SESSION_EXPIRED)
                 raise PsegOktaSessionExpired(
-                    "PSE&G portal session expired; the keepalive never posts the "
-                    "saved sign-in"
+                    "PSE&G portal session expired; the keepalive never posts the saved sign-in"
                 )
             try:
                 return self.login_local()
@@ -1397,9 +1415,7 @@ class PsegClient:
             self._restore_session_state(baseline)
             raise
 
-    def _renew_remember_me_admitted(
-        self, *, baseline: dict[str, Any] | None = None
-    ) -> bool:
+    def _renew_remember_me_admitted(self, *, baseline: dict[str, Any] | None = None) -> bool:
         """Poll-side Remember Me leg under the shared, bounded admission.
 
         The caller holds the client lock (``_renew`` runs from the locked
@@ -1478,7 +1494,9 @@ class PsegClient:
             try:
                 self.session.get(f"{PORTAL_BASE_URL}/", allow_redirects=True, timeout=20)
             except requests.RequestException as err:
-                raise PsegTransientError(f"Network error during Remember Me sign-in: {err}") from err
+                raise PsegTransientError(
+                    f"Network error during Remember Me sign-in: {err}"
+                ) from err
             if verify_identity:
                 self._check_renewal_owner()
             else:
@@ -1497,7 +1515,9 @@ class PsegClient:
             # Neither signed in nor signed out (e.g. a maintenance page): retry later.
             raise PsegTransientError("Remember Me sign-in did not reach /Dashboard")
         if resp.status_code != 200:
-            raise PsegTransientError(f"Unexpected HTTP {resp.status_code} after Remember Me sign-in")
+            raise PsegTransientError(
+                f"Unexpected HTTP {resp.status_code} after Remember Me sign-in"
+            )
         if verify_identity:
             self._confirm_meter_identity(resp)
             self._check_renewal_owner()
@@ -1519,17 +1539,13 @@ class PsegClient:
         """
         expected = self._expected_meter_ids
         if not expected:
-            raise PsegTransientError(
-                "No known meter identity to confirm the renewed PSE&G session"
-            )
+            raise PsegTransientError("No known meter identity to confirm the renewed PSE&G session")
         tag = BeautifulSoup(resp.text, "html.parser").find(
             "input", attrs={"name": "__RequestVerificationToken"}
         )
         token = str(tag["value"]) if tag and tag.get("value") else ""
         if not token:
-            raise PsegTransientError(
-                "No antiforgery token to confirm the renewed PSE&G session"
-            )
+            raise PsegTransientError("No antiforgery token to confirm the renewed PSE&G session")
         end_dt = datetime.now()
         start_str = (end_dt - timedelta(days=14)).strftime("%Y-%m-%d")
         end_str = end_dt.strftime("%Y-%m-%d")
@@ -1751,9 +1767,7 @@ class PsegClient:
             # A previous attempt is still inside its 15-minute window (or another
             # owner holds it): wait for the next tick instead of alarming the user
             # or re-posting anything. The retry remains scheduled.
-            raise PsegTransientError(
-                "Remember Me renewal deferred; its retry window is still open"
-            )
+            raise PsegTransientError("Remember Me renewal deferred; its retry window is still open")
         if deferred.reason == "uncertain":
             # Unreadable renewal metadata can never be repaired by an automatic
             # attempt: fail closed and let the normal re-authentication prompt
@@ -1890,7 +1904,9 @@ class PsegClient:
             curr_end = min(curr_start + timedelta(days=chunk_days), end_dt)
             chunk_start_str = curr_start.strftime("%Y-%m-%d")
             chunk_end_str = curr_end.strftime("%Y-%m-%d")
-            _LOGGER.info("Fetching PSE&G history chunk from %s to %s...", chunk_start_str, chunk_end_str)
+            _LOGGER.info(
+                "Fetching PSE&G history chunk from %s to %s...", chunk_start_str, chunk_end_str
+            )
 
             chart_setup_data = {
                 "__RequestVerificationToken": token,
@@ -1920,7 +1936,9 @@ class PsegClient:
                 )
                 self._raise_for_chart_auth(resp2, "history chart setup")
                 if resp2.status_code >= 500:
-                    raise PsegTransientError(f"Server error {resp2.status_code} setting chart context")
+                    raise PsegTransientError(
+                        f"Server error {resp2.status_code} setting chart context"
+                    )
                 resp2.raise_for_status()
 
                 self._check_active_owner()
@@ -1933,7 +1951,9 @@ class PsegClient:
                 )
                 self._raise_for_chart_auth(resp3, "history chart data")
                 if resp3.status_code >= 500:
-                    raise PsegTransientError(f"Server error {resp3.status_code} fetching chart data")
+                    raise PsegTransientError(
+                        f"Server error {resp3.status_code} fetching chart data"
+                    )
                 resp3.raise_for_status()
                 data = self._validate_chart_envelope(resp3.json())
                 chart_data = data.get("Data")
@@ -1972,7 +1992,7 @@ class PsegClient:
             except requests.RequestException as err:
                 self._restore_cookie_leg(chunk_leg)
                 raise PsegTransientError(f"Request error retrieving chart chunk: {err}") from err
-            except (PsegAuthError, PsegTransientError):
+            except PsegAuthError, PsegTransientError:
                 self._restore_cookie_leg(chunk_leg)
                 raise
             except Exception as err:
@@ -2008,7 +2028,7 @@ class PsegClient:
         return sorted_records
 
     @_locked
-    def fetch_energy_data(self, days_back: int = 14) -> dict[str, Any]:
+    def fetch_energy_data(self, days_back: int = 14, cost_permit: Any = None) -> dict[str, Any]:
         """Fetch daily plus hourly usage using the 3-step MyMeter chart sequence.
 
         The daily chart remains authoritative: it feeds the sensors, the daily
@@ -2029,9 +2049,7 @@ class PsegClient:
         daily_leg = self._snapshot_cookie_leg()
         try:
             self._check_active_owner()
-            daily_payload = self._fetch_chart_json(
-                token, USAGE_INTERVAL_DAILY, start_str, end_str
-            )
+            daily_payload = self._fetch_chart_json(token, USAGE_INTERVAL_DAILY, start_str, end_str)
             result = self._parse_chart_data(daily_payload)
             if self._has_valid_meter_read(
                 result.get("history_14d") or [],
@@ -2064,7 +2082,7 @@ class PsegClient:
                     result = empty
                 else:
                     result = self._empty_chart_result(result.get("last_updated"))
-        except (PsegAuthError, PsegTransientError):
+        except PsegAuthError, PsegTransientError:
             self._restore_cookie_leg(daily_leg)
             raise
         except Exception as err:
@@ -2103,9 +2121,7 @@ class PsegClient:
             self._restore_cookie_leg(hourly_leg)
             # The optional hourly leg must not fail a poll that can still deliver
             # the authoritative daily readings.
-            _LOGGER.warning(
-                "Hourly chart unavailable; keeping the daily statistics path: %s", err
-            )
+            _LOGGER.warning("Hourly chart unavailable; keeping the daily statistics path: %s", err)
             hourly = {
                 "hourly_records": [],
                 "hourly_granularity": "unavailable",
@@ -2126,11 +2142,7 @@ class PsegClient:
         for record in daily_records:
             day = _parse_iso_day(record.get("date"))
             kwh = record.get("kwh")
-            if (
-                day is not None
-                and isinstance(kwh, (int, float))
-                and not isinstance(kwh, bool)
-            ):
+            if day is not None and isinstance(kwh, (int, float)) and not isinstance(kwh, bool):
                 daily_totals[day] = float(kwh)
 
         validations = validate_hourly_days(
@@ -2140,14 +2152,8 @@ class PsegClient:
             granularity=hourly["hourly_granularity"],
             days=daily_totals,
         )
-        complete = {
-            day: check for day, check in validations.items() if check.complete
-        }
-        closed = [
-            check
-            for check in validations.values()
-            if ny_day_bounds(check.day)[1] <= now_utc
-        ]
+        complete = {day: check for day, check in validations.items() if check.complete}
+        closed = [check for check in validations.values() if ny_day_bounds(check.day)[1] <= now_utc]
 
         daily_contributors = [
             str(value) for value in (result.get("contributing_meter_ids") or []) if value
@@ -2171,9 +2177,7 @@ class PsegClient:
             result["contributing_meter_ids"] = merged
             result["meter_ids"] = merged
         result["hourly_complete_days"] = len(complete)
-        result["hourly_incomplete_days"] = sum(
-            1 for check in closed if not check.complete
-        )
+        result["hourly_incomplete_days"] = sum(1 for check in closed if not check.complete)
         if complete and len(complete) >= len(closed):
             result["statistics_granularity"] = "hourly"
         elif complete:
@@ -2182,13 +2186,113 @@ class PsegClient:
             result["statistics_granularity"] = "daily"
         else:
             result["statistics_granularity"] = "unavailable"
+        # Cost evidence leg (RC-02): executed after the normal daily+hourly kWh legs,
+        # inside the same _locked client sequence, only for an attached current-owner
+        # normal coordinator poll with proven daily identity and an immutable one-use permit.
+        from .cost_evidence import NY_TZ
+
+        expected_ny_date = datetime.now(NY_TZ).date().isoformat()
+        is_attached = (
+            self._renewal_runtime is not None
+            and self._renewal_runtime.entry_id == getattr(cost_permit, "entry_id", None)
+            and (
+                getattr(self._renewal_runtime, "_is_current", None) is None
+                or self._renewal_runtime._is_current(self._renewal_token)
+            )
+        )
+        is_valid_permit = (
+            cost_permit is not None
+            and is_attached
+            and getattr(cost_permit, "ny_date", None) == expected_ny_date
+            and getattr(cost_permit, "usage_interval", None)
+            in (USAGE_INTERVAL_DAILY, USAGE_INTERVAL_HOURLY)
+            and getattr(cost_permit, "permit_id", None)
+            and getattr(cost_permit, "permit_id", None) not in self._consumed_permits
+        )
+
+        if is_valid_permit and result.get("identity_confirmed") is True:
+            self._check_active_owner()
+            permit_id = getattr(cost_permit, "permit_id", None)
+            if permit_id and permit_id not in self._consumed_permits:
+                self._consumed_permits.add(permit_id)
+                try:
+                    from decimal import Decimal
+
+                    from .cost_evidence import execute_cost_sampler
+
+                    auth_meters = set(
+                        result.get("contributing_meter_ids") or result.get("meter_ids") or []
+                    )
+                    daily_anchors = []
+                    for r in daily_records:
+                        d_str = r.get("date")
+                        k_val = r.get("kwh")
+                        if d_str and k_val is not None:
+                            try:
+                                daily_anchors.append(
+                                    {
+                                        "date": str(date.fromisoformat(str(d_str))),
+                                        "kwh": f"{Decimal(str(k_val)):f}",
+                                    }
+                                )
+                            except Exception:
+                                pass
+
+                    hourly_anchors = []
+                    for hr in hourly.get("hourly_records") or []:
+                        s_str = hr.get("start")
+                        k_val = hr.get("kwh")
+                        if s_str and k_val is not None:
+                            try:
+                                hourly_anchors.append(
+                                    {
+                                        "start": str(s_str),
+                                        "kwh": f"{Decimal(str(k_val)):f}",
+                                    }
+                                )
+                            except Exception:
+                                pass
+
+                    paired_anchors = {
+                        "daily_kwh_count": len(daily_records),
+                        "hourly_records_count": len(hourly.get("hourly_records") or []),
+                        "meter_set_digest": hashlib.sha256(
+                            ",".join(sorted(auth_meters)).encode()
+                        ).hexdigest()[:16],
+                        "daily_comparison": daily_anchors,
+                        "hourly_comparison": hourly_anchors[:1500],
+                    }
+                    cost_status, cost_sample, _promotable = execute_cost_sampler(
+                        seed_cookies=self.session.cookies,
+                        token=token,
+                        permit=cost_permit,
+                        owner_check=self._check_active_owner,
+                        authoritative_meters=auth_meters,
+                        meter_placeholders=self._meter_placeholders,
+                        paired_kwh_anchors=paired_anchors,
+                    )
+                    slot_key = (
+                        "hourly"
+                        if getattr(cost_permit, "usage_interval", None) == USAGE_INTERVAL_HOURLY
+                        else "daily"
+                    )
+                    self._cost_contract_samples[slot_key] = cost_sample
+                    result["cost_evidence"] = {
+                        "status": str(cost_status),
+                        "interval": getattr(cost_permit, "usage_interval", None),
+                        "sample_captured": bool(cost_sample),
+                    }
+                except PsegTransientError:
+                    raise
+                except Exception as err:
+                    _LOGGER.warning("PSE&G cost evidence sampling encountered an error: %s", err)
+                    result["cost_evidence"] = {"status": "malformed", "reason": "sampling_error"}
+
         # Sensor history remains the authoritative daily series; hourly rows are
         # used only for statistics promotion and provenance.
         return result
 
-    def _raise_for_chart_auth(
-        self, resp: requests.Response, context: str
-    ) -> None:
+    def _raise_for_chart_auth(self, resp: requests.Response, context: str) -> None:
         """Turn a chart auth status OR final login page into typed auth failure.
 
         A 302 to the anonymous portal home can finish as HTTP 200 login HTML, so
@@ -2197,9 +2301,7 @@ class PsegClient:
         allowed to fall back. A local portal client never enters an SSO renewal.
         """
         final_url = getattr(resp, "url", None)
-        login_page = (
-            isinstance(final_url, str) and self._is_login_page(resp)
-        )
+        login_page = isinstance(final_url, str) and self._is_login_page(resp)
         if resp.status_code in (401, 403) or login_page:
             self._mark_auth_failure(self._session_expired_reason())
             raise PsegOktaSessionExpired(
@@ -2247,9 +2349,7 @@ class PsegClient:
             )
             self._raise_for_chart_auth(resp2, "chart setup")
             if resp2.status_code >= 500:
-                raise PsegTransientError(
-                    f"Server error {resp2.status_code} setting chart context"
-                )
+                raise PsegTransientError(f"Server error {resp2.status_code} setting chart context")
             resp2.raise_for_status()
 
             ts = int(time.time() * 1000)
@@ -2261,26 +2361,18 @@ class PsegClient:
             )
             self._raise_for_chart_auth(resp3, "chart data")
             if resp3.status_code >= 500:
-                raise PsegTransientError(
-                    f"Server error {resp3.status_code} fetching chart data"
-                )
+                raise PsegTransientError(f"Server error {resp3.status_code} fetching chart data")
             resp3.raise_for_status()
             return self._validate_chart_envelope(resp3.json())
         except (requests.Timeout, requests.ConnectionError) as err:
             self._restore_cookie_leg(leg_snapshot)
-            raise PsegTransientError(
-                f"Network timeout/connection error: {err}"
-            ) from err
+            raise PsegTransientError(f"Network timeout/connection error: {err}") from err
         except json.JSONDecodeError as err:
             self._restore_cookie_leg(leg_snapshot)
-            raise PsegTransientError(
-                f"Failed to decode JSON from chart data: {err}"
-            ) from err
+            raise PsegTransientError(f"Failed to decode JSON from chart data: {err}") from err
         except requests.RequestException as err:
             self._restore_cookie_leg(leg_snapshot)
-            raise PsegTransientError(
-                f"Request error retrieving chart data: {err}"
-            ) from err
+            raise PsegTransientError(f"Request error retrieving chart data: {err}") from err
         except Exception:
             self._restore_cookie_leg(leg_snapshot)
             raise
@@ -2392,7 +2484,7 @@ class PsegClient:
             hs_extra_keys_set: set[str] = set()
             total_kept_points = 0
             truncated_points = 0
-            meter_placeholders: dict[str, str] = {}
+            meter_placeholders: dict[str, str] = self._meter_placeholders
 
             if isinstance(raw_series, list):
                 for series_item in raw_series:
@@ -2564,11 +2656,7 @@ class PsegClient:
                 ):
                     invalid += 1
                     continue
-                if (
-                    isinstance(x, bool)
-                    or not isinstance(x, (int, float))
-                    or not math.isfinite(x)
-                ):
+                if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
                     invalid += 1
                     continue
                 timestamp = float(x)
@@ -2611,16 +2699,13 @@ class PsegClient:
                     point_reason = "dst_ambiguous"
                 elif start_aware is not None and end_aware is not None:
                     start_check = (
-                        abs(
-                            (start_aware.astimezone(UTC) - start).total_seconds()
-                        )
+                        abs((start_aware.astimezone(UTC) - start).total_seconds())
                         <= LABEL_TOLERANCE_SECONDS
                     )
                     end_check = (
                         abs(
                             (
-                                end_aware.astimezone(UTC)
-                                - (start + timedelta(hours=1))
+                                end_aware.astimezone(UTC) - (start + timedelta(hours=1))
                             ).total_seconds()
                         )
                         <= LABEL_TOLERANCE_SECONDS
@@ -2760,7 +2845,7 @@ class PsegClient:
                 start_str = hs.get("start") if isinstance(hs, dict) else None
                 try:
                     date_iso = datetime.strptime(start_str, "%m/%d/%Y").strftime("%Y-%m-%d")
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     _LOGGER.debug("Skipping meter %s point with invalid date", meter_id)
                     continue
                 y = pt.get("y")
@@ -2825,15 +2910,21 @@ class PsegClient:
         raw_temp_pts = temp_series.get("data")
         temp_pts = raw_temp_pts if isinstance(raw_temp_pts, list) else []
 
-        latest_record = history_14d[-1] if history_14d else {"date": "None", "kwh": 0.0, "cost": 0.0}
-        prev_record = history_14d[-2] if len(history_14d) > 1 else {"date": "None", "kwh": 0.0, "cost": 0.0}
+        latest_record = (
+            history_14d[-1] if history_14d else {"date": "None", "kwh": 0.0, "cost": 0.0}
+        )
+        prev_record = (
+            history_14d[-2] if len(history_14d) > 1 else {"date": "None", "kwh": 0.0, "cost": 0.0}
+        )
 
         latest_temp = temp_pts[-1] if temp_pts and isinstance(temp_pts[-1], dict) else {}
         temp_range = latest_temp.get("tr", "")
         temp_y = latest_temp.get("y")
         temp_avg = (
             round(float(temp_y), 1)
-            if isinstance(temp_y, (int, float)) and not isinstance(temp_y, bool) and math.isfinite(temp_y)
+            if isinstance(temp_y, (int, float))
+            and not isinstance(temp_y, bool)
+            and math.isfinite(temp_y)
             else None
         )
 

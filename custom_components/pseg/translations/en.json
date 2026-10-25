@@ -135,6 +135,20 @@
           "description": "The ending date to backfill to (YYYY-MM-DD). Defaults to today if left empty."
         }
       }
+    },
+    "set_cost_mode": {
+      "name": "Set Cost Mode",
+      "description": "Sets the operator cost sampling mode for PSE&G real-cost evidence capture (off or evidence).",
+      "fields": {
+        "cost_mode": {
+          "name": "Cost Mode",
+          "description": "Cost mode to set (off or evidence; import is reserved and refused in v1.7.0)."
+        },
+        "entry_id": {
+          "name": "Entry ID",
+          "description": "Specific PSE&G config entry ID to configure (optional; applies to all entries if omitted)."
+        }
+      }
     }
   }
 }

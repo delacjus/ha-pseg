@@ -182,9 +182,7 @@ async def test_diagnostics_statistics_summary_is_value_free(hass: HomeAssistant)
         "statistics_granularity": "mixed",
         "hourly_complete_days": 2,
         "hourly_incomplete_days": 1,
-        "hourly_records": [
-            {"start": "2026-10-20T04:00:00+00:00", "kwh": 99.9}
-        ],
+        "hourly_records": [{"start": "2026-10-20T04:00:00+00:00", "kwh": 99.9}],
         "daily_records": [{"date": "2026-10-20", "kwh": 88.8}],
     }
     coord._hourly_summary = {
@@ -201,20 +199,14 @@ async def test_diagnostics_statistics_summary_is_value_free(hass: HomeAssistant)
             "created_at": "2026-10-22T05:00:00+00:00",
             "first_start": "2026-10-20T04:00:00+00:00",
             "series": {
-                "pseg:12345_energy_consumption": [
-                    ["2026-10-20T04:00:00+00:00", 1.0, 1.0]
-                ],
-                "pseg:12345_energy_cost": [
-                    ["2026-10-20T04:00:00+00:00", 0.25, 0.25]
-                ],
+                "pseg:12345_energy_consumption": [["2026-10-20T04:00:00+00:00", 1.0, 1.0]],
+                "pseg:12345_energy_cost": [["2026-10-20T04:00:00+00:00", 0.25, 0.25]],
             },
             "promoted": {
                 "pseg:12345_energy_consumption": {
                     "2026-10-20": {"total_kwh": 1.0, "total_cost": 0.25}
                 },
-                "pseg:12345_energy_cost": {
-                    "2026-10-20": {"total_kwh": 1.0, "total_cost": 0.25}
-                },
+                "pseg:12345_energy_cost": {"2026-10-20": {"total_kwh": 1.0, "total_cost": 0.25}},
             },
         }
     )
@@ -223,20 +215,14 @@ async def test_diagnostics_statistics_summary_is_value_free(hass: HomeAssistant)
             "created_at": "2026-10-22T05:00:00+00:00",
             "first_start": "2026-10-19T04:00:00+00:00",
             "series": {
-                "pseg:12345_energy_consumption": [
-                    ["2026-10-19T04:00:00+00:00", 1.0, 1.0]
-                ],
-                "pseg:12345_energy_cost": [
-                    ["2026-10-19T04:00:00+00:00", 0.25, 0.25]
-                ],
+                "pseg:12345_energy_consumption": [["2026-10-19T04:00:00+00:00", 1.0, 1.0]],
+                "pseg:12345_energy_cost": [["2026-10-19T04:00:00+00:00", 0.25, 0.25]],
             },
             "promoted": {
                 "pseg:12345_energy_consumption": {
                     "2026-10-19": {"total_kwh": 1.0, "total_cost": 0.25}
                 },
-                "pseg:12345_energy_cost": {
-                    "2026-10-19": {"total_kwh": 1.0, "total_cost": 0.25}
-                },
+                "pseg:12345_energy_cost": {"2026-10-19": {"total_kwh": 1.0, "total_cost": 0.25}},
             },
         }
     )
@@ -267,9 +253,7 @@ async def test_diagnostics_has_remember_me_is_a_boolean_only(hass: HomeAssistant
     """Presence is exposed as a bool; the cookie value never leaves the jar."""
     entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id="12345", data={})
     entry.add_to_hass(hass)
-    client = PsegClient(
-        portal_cookies="MM_SID=session-value-9d2; MM_RememberMe=remember-value-4c1"
-    )
+    client = PsegClient(portal_cookies="MM_SID=session-value-9d2; MM_RememberMe=remember-value-4c1")
     coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
 
@@ -330,9 +314,7 @@ async def test_diagnostics_includes_hourly_contract_sample_without_real_meter_id
     client._capture_hourly_contract_sample(payload, "2026-09-01", "2026-09-02")
     assert client.hourly_contract_sample is not None
 
-    coord = PsegDataUpdateCoordinator(
-        hass, client, dict(entry.data), config_entry=entry
-    )
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
 
     diag = await async_get_config_entry_diagnostics(hass, entry)
@@ -372,9 +354,7 @@ async def test_hourly_contract_sample_never_written_to_config_entry_or_store(
     )
     assert client.hourly_contract_sample is not None
 
-    coord = PsegDataUpdateCoordinator(
-        hass, client, dict(entry.data), config_entry=entry
-    )
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
 
     # Verify not in entry.data or entry.options
@@ -388,3 +368,17 @@ async def test_hourly_contract_sample_never_written_to_config_entry_or_store(
     if store_file.exists():
         content = store_file.read_text()
         assert "hourly_contract_sample" not in content
+
+
+async def test_diagnostics_includes_cost_mode_and_sample(hass: HomeAssistant) -> None:
+    """Diagnostics exposes cost mode and cost_contract_sample."""
+    entry = MockConfigEntry(domain=DOMAIN, entry_id="diag_cost_props", data={})
+    entry.add_to_hass(hass)
+    client = PsegClient()
+    client._cost_contract_samples["daily"] = {"sample_version": 1, "status": "ok"}
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    assert diag["cost_mode"] == "off"
+    assert diag["cost_contract_sample"] == {"daily": {"sample_version": 1, "status": "ok"}}

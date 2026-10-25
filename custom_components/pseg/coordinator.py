@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
+import functools
 import logging
 import math
 import re
@@ -53,6 +54,7 @@ from .const import (
     SESSION_COOKIE_NAMES,
     STATISTICS_PRECISION,
 )
+from .cost_evidence import CostEvidenceStore
 from .pseg_client import (
     PsegClient,
     PsegOktaSessionExpired,
@@ -209,9 +211,7 @@ async def _async_get_series_with_sums(
             {"state", "sum"},
         )
     except Exception as err:
-        raise PsegStatisticsError(
-            f"Could not verify statistics for {statistic_id}: {err}"
-        ) from err
+        raise PsegStatisticsError(f"Could not verify statistics for {statistic_id}: {err}") from err
 
     rows: list[tuple[datetime, float, float]] = []
     for stat in stats.get(statistic_id, []):
@@ -235,9 +235,7 @@ def _series_rows_match(
     """Return True when the recorder holds the exact intended rows and sums."""
     if len(live) != len(intended):
         return False
-    for (start, state, total), (want_start, want_state, want_total) in zip(
-        live, intended
-    ):
+    for (start, state, total), (want_start, want_state, want_total) in zip(live, intended):
         if start != want_start:
             return False
         if not values_close(state, want_state, abs_tol=abs_tol):
@@ -247,9 +245,7 @@ def _series_rows_match(
     return True
 
 
-def _statistics_runtime_for(
-    hass: HomeAssistant, entry_id: str
-) -> StatisticsEntryRuntime:
+def _statistics_runtime_for(hass: HomeAssistant, entry_id: str) -> StatisticsEntryRuntime:
     """Return the one statistics runtime shared by every coordinator of an entry."""
     registry = hass.data.setdefault(f"{DOMAIN}_statistics_runtimes", {})
     runtime = registry.get(entry_id)
@@ -280,7 +276,7 @@ def _canonical_records(entry: dict[str, Any]) -> list[dict[str, Any]]:
         try:
             start = datetime.fromisoformat(str(raw_start))
             value = float(raw_value)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         if start.tzinfo is None:
             start = start.replace(tzinfo=UTC)
@@ -301,7 +297,7 @@ def _journal_records_match(
         try:
             start = datetime.fromisoformat(str(raw_start))
             value = float(raw_value)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return False
         if start.tzinfo is None:
             start = start.replace(tzinfo=UTC)
@@ -357,7 +353,7 @@ def _normalise_daily(
             continue
         try:
             kwh = float(record.get("kwh"))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             _LOGGER.debug("Skipping statistics record with non-numeric usage")
             continue
         if not math.isfinite(kwh):
@@ -370,7 +366,7 @@ def _normalise_daily(
         else:
             try:
                 cost = float(raw_cost)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 _LOGGER.debug("Skipping statistics record with non-numeric cost")
                 continue
             if not math.isfinite(cost):
@@ -392,21 +388,15 @@ def build_external_statistics(
     records; the coordinator itself routes through the shared reconciliation so the
     hourly provenance and the stored-row rechain are never bypassed.
     """
-    clean_meter = (
-        re.sub(r"[^a-z0-9_]+", "_", str(meter_id).lower()).strip("_") or "meter"
-    )
+    clean_meter = re.sub(r"[^a-z0-9_]+", "_", str(meter_id).lower()).strip("_") or "meter"
     consumption_metadata, cost_metadata = _statistic_metadata(clean_meter)
 
     daily = _normalise_daily(records, price_per_kwh)
     if not daily:
         return consumption_metadata, [], cost_metadata, []
 
-    consumption_by_start = {
-        ny_midnight_utc(day): values["kwh"] for day, values in daily.items()
-    }
-    cost_by_start = {
-        ny_midnight_utc(day): values["cost"] for day, values in daily.items()
-    }
+    consumption_by_start = {ny_midnight_utc(day): values["kwh"] for day, values in daily.items()}
+    cost_by_start = {ny_midnight_utc(day): values["cost"] for day, values in daily.items()}
     return (
         consumption_metadata,
         chain_rows(consumption_by_start, prior_consumption_sum),
@@ -458,6 +448,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._stats_lock = self._stats_runtime.lock
         # Durable promoted-day provenance and the pre-write mutation journal.
         self._stats_state = self._stats_runtime.store
+        self.cost_store = CostEvidenceStore(hass, config_entry.entry_id) if config_entry else None
         self.last_statistics_import: str | None = None
         # Last hourly evaluation, kept small and value-free for diagnostics.
         self._hourly_summary: dict[str, Any] = {
@@ -668,9 +659,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug("Not persisting cookies from a retired PSE&G session")
             return
         confirmed_cookies = (
-            self.client.confirmed_cookies()
-            if hasattr(self.client, "confirmed_cookies")
-            else None
+            self.client.confirmed_cookies() if hasattr(self.client, "confirmed_cookies") else None
         )
         if confirmed_cookies is not None and exported != confirmed_cookies:
             _LOGGER.debug(
@@ -701,15 +690,11 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self.config_entry:
             return
         admission = (
-            self._renewal_runtime.admission_dict()
-            if self._renewal_runtime is not None
-            else None
+            self._renewal_runtime.admission_dict() if self._renewal_runtime is not None else None
         )
         current_cookies = self.config_entry.data.get("cookies")
         current_admission = self.config_entry.data.get(CONF_RENEWAL_ADMISSION)
-        if current_cookies == exported and (
-            admission is None or current_admission == admission
-        ):
+        if current_cookies == exported and (admission is None or current_admission == admission):
             self._jar_baseline = exported
             self._persisted_session_cookies = session_cookies
             return
@@ -757,9 +742,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             self._write_cookie_handoff(exported, session_cookies)
         except Exception:
-            _LOGGER.warning(
-                "Confirmed cookie handoff failed; the next failure or stop retries it"
-            )
+            _LOGGER.warning("Confirmed cookie handoff failed; the next failure or stop retries it")
             return
         self.client.clear_confirmed_snapshot(snapshot["id"])
 
@@ -813,9 +796,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             AUTH_REASON_CAPTCHA_REQUIRED: (
                 "PSE&G MyMeter is asking for a CAPTCHA, which Home Assistant cannot solve."
             ),
-            AUTH_REASON_REMEMBER_ME_REJECTED: (
-                "PSE&G refused the saved MyMeter sign-in."
-            ),
+            AUTH_REASON_REMEMBER_ME_REJECTED: ("PSE&G refused the saved MyMeter sign-in."),
             AUTH_REASON_SECURITY_STEP: (
                 "PSE&G MyMeter is asking for a security question or password change."
             ),
@@ -831,9 +812,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             AUTH_REASON_SECURITY_STEP: "PSE&G MyMeter requires a security step",
             AUTH_REASON_OKTA_SESSION_EXPIRED: "PSE&G Okta session expired",
         }.get(self._auth_failure_reason(), "PSE&G session expired")
-        return (
-            f"{prefix}. Please re-authenticate under Settings > Devices & Services > PSE&G."
-        )
+        return f"{prefix}. Please re-authenticate under Settings > Devices & Services > PSE&G."
 
     def _log_auth_failure(self, source: str) -> None:
         """Log one line: typed reason plus idle gap (never a credential or cookie)."""
@@ -843,8 +822,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.warning("PSE&G %s authentication failure (%s)", source, reason)
         else:
             _LOGGER.warning(
-                "PSE&G %s authentication failure (%s); "
-                "last successful portal request %.0f s ago",
+                "PSE&G %s authentication failure (%s); last successful portal request %.0f s ago",
                 source,
                 reason,
                 gap,
@@ -900,9 +878,15 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         try:
             async with self._update_lock:
-                data = await self.hass.async_add_executor_job(
-                    self.client.fetch_energy_data, 14
-                )
+                cost_permit = await self._async_prepare_cost_permit()
+                if cost_permit is not None:
+                    data = await self.hass.async_add_executor_job(
+                        functools.partial(
+                            self.client.fetch_energy_data, 14, cost_permit=cost_permit
+                        )
+                    )
+                else:
+                    data = await self.hass.async_add_executor_job(self.client.fetch_energy_data, 14)
                 if self._is_stale():
                     raise UpdateFailed("Ignoring poll result from a retired PSE&G session")
                 self._persist_auth_metadata()
@@ -941,15 +925,11 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 else:
                     self._async_persist_meter_ids(candidate_meters)
 
-                daily_records = (
-                    data.get("daily_records") or data.get("history_14d") or []
-                )
+                daily_records = data.get("daily_records") or data.get("history_14d") or []
                 hourly_records = data.get("hourly_records") or []
                 if daily_records:
                     meter_id = self._get_meter_id(data)
-                    hourly_granularity = data.get(
-                        "hourly_granularity", "unavailable"
-                    )
+                    hourly_granularity = data.get("hourly_granularity", "unavailable")
                     if self.hass.state is CoreState.running:
                         await self._async_record_statistics_logged(
                             daily_records,
@@ -1001,6 +981,57 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         finally:
             self._persist_auth_metadata()
             self._persist_confirmed_session()
+
+    @property
+    def cost_mode(self) -> str:
+        """Return the current operator cost mode."""
+        if self.cost_store is None:
+            return "off"
+        return self.cost_store.mode
+
+    @property
+    def cost_readiness_reason(self) -> str:
+        """Return the current cost readiness reason for diagnostics."""
+        if self.cost_store is None:
+            return "coordinator_not_ready"
+        from .cost_evidence import NY_TZ
+
+        return self.cost_store.get_readiness_reason(dt_util.now(NY_TZ).date())
+
+    async def async_set_cost_mode(self, mode: str) -> None:
+        """Update operator cost mode in the durable evidence store."""
+        if self.cost_store is None:
+            raise ValueError("Cost evidence store not configured")
+        await self.cost_store.async_load()
+        await self.cost_store.async_set_mode(mode)
+
+    async def _async_prepare_cost_permit(self) -> Any:
+        """Reserve a durable one-use cost sampling permit if eligible and due."""
+        if not self.config_entry or self._is_stale() or self.cost_store is None:
+            return None
+        try:
+            await self.cost_store.async_load()
+            if self._is_stale():
+                return None
+            from .const import COST_MODE_EVIDENCE
+            from .cost_evidence import NY_TZ
+
+            if self.cost_store.mode != COST_MODE_EVIDENCE:
+                return None
+            now_ny = dt_util.now(NY_TZ).date()
+            end_dt = datetime.now()
+            start_dt = end_dt - timedelta(days=14)
+            start_str = start_dt.strftime("%Y-%m-%d")
+            end_str = end_dt.strftime("%Y-%m-%d")
+            permit = await self.cost_store.async_reserve_permit(
+                now_ny, start_str=start_str, end_str=end_str
+            )
+            if self._is_stale():
+                return None
+            return permit
+        except Exception as err:
+            _LOGGER.warning("Could not prepare cost evidence permit: %s", err)
+            return None
 
     async def _async_record_statistics_logged(
         self,
@@ -1112,9 +1143,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         """Reconcile and import statistics; caller holds the entry lock."""
         meter_id = meter_id or self._get_meter_id()
-        clean_meter = (
-            re.sub(r"[^a-z0-9_]+", "_", str(meter_id).lower()).strip("_") or "meter"
-        )
+        clean_meter = re.sub(r"[^a-z0-9_]+", "_", str(meter_id).lower()).strip("_") or "meter"
         consumption_statistic_id = f"{DOMAIN}:{clean_meter}_energy_consumption"
         cost_statistic_id = f"{DOMAIN}:{clean_meter}_energy_cost"
         await self._stats_state.async_load()
@@ -1142,9 +1171,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if hourly_records
             else {}
         )
-        complete = {
-            day: check for day, check in validations.items() if check.complete
-        }
+        complete = {day: check for day, check in validations.items() if check.complete}
         if not daily and not complete:
             self._log_hourly_outcome(validations, {})
             return
@@ -1159,15 +1186,11 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         prior_consumption = await _async_get_last_stat_before(
             self.hass, consumption_statistic_id, first_start
         )
-        prior_cost = await _async_get_last_stat_before(
-            self.hass, cost_statistic_id, first_start
-        )
+        prior_cost = await _async_get_last_stat_before(self.hass, cost_statistic_id, first_start)
         existing_consumption = await _async_get_stats_from(
             self.hass, consumption_statistic_id, first_start
         )
-        existing_cost = await _async_get_stats_from(
-            self.hass, cost_statistic_id, first_start
-        )
+        existing_cost = await _async_get_stats_from(self.hass, cost_statistic_id, first_start)
         if not self._can_mutate_statistics():
             return
 
@@ -1192,20 +1215,14 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         promoted_cost_totals: dict[date, float] = {
             day: info["total_kwh"] for day, info in detected_cost.items()
         }
-        for key, info in self._stats_state.promoted(
-            consumption_statistic_id
-        ).items():
+        for key, info in self._stats_state.promoted(consumption_statistic_id).items():
             day = parse_day(key)
             if day is not None:
-                promoted_totals.setdefault(
-                    day, float(info.get("total_kwh", 0.0))
-                )
+                promoted_totals.setdefault(day, float(info.get("total_kwh", 0.0)))
         for key, info in self._stats_state.promoted(cost_statistic_id).items():
             day = parse_day(key)
             if day is not None:
-                promoted_cost_totals.setdefault(
-                    day, float(info.get("total_cost", 0.0))
-                )
+                promoted_cost_totals.setdefault(day, float(info.get("total_cost", 0.0)))
 
         # A daily retry for a promoted or pending day may confirm it, never rewrite
         # it. A changed total is an explicit conflict: reject the whole import before
@@ -1256,9 +1273,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 }
                 for record in check.records
             ]
-            if day_records_match(
-                existing_by_day.get(day, ()), check.records
-            ) and day_records_match(existing_cost_by_day.get(day, ()), cost_records):
+            if day_records_match(existing_by_day.get(day, ()), check.records) and day_records_match(
+                existing_cost_by_day.get(day, ()), cost_records
+            ):
                 # A repeat poll or a stable day: nothing to write.
                 continue
             promote[day] = check
@@ -1274,10 +1291,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             daily_cost[start] = item["cost"]
 
         hourly_consumption = {
-            day: [
-                {"start": record["start"], "kwh": record["kwh"]}
-                for record in check.records
-            ]
+            day: [{"start": record["start"], "kwh": record["kwh"]} for record in check.records]
             for day, check in promote.items()
         }
         hourly_cost = {
@@ -1329,12 +1343,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             mutation_id = await self._stats_state.async_begin(mutation)
         except Exception as err:
-            raise PsegStatisticsError(
-                f"Could not journal the statistics mutation: {err}"
-            ) from err
-        if not await self._stats_state.async_wait_durable(
-            refuse_outstanding=True
-        ):
+            raise PsegStatisticsError(f"Could not journal the statistics mutation: {err}") from err
+        if not await self._stats_state.async_wait_durable(refuse_outstanding=True):
             raise PsegStatisticsError(
                 "Statistics journal is not durable; no recorder write was made"
             )
@@ -1345,9 +1355,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         consumption_metadata, cost_metadata = _statistic_metadata(clean_meter)
-        async_add_external_statistics(
-            self.hass, consumption_metadata, consumption_stats
-        )
+        async_add_external_statistics(self.hass, consumption_metadata, consumption_stats)
         async_add_external_statistics(self.hass, cost_metadata, cost_stats)
         # Bounded at the call site so nothing inside the wait can hold the locks forever.
         try:
@@ -1402,8 +1410,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     for row in consumption_stats
                 ],
                 cost_statistic_id: [
-                    [row["start"].isoformat(), row["state"], row["sum"]]
-                    for row in cost_stats
+                    [row["start"].isoformat(), row["state"], row["sum"]] for row in cost_stats
                 ],
             },
             "promoted": (
@@ -1436,10 +1443,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
         for day, check in promote.items():
             cost_total = round(
-                sum(
-                    round(record["kwh"] * price, STATISTICS_PRECISION)
-                    for record in check.records
-                ),
+                sum(round(record["kwh"] * price, STATISTICS_PRECISION) for record in check.records),
                 STATISTICS_PRECISION,
             )
             common = {
@@ -1461,19 +1465,13 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Log one line about hourly completeness (never a meter identifier)."""
         if not validations:
             return
-        incomplete = [
-            check for check in validations.values() if not check.complete
-        ]
+        incomplete = [check for check in validations.values() if not check.complete]
         reason_counts: dict[str, int] = {}
         for check in incomplete:
             if check.reason in STATISTICS_INCOMPLETE_REASONS:
-                reason_counts[check.reason] = (
-                    reason_counts.get(check.reason, 0) + 1
-                )
+                reason_counts[check.reason] = reason_counts.get(check.reason, 0) + 1
         self._hourly_summary = {
-            "complete_days": sum(
-                1 for check in validations.values() if check.complete
-            ),
+            "complete_days": sum(1 for check in validations.values() if check.complete),
             "incomplete_days": len(incomplete),
             "promoted_last_run": len(promoted),
             "reason_counts": reason_counts,
@@ -1495,8 +1493,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         await self._stats_state.async_load()
         clean_meter = (
-            re.sub(r"[^a-z0-9_]+", "_", str(self._get_meter_id()).lower()).strip("_")
-            or "meter"
+            re.sub(r"[^a-z0-9_]+", "_", str(self._get_meter_id()).lower()).strip("_") or "meter"
         )
         consumption_statistic_id = f"{DOMAIN}:{clean_meter}_energy_consumption"
         promoted = self._stats_state.promoted(consumption_statistic_id)
@@ -1514,8 +1511,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data.get("hourly_complete_days", stored.get("complete_days", 0)) or 0
             ),
             "incomplete_days": int(
-                data.get("hourly_incomplete_days", stored.get("incomplete_days", 0))
-                or 0
+                data.get("hourly_incomplete_days", stored.get("incomplete_days", 0)) or 0
             ),
             "promoted_days": len(promoted),
             "promoted_last_run": int(stored.get("promoted_last_run", 0) or 0),
@@ -1528,7 +1524,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Verify both series' rows and cumulative sums in the recorder."""
         try:
             first_start = datetime.fromisoformat(str(mutation["first_start"]))
-        except (KeyError, TypeError, ValueError):
+        except KeyError, TypeError, ValueError:
             return False
         series = mutation.get("series")
         if not isinstance(series, dict) or not series:
@@ -1540,18 +1536,12 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     start = datetime.fromisoformat(str(raw_start))
                     if start.tzinfo is None:
                         return False
-                    intended.append(
-                        (start, float(raw_state), float(raw_sum))
-                    )
-            except (TypeError, ValueError):
+                    intended.append((start, float(raw_state), float(raw_sum)))
+            except TypeError, ValueError:
                 return False
-            live = await _async_get_series_with_sums(
-                self.hass, statistic_id, first_start
-            )
+            live = await _async_get_series_with_sums(self.hass, statistic_id, first_start)
             if not _series_rows_match(live, intended):
-                _LOGGER.warning(
-                    "Statistics verification failed for one series; journal retained"
-                )
+                _LOGGER.warning("Statistics verification failed for one series; journal retained")
                 return False
         return True
 
@@ -1561,9 +1551,11 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not isinstance(series, dict) or not series:
             raise PsegStatisticsError("Pending statistics journal has no series")
         for statistic_id, raw_rows in series.items():
-            clean_meter = statistic_id.removeprefix(f"{DOMAIN}:").removesuffix(
-                "_energy_consumption"
-            ).removesuffix("_energy_cost")
+            clean_meter = (
+                statistic_id.removeprefix(f"{DOMAIN}:")
+                .removesuffix("_energy_consumption")
+                .removesuffix("_energy_cost")
+            )
             consumption_metadata, cost_metadata = _statistic_metadata(clean_meter)
             metadata = (
                 consumption_metadata
@@ -1588,8 +1580,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await _async_wait_for_recorder_commit(self.hass)
         except TimeoutError as err:
             raise PsegStatisticsError(
-                "Recorder did not commit the replayed statistics within "
-                f"{RECORDER_COMMIT_TIMEOUT}s"
+                f"Recorder did not commit the replayed statistics within {RECORDER_COMMIT_TIMEOUT}s"
             ) from err
 
     async def _async_recover_pending(self) -> int:
@@ -1600,12 +1591,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         replayed idempotently and verified again. A mismatch or a pause leaves the
         journal in place for the next attempt.
         """
-        if not await self._stats_state.async_wait_durable(
-            refuse_outstanding=True
-        ):
-            raise PsegStatisticsError(
-                "Statistics journal is not durable yet; recovery refused"
-            )
+        if not await self._stats_state.async_wait_durable(refuse_outstanding=True):
+            raise PsegStatisticsError("Statistics journal is not durable yet; recovery refused")
         pending = self._stats_state.pending_mutations()
         if not pending:
             return 0
@@ -1635,9 +1622,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._stats_state.async_commit(mutation_id)
             recovered += 1
         if recovered:
-            _LOGGER.info(
-                "Recovered %d pending statistics mutation(s)", recovered
-            )
+            _LOGGER.info("Recovered %d pending statistics mutation(s)", recovered)
         return recovered
 
     async def async_backfill_history(
@@ -1699,9 +1684,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             meter_id = self._get_meter_id()
             await self.async_record_statistics(records, meter_id=meter_id)
             if not self._can_mutate_statistics():
-                _LOGGER.debug(
-                    "PSE&G backfill stopped after the entry was paused or retired"
-                )
+                _LOGGER.debug("PSE&G backfill stopped after the entry was paused or retired")
                 return 0
 
         # Statistics only: sensor values (latest_*, history_14d) stay from the regular

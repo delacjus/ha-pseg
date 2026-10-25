@@ -125,7 +125,9 @@ def test_sso_renewal_success() -> None:
         # Posting SAML response to ACS
         m.post(
             f"https://{PORTAL_HOST}/Saml/okta-prod/Acs",
-            headers={"Set-Cookie": "MM_SID=new_portal_session; Domain=mysmartenergy.nj.pseg.com; Path=/"},
+            headers={
+                "Set-Cookie": "MM_SID=new_portal_session; Domain=mysmartenergy.nj.pseg.com; Path=/"
+            },
             status_code=302,
         )
 
@@ -134,7 +136,10 @@ def test_sso_renewal_success() -> None:
             f"{PORTAL_BASE_URL}/Dashboard",
             [
                 LOGGED_OUT_REDIRECT,  # Initial ensure_session check bounces to home
-                {"text": "<html><head><title>Dashboard</title></head><body><h1>Welcome</h1></body></html>", "status_code": 200},  # Verification after SSO
+                {
+                    "text": "<html><head><title>Dashboard</title></head><body><h1>Welcome</h1></body></html>",
+                    "status_code": 200,
+                },  # Verification after SSO
             ],
         )
 
@@ -214,7 +219,10 @@ def test_keepalive() -> None:
         assert client.sso_renewals == 1
 
         # Network blip during keepalive returns False, does not raise
-        m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", exc=requests.exceptions.ConnectionError("offline"))
+        m.get(
+            f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn",
+            exc=requests.exceptions.ConnectionError("offline"),
+        )
         assert client.keepalive() is False
 
 
@@ -223,9 +231,7 @@ def test_custom_price_per_kwh() -> None:
     client = PsegClient(price_per_kwh=0.30)
     data = {
         "Data": {
-            "series": [
-                {"name": "Meter #1", "data": [{"y": 10.0, "hs": {"start": "10/15/2026"}}]}
-            ]
+            "series": [{"name": "Meter #1", "data": [{"y": 10.0, "hs": {"start": "10/15/2026"}}]}]
         }
     }
     parsed = client._parse_chart_data(data)
@@ -240,7 +246,9 @@ DASHBOARD_WITH_TOKEN = (
     '<a href="/Account/LogOff">Log out</a><script>var loginUrl="/";</script>'
     "<p>Sign in to see more</p></html>"
 )
-CHART_JSON = {"Data": {"series": [{"name": "Meter #1", "data": [{"y": 1.0, "hs": {"start": "10/20/2026"}}]}]}}
+CHART_JSON = {
+    "Data": {"series": [{"name": "Meter #1", "data": [{"y": 1.0, "hs": {"start": "10/20/2026"}}]}]}
+}
 
 
 def test_sso_signin_5xx_is_transient() -> None:
@@ -249,7 +257,11 @@ def test_sso_signin_5xx_is_transient() -> None:
     with requests_mock.Mocker(session=client.session) as m:
         m.get(f"{PORTAL_BASE_URL}/Dashboard", **LOGGED_OUT_REDIRECT)
         m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
-        m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", status_code=503, text="<html>Service Unavailable</html>")
+        m.get(
+            f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn",
+            status_code=503,
+            text="<html>Service Unavailable</html>",
+        )
         with pytest.raises(PsegTransientError):
             client.ensure_session()
     assert client.okta_session_expired_at is None
@@ -259,7 +271,9 @@ def test_dashboard_5xx_is_transient_without_renewal() -> None:
     """A 5xx from /Dashboard is transient and must not trigger SSO renewal."""
     client = PsegClient(portal_cookies="MM_SID=x")
     with requests_mock.Mocker(session=client.session) as m:
-        m.get(f"{PORTAL_BASE_URL}/Dashboard", status_code=502, text="Bad gateway, please login later")
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard", status_code=502, text="Bad gateway, please login later"
+        )
         sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_OKTA_WIDGET)
         with pytest.raises(PsegTransientError):
             client.ensure_session()
@@ -581,6 +595,7 @@ def test_post_saml_landing_on_okta_widget_is_expired() -> None:
 
 # --- Live 2026-10-21: account lists a replaced meter (empty series) after the active one ---
 
+
 def _meter(name: str, days: list[tuple[str, float]]) -> dict:
     pts = []
     for start, y in days:
@@ -593,9 +608,16 @@ TWO_METER_CHART = {
     "Data": {
         "series": [
             {"data": [[1792281600000, 17.6]], "showInLegend": False},  # unnamed navigator
-            _meter("Meter #000303817579 (Residential Service (RS))", [("10/18/2026", 17.586), ("10/19/2026", 14.5368)]),
+            _meter(
+                "Meter #000303817579 (Residential Service (RS))",
+                [("10/18/2026", 17.586), ("10/19/2026", 14.5368)],
+            ),
             _meter("Meter #000126274191 (Residential Service (RS))", []),
-            {"name": "Temperature", "type": "spline", "data": [{"x": 1792368000000, "y": 46.66, "tr": "31° | 47° | 69°F"}]},
+            {
+                "name": "Temperature",
+                "type": "spline",
+                "data": [{"x": 1792368000000, "y": 46.66, "tr": "31° | 47° | 69°F"}],
+            },
             {"name": "Energy Marker", "type": "flags", "data": []},
         ]
     }
@@ -647,17 +669,25 @@ def test_history_range_reads_every_meter_series() -> None:
         m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
         m.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart)
         records = client.fetch_history_range("2026-10-18", "2026-10-18")
-    assert records == [{"date": "2026-10-18", "kwh": 17.59, "cost": round(17.59 * client.price_per_kwh, 2)}]
+    assert records == [
+        {"date": "2026-10-18", "kwh": 17.59, "cost": round(17.59 * client.price_per_kwh, 2)}
+    ]
 
 
-def test_merge_deduplicates_meter_and_ignores_non_meter_series(caplog: pytest.LogCaptureFixture) -> None:
+def test_merge_deduplicates_meter_and_ignores_non_meter_series(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Only the first anchored series for each meter contributes usage."""
-    chart = {"Data": {"series": [
-        _meter("Meter #111 (RS)", [("10/18/2026", 10.0)]),
-        _meter("Meter #111 (RS) - Previous Year", [("10/18/2026", 99.0)]),
-        _meter("Previous Year Meter #222", [("10/18/2026", 50.0)]),
-        _meter("  Meter #222 (RS)", [("10/18/2026", 3.0)]),
-    ]}}
+    chart = {
+        "Data": {
+            "series": [
+                _meter("Meter #111 (RS)", [("10/18/2026", 10.0)]),
+                _meter("Meter #111 (RS) - Previous Year", [("10/18/2026", 99.0)]),
+                _meter("Previous Year Meter #222", [("10/18/2026", 50.0)]),
+                _meter("  Meter #222 (RS)", [("10/18/2026", 3.0)]),
+            ]
+        }
+    }
     with caplog.at_level("DEBUG"):
         parsed = PsegClient()._parse_chart_data(chart)
     assert parsed["history_14d"][0]["kwh"] == 13.0
@@ -667,18 +697,25 @@ def test_merge_deduplicates_meter_and_ignores_non_meter_series(caplog: pytest.Lo
 
 def test_merge_skips_missing_usage_and_bad_date(caplog: pytest.LogCaptureFixture) -> None:
     """Invalid points must not create zero-kWh or empty-date statistics rows."""
-    chart = {"Data": {"series": [{"name": "Meter #111 (RS)", "data": [
-        {"y": None, "hs": {"start": "10/18/2026"}},
-        {"y": "bad", "hs": {"start": "10/19/2026"}},
-        {"y": 2.0, "hs": {"start": "bad date"}},
-        {"y": 1.0, "hs": "bad"},
-        {"y": 3.0, "hs": {"start": "10/20/2026"}},
-    ]}]}}
+    chart = {
+        "Data": {
+            "series": [
+                {
+                    "name": "Meter #111 (RS)",
+                    "data": [
+                        {"y": None, "hs": {"start": "10/18/2026"}},
+                        {"y": "bad", "hs": {"start": "10/19/2026"}},
+                        {"y": 2.0, "hs": {"start": "bad date"}},
+                        {"y": 1.0, "hs": "bad"},
+                        {"y": 3.0, "hs": {"start": "10/20/2026"}},
+                    ],
+                }
+            ]
+        }
+    }
     with caplog.at_level("DEBUG"):
         parsed = PsegClient()._parse_chart_data(chart)
-    assert [(r["date"], r["kwh"]) for r in parsed["history_14d"]] == [
-        ("2026-10-20", 3.0)
-    ]
+    assert [(r["date"], r["kwh"]) for r in parsed["history_14d"]] == [("2026-10-20", 3.0)]
     assert "Skipping" in caplog.text
 
 
@@ -698,14 +735,24 @@ def test_keepalive_reports_okta_expiry() -> None:
 REMEMBER_PORTAL = "MM_SID=dead; MM_RememberMe=remember_token"
 
 
-
 def _renewal_identity_fixture(client, mocker):
     """Give admitted renewal tests a real DAILY proof for their known entry."""
     client.set_expected_meter_ids({"12345"})
     mocker.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
-    mocker.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json={"Data": {"series": [{
-        "name": "Meter #12345", "data": [{"y": 4.0, "hs": {"start": "10/22/2026"}}],
-    }]}})
+    mocker.get(
+        f"{PORTAL_BASE_URL}/Dashboard/ChartData",
+        json={
+            "Data": {
+                "series": [
+                    {
+                        "name": "Meter #12345",
+                        "data": [{"y": 4.0, "hs": {"start": "10/22/2026"}}],
+                    }
+                ]
+            }
+        },
+    )
+
 
 def test_remember_me_renews_without_okta() -> None:
     """A lapsed MM_SID is re-issued from MM_RememberMe; Okta is never contacted."""
@@ -766,7 +813,12 @@ def test_remember_me_rejected_falls_back_to_okta_sso() -> None:
     with requests_mock.Mocker(session=client.session) as m:
         m.get(
             f"{PORTAL_BASE_URL}/Dashboard",
-            [LOGGED_OUT_REDIRECT, LOGGED_OUT_REDIRECT, LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}],
+            [
+                LOGGED_OUT_REDIRECT,
+                LOGGED_OUT_REDIRECT,
+                LOGGED_OUT_REDIRECT,
+                {"text": DASHBOARD_WITH_TOKEN},
+            ],
         )
         m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
         sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_AUTOPOST_FORM)
@@ -797,7 +849,12 @@ def test_poll_token_renews_via_remember_me_not_okta() -> None:
         _renewal_identity_fixture(client, m)
         m.get(
             f"{PORTAL_BASE_URL}/Dashboard",
-            [LOGGED_OUT_REDIRECT, LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}, {"text": DASHBOARD_WITH_TOKEN}],
+            [
+                LOGGED_OUT_REDIRECT,
+                LOGGED_OUT_REDIRECT,
+                {"text": DASHBOARD_WITH_TOKEN},
+                {"text": DASHBOARD_WITH_TOKEN},
+            ],
         )
         home = m.get(f"{PORTAL_BASE_URL}/", text=ANON_HOME)
         sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAMPLE_OKTA_WIDGET)
@@ -858,7 +915,10 @@ def test_bounce_to_anonymous_home_index_renews() -> None:
         _renewal_identity_fixture(client, m)
         m.get(
             f"{PORTAL_BASE_URL}/Dashboard",
-            [{"status_code": 302, "headers": {"Location": "/Home/Index"}}, {"text": DASHBOARD_WITH_TOKEN}],
+            [
+                {"status_code": 302, "headers": {"Location": "/Home/Index"}},
+                {"text": DASHBOARD_WITH_TOKEN},
+            ],
         )
         m.get(f"{PORTAL_BASE_URL}/Home/Index", text="<html>Welcome</html>")
         assert client.ensure_session() is True
@@ -877,10 +937,12 @@ def test_remember_me_landing_on_maintenance_is_transient() -> None:
 
 def test_dedupe_keeps_newer_host_only_cookie_over_older_dotted() -> None:
     """A host-only cookie the server updated is never dropped for an older dotted copy."""
-    client = PsegClient(cookie_list=[
-        {"name": "idx", "value": "old", "domain": f".{OKTA_HOST}", "path": "/"},
-        {"name": "idx", "value": "seed", "domain": OKTA_HOST, "path": "/"},
-    ])
+    client = PsegClient(
+        cookie_list=[
+            {"name": "idx", "value": "old", "domain": f".{OKTA_HOST}", "path": "/"},
+            {"name": "idx", "value": "seed", "domain": OKTA_HOST, "path": "/"},
+        ]
+    )
     client.session.cookies.set("idx", "fresh", domain=OKTA_HOST, path="/")
     values = [c["value"] for c in client.export_cookies() if c["name"] == "idx"]
     assert values == ["fresh"]
@@ -905,7 +967,9 @@ def test_untouched_seed_pair_kept_and_dotted_rotation_wins() -> None:
         {"name": "MM_RememberMe", "value": "b", "domain": PORTAL_HOST, "path": "/"},
     ]
     untouched = PsegClient(cookie_list=pair)
-    assert sorted(c["value"] for c in untouched.export_cookies() if c["name"] == "MM_RememberMe") == ["a", "b"]
+    assert sorted(
+        c["value"] for c in untouched.export_cookies() if c["name"] == "MM_RememberMe"
+    ) == ["a", "b"]
     rotated = PsegClient(cookie_list=pair)
     rotated.session.cookies.set("MM_RememberMe", "new", domain=f".{PORTAL_HOST}", path="/")
     assert [c["value"] for c in rotated.export_cookies() if c["name"] == "MM_RememberMe"] == ["new"]
@@ -929,7 +993,12 @@ def test_login_local_success_and_password_never_logged(caplog: pytest.LogCapture
     caplog.set_level(logging.DEBUG)
     client = PsegClient(email="me@example.com", password="s3cret-pass-998")
     with requests_mock.Mocker(session=client.session) as m:
-        m.get(f"{PORTAL_BASE_URL}/", text=ANON_HOME.replace("</form>", '<input name="__RequestVerificationToken" value="af"/></form>'))
+        m.get(
+            f"{PORTAL_BASE_URL}/",
+            text=ANON_HOME.replace(
+                "</form>", '<input name="__RequestVerificationToken" value="af"/></form>'
+            ),
+        )
         login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)
         m.get(f"{PORTAL_BASE_URL}/Dashboard", [LOGGED_OUT_REDIRECT, {"text": DASHBOARD_WITH_TOKEN}])
         assert client.ensure_session() is True
@@ -937,11 +1006,18 @@ def test_login_local_success_and_password_never_logged(caplog: pytest.LogCapture
     assert "LoginEmail=me%40example.com" in body and "RememberMe=true" in body
     assert login.last_request.headers["RequestVerificationToken"] == "af"
     assert client.sso_renewals == 1
-    assert "s3cret-pass-998" not in caplog.text and "s3cret-pass-998" not in client.auth_diagnostics()
+    assert (
+        "s3cret-pass-998" not in caplog.text and "s3cret-pass-998" not in client.auth_diagnostics()
+    )
 
 
 @pytest.mark.parametrize(
-    "data", [{"LoginErrorMessage": "Invalid email address or password"}, {"RecaptchaOnLogin": True}, {"SecretQuestionError": "x"}]
+    "data",
+    [
+        {"LoginErrorMessage": "Invalid email address or password"},
+        {"RecaptchaOnLogin": True},
+        {"SecretQuestionError": "x"},
+    ],
 )
 def test_login_local_refusals_raise_without_retry(data: dict) -> None:
     client = PsegClient(email="me@example.com", password="pw")
@@ -982,9 +1058,7 @@ LOGIN_PAGE_WITH_TOKEN = ANON_HOME.replace(
 
 def test_renew_tries_remember_me_before_the_saved_login() -> None:
     """A saved RememberMe renews first; the stored password is not used."""
-    client = PsegClient(
-        portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw"
-    )
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw")
     with requests_mock.Mocker(session=client.session) as m:
         _renewal_identity_fixture(client, m)
         m.get(
@@ -1004,9 +1078,7 @@ def test_renew_tries_remember_me_before_the_saved_login() -> None:
 
 def test_expired_remember_me_falls_back_to_the_saved_login_once() -> None:
     """A rejected RememberMe is dropped, then the password signs in exactly once."""
-    client = PsegClient(
-        portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw"
-    )
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw")
     assert client.has_remember_me is True
     with requests_mock.Mocker(session=client.session) as m:
         dash = m.get(
@@ -1032,9 +1104,7 @@ def test_expired_remember_me_falls_back_to_the_saved_login_once() -> None:
 
 def test_expired_remember_me_and_rejected_login_does_not_loop() -> None:
     """RememberMe expires once, the password is rejected once, and it stops."""
-    client = PsegClient(
-        portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw"
-    )
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw")
     with requests_mock.Mocker(session=client.session) as m:
         dash = m.get(
             f"{PORTAL_BASE_URL}/Dashboard",
@@ -1043,7 +1113,10 @@ def test_expired_remember_me_and_rejected_login_does_not_loop() -> None:
         m.get(f"{PORTAL_BASE_URL}/", text=LOGIN_PAGE_WITH_TOKEN)
         login = m.post(
             f"{PORTAL_BASE_URL}/Home/Login",
-            json={"AjaxResults": [], "Data": {"LoginErrorMessage": "Invalid email address or password"}},
+            json={
+                "AjaxResults": [],
+                "Data": {"LoginErrorMessage": "Invalid email address or password"},
+            },
         )
 
         with pytest.raises(PsegLoginRejected):
@@ -1055,9 +1128,7 @@ def test_expired_remember_me_and_rejected_login_does_not_loop() -> None:
 
 def test_remember_me_transient_never_falls_back_to_the_password() -> None:
     """A portal outage is transient: no password attempt and the cookie is kept."""
-    client = PsegClient(
-        portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw"
-    )
+    client = PsegClient(portal_cookies=REMEMBER_PORTAL, email="me@example.com", password="pw")
     with requests_mock.Mocker(session=client.session) as m:
         m.get(
             f"{PORTAL_BASE_URL}/Dashboard",
@@ -1285,9 +1356,7 @@ def test_dashboard_malformed_redirect_is_a_sanitized_transient_error() -> None:
     canary = "LOCCANARY"
     malformed = f"https://{canary}\u2100.example/".encode().decode("latin-1")
     client = PsegClient(email=LOCAL_EMAIL, password=LOCAL_PASSWORD)
-    adapter = _CannedAdapter(
-        {f"{PORTAL_BASE_URL}/Dashboard": (302, {"Location": malformed}, "")}
-    )
+    adapter = _CannedAdapter({f"{PORTAL_BASE_URL}/Dashboard": (302, {"Location": malformed}, "")})
     client.session.mount("https://", adapter)
 
     with pytest.raises(PsegTransientError) as err:
@@ -1337,9 +1406,7 @@ def _hourly_chart(
             end_label = label
         else:
             label = start.isoformat().replace("+00:00", "Z")
-            end_label = (start + timedelta(hours=1)).isoformat().replace(
-                "+00:00", "Z"
-            )
+            end_label = (start + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
         points.append(
             {
                 "x": int(wall_utc.timestamp() * 1000),
@@ -1518,10 +1585,9 @@ def test_hourly_label_mismatch_blocks_promotion() -> None:
     day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
     payload = _hourly_chart(day)
     for point in payload["Data"]["series"][0]["data"]:
-        shifted = (
-            datetime.fromtimestamp(point["x"] / 1000, tz=UTC).replace(tzinfo=NY_TZ)
-            + timedelta(hours=2)
-        )
+        shifted = datetime.fromtimestamp(point["x"] / 1000, tz=UTC).replace(
+            tzinfo=NY_TZ
+        ) + timedelta(hours=2)
         point["hs"]["start"] = shifted.strftime("%m/%d/%Y %I:%M %p")
 
     parsed = PsegClient()._parse_hourly_chart(payload)
@@ -1540,14 +1606,9 @@ def test_hourly_label_mismatch_blocks_promotion() -> None:
 def test_date_only_labels_prove_interval_start() -> None:
     """Date-only labels now prove interval start under the verified contract."""
     day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
-    parsed = PsegClient()._parse_hourly_chart(
-        _hourly_chart(day, date_only_labels=True)
-    )
+    parsed = PsegClient()._parse_hourly_chart(_hourly_chart(day, date_only_labels=True))
     assert all(record["interval_ok"] is True for record in parsed["hourly_records"])
-    assert all(
-        record["interval_reason"] is None
-        for record in parsed["hourly_records"]
-    )
+    assert all(record["interval_reason"] is None for record in parsed["hourly_records"])
 
     result = validate_hourly_day(
         day,
@@ -1606,9 +1667,9 @@ def test_mixed_granularity_when_one_closed_day_is_incomplete() -> None:
         }
     }
     hourly = _hourly_chart(day_before, 1.0)
-    hourly["Data"]["series"][0]["data"] += _hourly_chart(yesterday, 1.0)["Data"][
-        "series"
-    ][0]["data"][:2]
+    hourly["Data"]["series"][0]["data"] += _hourly_chart(yesterday, 1.0)["Data"]["series"][0][
+        "data"
+    ][:2]
     intervals: list[str] = []
 
     with requests_mock.Mocker(session=client.session) as mock:
@@ -1808,12 +1869,9 @@ def test_hourly_login_redirect_is_typed_auth_loss(mode, leg) -> None:
             client.fetch_energy_data(14)
 
     expected = (
-        AUTH_REASON_OKTA_SESSION_EXPIRED
-        if mode == "okta"
-        else AUTH_REASON_PORTAL_SESSION_EXPIRED
+        AUTH_REASON_OKTA_SESSION_EXPIRED if mode == "okta" else AUTH_REASON_PORTAL_SESSION_EXPIRED
     )
     assert client.auth_reason == expected
-
 
 
 def test_hourly_contract_sample_projection_allowed_fields() -> None:
@@ -2674,3 +2732,56 @@ def test_hourly_contract_fall_back_aware_25_points_dst_ambiguous() -> None:
     )
     assert result.complete is False
     assert result.reason == "dst_ambiguous"
+
+
+def test_cost_contract_sample_property_and_slots() -> None:
+    """The client stores up to two bounded cost sample slots."""
+    client = PsegClient()
+    assert client.cost_contract_sample is None
+
+    client._cost_contract_samples["daily"] = {"sample_version": 1, "status": "ok"}
+    assert client.cost_contract_sample == {"daily": {"sample_version": 1, "status": "ok"}}
+
+    client._cost_contract_samples["hourly"] = {"sample_version": 1, "status": "ok"}
+    assert len(client.cost_contract_sample) == 2
+
+
+def test_cost_auth_rejected_never_marks_auth_failure() -> None:
+    """Contract: HTTP 401 or auth_rejected in cost sampler never calls _mark_auth_failure."""
+    client = PsegClient(portal_cookies="MM_SID=synthetic")
+    client.set_expected_meter_ids(["12345678"])
+    from custom_components.pseg.cost_evidence import NY_TZ, CostEvidenceStatus, CostPermit
+    from custom_components.pseg.renewal_admission import RenewalEntryRuntime
+
+    runtime = RenewalEntryRuntime("test-entry")
+    token = runtime.activate(lambda: True)
+    client.attach_renewal_admission(runtime.admission, runtime, token)
+
+    day = (datetime.now() - timedelta(days=1)).strftime("%m/%d/%Y")
+    daily = {
+        "Data": {
+            "series": [
+                {
+                    "name": "Meter #12345678",
+                    "data": [{"x": 1000, "y": 10.0, "hs": {"start": day, "end": day}}],
+                }
+            ]
+        }
+    }
+    hourly = {"Data": {"series": []}}
+    ny_today = datetime.now(NY_TZ).date().isoformat()
+    permit = CostPermit("p1", "test-entry", ny_today, "6", "2026-10-11", "2026-10-25", "ts")
+
+    with (
+        patch.object(client, "_get_verification_token", return_value="tok"),
+        patch.object(client, "_fetch_chart_json", side_effect=[daily, hourly]),
+        patch(
+            "custom_components.pseg.cost_evidence.execute_cost_sampler",
+            return_value=(CostEvidenceStatus.AUTH_REJECTED, {"status": "auth_rejected"}, False),
+        ),
+        patch.object(client, "_mark_auth_failure") as mock_mark_auth,
+    ):
+        res = client.fetch_energy_data(cost_permit=permit)
+        assert res["identity_confirmed"] is True
+        assert res["cost_evidence"]["status"] == "auth_rejected"
+        mock_mark_auth.assert_not_called()

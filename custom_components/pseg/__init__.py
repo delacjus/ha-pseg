@@ -55,6 +55,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     if static_paths:
         try:
             from homeassistant.components.http import StaticPathConfig
+
             configs = [StaticPathConfig(url, path, False) for url, path in static_paths]
             await hass.http.async_register_static_paths(configs)
             _LOGGER.debug("Registered static paths for PSE&G resources")
@@ -96,6 +97,59 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     if not hass.services.has_service(DOMAIN, "backfill_history"):
         hass.services.async_register(DOMAIN, "backfill_history", async_backfill_service)
+
+    async def async_set_cost_mode_service(call: ServiceCall) -> None:
+        """Handle set_cost_mode service call."""
+        cost_mode = call.data.get("cost_mode") or call.data.get("mode")
+        if not cost_mode or not isinstance(cost_mode, str):
+            raise ValueError("cost_mode is required and must be a string")
+        cost_mode = cost_mode.lower().strip()
+        from .const import COST_MODE_EVIDENCE, COST_MODE_IMPORT, COST_MODE_OFF
+
+        if cost_mode == COST_MODE_IMPORT:
+            raise ValueError("Cost mode 'import' is reserved and refused in v1.7.0")
+        if cost_mode not in (COST_MODE_OFF, COST_MODE_EVIDENCE):
+            raise ValueError(f"Invalid cost mode '{cost_mode}': expected 'off' or 'evidence'")
+
+        target_entry_id = call.data.get("entry_id")
+        coordinators = list(hass.data.get(DOMAIN, {}).values())
+        if target_entry_id:
+            coordinators = [
+                c
+                for c in coordinators
+                if c.config_entry and c.config_entry.entry_id == target_entry_id
+            ]
+
+        if not coordinators:
+            _LOGGER.warning("No active PSE&G integration entry found to set cost mode")
+            return
+
+        for coord in coordinators:
+            try:
+                await coord.async_set_cost_mode(cost_mode)
+                _LOGGER.info("Set PSE&G cost mode to %s", cost_mode)
+            except Exception as err:
+                _LOGGER.error("Error setting PSE&G cost mode: %s", err)
+
+    if not hass.services.has_service(DOMAIN, "set_cost_mode"):
+        from homeassistant.helpers.service import async_register_admin_service
+        import voluptuous as vol
+
+        cost_mode_schema = vol.Schema(
+            {
+                vol.Optional("cost_mode"): cv.string,
+                vol.Optional("mode"): cv.string,
+                vol.Optional("entry_id"): cv.string,
+            },
+            extra=vol.ALLOW_EXTRA,
+        )
+        async_register_admin_service(
+            hass,
+            DOMAIN,
+            "set_cost_mode",
+            async_set_cost_mode_service,
+            schema=cost_mode_schema,
+        )
 
     return True
 
@@ -173,6 +227,8 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             data=new_data,
             version=2,
         )
-        _LOGGER.info("Migrated PSE&G entry to version 2 (stripped stored credentials and add-on URLs)")
+        _LOGGER.info(
+            "Migrated PSE&G entry to version 2 (stripped stored credentials and add-on URLs)"
+        )
 
     return True

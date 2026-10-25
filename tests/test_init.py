@@ -170,9 +170,7 @@ async def test_unload_cancels_keepalive_timer(hass: HomeAssistant) -> None:
     coord = hass.data[DOMAIN][entry.entry_id]
     assert coord._unsub_keepalive is not None
 
-    with patch(
-        "custom_components.pseg.async_unload_entry", AsyncMock(return_value=True)
-    ):
+    with patch("custom_components.pseg.async_unload_entry", AsyncMock(return_value=True)):
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
     assert coord._unsub_keepalive is None
@@ -194,3 +192,39 @@ async def test_async_setup_without_frontend_skips_card(hass: HomeAssistant) -> N
     hass.http = MagicMock()
     hass.http.async_register_static_paths = AsyncMock()
     assert await async_setup(hass, {}) is True
+
+
+async def test_async_setup_registers_set_cost_mode_service(hass: HomeAssistant) -> None:
+    """The set_cost_mode admin service is registered during async_setup."""
+    assert await async_setup(hass, {}) is True
+    assert hass.services.has_service(DOMAIN, "set_cost_mode")
+
+
+async def test_set_cost_mode_nonadmin_unauthorized(hass: HomeAssistant) -> None:
+    """Calling set_cost_mode from a non-admin context raises Unauthorized."""
+    from homeassistant.core import Context
+    from homeassistant.exceptions import Unauthorized
+    import pytest
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(domain=DOMAIN, entry_id="test-admin-check", data={})
+    entry.add_to_hass(hass)
+    from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
+    from custom_components.pseg.pseg_client import PsegClient
+
+    coord = PsegDataUpdateCoordinator(hass, PsegClient(), {}, config_entry=entry)
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
+    assert await async_setup(hass, {})
+
+    await hass.auth.async_create_user("test-owner")
+    nonadmin = await hass.auth.async_create_user("test-nonadmin")
+    assert not nonadmin.is_admin
+
+    with pytest.raises(Unauthorized):
+        await hass.services.async_call(
+            DOMAIN,
+            "set_cost_mode",
+            {"cost_mode": "evidence", "entry_id": entry.entry_id},
+            blocking=True,
+            context=Context(user_id=nonadmin.id),
+        )

@@ -14,3 +14,24 @@ backfill_history:
       example: "2026-10-19"
       selector:
         date:
+set_cost_mode:
+  name: Set Cost Mode
+  description: Sets the operator cost sampling mode for PSE&G real-cost evidence capture (off or evidence).
+  fields:
+    cost_mode:
+      name: Cost Mode
+      description: Cost mode to set (off or evidence; import is reserved and refused in v1.7.0).
+      required: true
+      example: "evidence"
+      selector:
+        select:
+          options:
+            - "off"
+            - "evidence"
+    entry_id:
+      name: Entry ID
+      description: Specific PSE&G config entry ID to configure (optional; applies to all entries if omitted).
+      required: false
+      example: "01M5FKK1CNKB2KAAE3C9S01AW0"
+      selector:
+        text:

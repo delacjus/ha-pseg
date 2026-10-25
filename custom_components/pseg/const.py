@@ -72,13 +72,15 @@ AUTH_REASON_CAPTCHA_REQUIRED = "captcha_required"
 AUTH_REASON_REMEMBER_ME_REJECTED = "remember_me_rejected"
 AUTH_REASON_SECURITY_STEP = "security_step"
 AUTH_REASON_OKTA_SESSION_EXPIRED = "okta_session_expired"
-AUTH_REASONS = frozenset({
-    AUTH_REASON_PORTAL_SESSION_EXPIRED,
-    AUTH_REASON_CAPTCHA_REQUIRED,
-    AUTH_REASON_REMEMBER_ME_REJECTED,
-    AUTH_REASON_SECURITY_STEP,
-    AUTH_REASON_OKTA_SESSION_EXPIRED,
-})
+AUTH_REASONS = frozenset(
+    {
+        AUTH_REASON_PORTAL_SESSION_EXPIRED,
+        AUTH_REASON_CAPTCHA_REQUIRED,
+        AUTH_REASON_REMEMBER_ME_REJECTED,
+        AUTH_REASON_SECURITY_STEP,
+        AUTH_REASON_OKTA_SESSION_EXPIRED,
+    }
+)
 
 PORTAL_HOST = "mysmartenergy.nj.pseg.com"
 OKTA_HOST = "id.myaccount.pseg.com"
@@ -105,3 +107,16 @@ ATTR_OKTA_SESSION_EXPIRED_AT = "okta_session_expired_at"
 ATTR_AUTH_REASON = "auth_reason"
 # Seconds between the last confirmed portal request and the authentication failure.
 ATTR_AUTH_IDLE_GAP = "idle_gap_seconds"
+
+# Real-cost evidence mode control and parameters (v1.7.0 evidence only)
+COST_MODE_OFF = "off"
+COST_MODE_EVIDENCE = "evidence"
+COST_MODE_IMPORT = "import"
+COST_MODES = frozenset({COST_MODE_OFF, COST_MODE_EVIDENCE, COST_MODE_IMPORT})
+DEFAULT_COST_MODE = COST_MODE_OFF
+
+# MyMeter /Dashboard/Chart UsageType
+USAGE_TYPE_CONSUMPTION = "1"
+USAGE_TYPE_COST = "2"
+
+SERVICE_SET_COST_MODE = "set_cost_mode"

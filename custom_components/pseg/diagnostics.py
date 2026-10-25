@@ -73,19 +73,13 @@ async def async_get_config_entry_diagnostics(
         # The unique_id is the meter id (the stable statistics key) for every entry
         # this integration creates.
         "unique_id": REDACTED,
-        "title": (
-            REDACTED
-            if title and _title_contains_meter(title, meters)
-            else title
-        ),
+        "title": (REDACTED if title and _title_contains_meter(title, meters) else title),
         "state": entry.state.value,
         "data": async_redact_data(dict(entry.data), TO_REDACT),
         "options": dict(entry.options),
     }
     # The coordinator is only registered after a successful first refresh.
-    coordinator: PsegDataUpdateCoordinator | None = hass.data.get(DOMAIN, {}).get(
-        entry.entry_id
-    )
+    coordinator: PsegDataUpdateCoordinator | None = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if coordinator is None:
         return {
             "entry": entry_info,
@@ -93,6 +87,9 @@ async def async_get_config_entry_diagnostics(
             "coordinator": None,
             "statistics": None,
             "hourly_contract_sample": None,
+            "cost_mode": "off",
+            "cost_readiness_reason": "coordinator_not_ready",
+            "cost_contract_sample": None,
         }
     client = coordinator.client
 
@@ -119,4 +116,7 @@ async def async_get_config_entry_diagnostics(
         # Counts, fixed reason codes and booleans only: no raw points or meter ids.
         "statistics": await coordinator.async_statistics_summary(),
         "hourly_contract_sample": client.hourly_contract_sample,
+        "cost_mode": coordinator.cost_mode,
+        "cost_readiness_reason": coordinator.cost_readiness_reason,
+        "cost_contract_sample": client.cost_contract_sample,
     }

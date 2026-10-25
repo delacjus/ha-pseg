@@ -50,7 +50,9 @@ async def test_transient_network_error_raises_update_failed(hass: HomeAssistant)
     client = PsegClient(okta_cookies="idx=test")
     coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
 
-    with patch.object(client, "fetch_energy_data", side_effect=PsegTransientError("Connection reset")):
+    with patch.object(
+        client, "fetch_energy_data", side_effect=PsegTransientError("Connection reset")
+    ):
         with pytest.raises(UpdateFailed, match="Transient error communicating with PSE&G"):
             await coord._async_update_data()
 
@@ -71,7 +73,9 @@ async def test_request_exception_raises_update_failed(hass: HomeAssistant) -> No
     client = PsegClient(okta_cookies="idx=test")
     coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
 
-    with patch.object(client, "fetch_energy_data", side_effect=requests.RequestException("503 Gateway")):
+    with patch.object(
+        client, "fetch_energy_data", side_effect=requests.RequestException("503 Gateway")
+    ):
         with pytest.raises(UpdateFailed, match="Transient error communicating with PSE&G"):
             await coord._async_update_data()
 
@@ -92,7 +96,9 @@ async def test_okta_session_expired_raises_config_entry_auth_failed(hass: HomeAs
     client = PsegClient(okta_cookies="idx=test")
     coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
 
-    with patch.object(client, "fetch_energy_data", side_effect=PsegOktaSessionExpired("Widget encountered")):
+    with patch.object(
+        client, "fetch_energy_data", side_effect=PsegOktaSessionExpired("Widget encountered")
+    ):
         with pytest.raises(ConfigEntryAuthFailed, match="Okta session expired"):
             await coord._async_update_data()
 
@@ -104,7 +110,9 @@ async def test_okta_session_expired_raises_config_entry_auth_failed(hass: HomeAs
     assert issue.severity == ir.IssueSeverity.ERROR
 
 
-async def test_successful_update_dismisses_auth_issues_and_persists_cookies(hass: HomeAssistant) -> None:
+async def test_successful_update_dismisses_auth_issues_and_persists_cookies(
+    hass: HomeAssistant,
+) -> None:
     """Test successful update clears auth issues and updates entry with rotated cookies."""
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -127,7 +135,9 @@ async def test_successful_update_dismisses_auth_issues_and_persists_cookies(hass
     }
 
     # Simulate rotated cookies in jar
-    client.session.cookies.set("MM_SID", "new_rotated_session", domain="mysmartenergy.nj.pseg.com", path="/")
+    client.session.cookies.set(
+        "MM_SID", "new_rotated_session", domain="mysmartenergy.nj.pseg.com", path="/"
+    )
 
     with (
         patch.object(client, "fetch_energy_data", return_value=sample_data),
@@ -314,7 +324,9 @@ async def test_stale_keepalive_does_not_clear_auth_state(hass: HomeAssistant) ->
 
     assert coord.auth_required is True
     assert coord.status == "auth_required"
-    assert ir.async_get(hass).async_get_issue(DOMAIN, f"reauth_required_{entry.entry_id}") is not None
+    assert (
+        ir.async_get(hass).async_get_issue(DOMAIN, f"reauth_required_{entry.entry_id}") is not None
+    )
 
 
 async def test_retired_poll_auth_failure_does_not_start_reauth(hass: HomeAssistant) -> None:
@@ -382,7 +394,10 @@ async def test_first_refresh_during_startup_defers_statistics(hass: HomeAssistan
     entry.add_to_hass(hass)
     client = PsegClient(okta_cookies="idx=test")
     coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
-    sample = {"meter": "Meter #12345", "history_14d": [{"date": "2026-10-20", "kwh": 10.0, "cost": 2.47}]}
+    sample = {
+        "meter": "Meter #12345",
+        "history_14d": [{"date": "2026-10-20", "kwh": 10.0, "cost": 2.47}],
+    }
 
     hass.set_state(CoreState.starting)
     with (
@@ -403,15 +418,15 @@ async def test_first_refresh_during_startup_defers_statistics(hass: HomeAssistan
 async def test_successful_poll_learns_meters_without_retiring_session(hass: HomeAssistant) -> None:
     """A legacy entry persists newly observed meters through the cookie update path."""
     entry = MockConfigEntry(
-        domain=DOMAIN, version=2, unique_id="111",
+        domain=DOMAIN,
+        version=2,
+        unique_id="111",
         data={CONF_OKTA_COOKIES: "idx=test", CONF_METER_ID: "222"},
     )
     entry.add_to_hass(hass)
     client = PsegClient(okta_cookies="idx=test")
     coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
-    with patch.object(
-        client, "fetch_energy_data", return_value={"meter_ids": ["333"]}
-    ):
+    with patch.object(client, "fetch_energy_data", return_value={"meter_ids": ["333"]}):
         await coord._async_update_data()
         assert set(entry.data[CONF_KNOWN_METER_IDS]) == {"111", "222", "333"}
         assert coord._is_stale() is False
@@ -697,3 +712,57 @@ async def test_retired_poll_result_is_not_published(hass: HomeAssistant) -> None
     assert coord.last_successful_update is None
     assert coord.next_update_time is None
     assert entry.data["cookies"] == new_jar
+
+
+async def test_coordinator_cost_mode_properties(hass: HomeAssistant) -> None:
+    """The coordinator exposes cost mode properties backed by the cost store."""
+    entry = MockConfigEntry(domain=DOMAIN, entry_id="coord_cost_props", data={})
+    entry.add_to_hass(hass)
+    client = PsegClient()
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+
+    assert coord.cost_mode == "off"
+    assert coord.cost_readiness_reason == "mode_off"
+
+    await coord.async_set_cost_mode("evidence")
+    assert coord.cost_mode == "evidence"
+
+
+async def test_cost_permit_is_reserved_before_fetch(hass: HomeAssistant) -> None:
+    """Contract: Cost permit is durably reserved in evidence store BEFORE executor fetch."""
+    from homeassistant.util import dt as dt_util
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    from custom_components.pseg.const import COST_MODE_EVIDENCE, DOMAIN
+    from custom_components.pseg.cost_evidence import NY_TZ
+
+    entry = MockConfigEntry(domain=DOMAIN, entry_id="test-entry-reserve", data={})
+    entry.add_to_hass(hass)
+    coord = PsegDataUpdateCoordinator(hass, PsegClient(), {}, config_entry=entry)
+    await coord.cost_store.async_load()
+    await coord.cost_store.async_set_mode(COST_MODE_EVIDENCE)
+
+    observed_permit_ids = []
+    observed_store_readiness = []
+
+    def mock_fetch(days=14, cost_permit=None):
+        if cost_permit:
+            observed_permit_ids.append(cost_permit.permit_id)
+            ny_date = dt_util.now(NY_TZ).date()
+            observed_store_readiness.append(coord.cost_store.get_readiness_reason(ny_date))
+        return {
+            "identity_confirmed": True,
+            "contributing_meter_ids": ["12345678"],
+            "meter_ids": ["12345678"],
+            "daily_records": [],
+            "history_14d": [],
+        }
+
+    with patch.object(coord.client, "fetch_energy_data", side_effect=mock_fetch):
+        await coord._async_update_data()
+
+    assert len(observed_permit_ids) == 1
+    # Under mutant reserve_after_fetch, permit_id is "unreserved"
+    assert observed_permit_ids[0] != "unreserved"
+    # Under mutant reserve_after_fetch, store readiness is still "ready" during fetch
+    assert observed_store_readiness[0] == "budget_exhausted_for_today"
