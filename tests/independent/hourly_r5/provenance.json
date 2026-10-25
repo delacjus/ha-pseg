@@ -1,0 +1,66 @@
+{
+  "group": "hourly_r5",
+  "status": "active",
+  "reviewer_kb": "7a31c9d4-2e8b-4f6a-b1d0-20261025a002",
+  "sources": [
+    {
+      "original_path": "/tmp/pseg-independent-r5/conftest.py",
+      "original_sha256": "262d018fe57a51272d90343468df8a89e006987a1061cb242c4c488f2bed42c0",
+      "archived_path": "hourly_r5/conftest.py.txt",
+      "archived_sha256": "262d018fe57a51272d90343468df8a89e006987a1061cb242c4c488f2bed42c0",
+      "role": "conftest",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-independent-r5/test_independent.py",
+      "original_sha256": "c3805bf723ba0d231d0f2d76447f236e4a0b9ef87dafe97b21f5e5d13c44e07c",
+      "archived_path": "hourly_r5/test_independent.py.txt",
+      "archived_sha256": "c3805bf723ba0d231d0f2d76447f236e4a0b9ef87dafe97b21f5e5d13c44e07c",
+      "role": "probe",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-independent-r5/test_physical_failure.py",
+      "original_sha256": "e39c6205611344a3ac5219ca8a136a7af7077857330d09f7d76e073a5f80eb5f",
+      "archived_path": "hourly_r5/test_physical_failure.py.txt",
+      "archived_sha256": "e39c6205611344a3ac5219ca8a136a7af7077857330d09f7d76e073a5f80eb5f",
+      "role": "probe",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-independent-r5/test_r5.py",
+      "original_sha256": "75425590f63ed080adff85866fc6db4e6cf86582519c2c4e71690b37fc909355",
+      "archived_path": "hourly_r5/test_r5.py.txt",
+      "archived_sha256": "75425590f63ed080adff85866fc6db4e6cf86582519c2c4e71690b37fc909355",
+      "role": "probe",
+      "collect": false
+    }
+  ],
+  "expected_collection": 60,
+  "transformation_rationale": [
+    "Preserve assertion ASTs; normalize imports to tests.independent.hourly_r5.test_independent_hourly_r5 and tests.test_statistics_recorder; override root _real_pseg_statistics_writes fixture by name to prevent double-wrapping Store._async_write_data; adapt input timestamps in test_interval_evidence_all_day_lengths for aware_valid to America/New_York wall-clock hour start encoded as UTC ms per v1.6.0 contract (KB 5e0c2b1a-7f3d-4a91-9c2e-20261025a001, 7a31c9d4-2e8b-4f6a-b1d0-20261025a002)",
+    "Parent-approved v1.6.0 contract supersession of test_interval_evidence_all_day_lengths: contract-correct x for all label variants and declared (complete, reason) table; see PROVENANCE.md"
+  ],
+  "promoted_files": [
+    {
+      "relative_path": "__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": "conftest.py",
+      "sha256": "06c3ed63a1620c8ddd3d9ad16e5f87c9e5d88fffcdc6d905a1b5527d797c4e55"
+    },
+    {
+      "relative_path": "test_independent_hourly_guards.py",
+      "sha256": "9e3089125ec4ad8c7b6aaef0c4e8c4bcb0f8b70b0661bab7ea0724226b89bfda"
+    },
+    {
+      "relative_path": "test_independent_hourly_physical_failure.py",
+      "sha256": "aaf5ba1e6eb63950adca165a137c820b98d261764445f92b79ddf28f367267b8"
+    },
+    {
+      "relative_path": "test_independent_hourly_r5.py",
+      "sha256": "cfa23bf89e42be3723c192b8b9974c918b669d144ee9c8defeaa3b4429734648"
+    }
+  ]
+}

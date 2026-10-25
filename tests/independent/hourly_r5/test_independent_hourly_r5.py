@@ -1,0 +1,459 @@
+import asyncio
+import copy
+from datetime import UTC, date, datetime, timedelta
+import json
+from pathlib import Path
+import threading
+from unittest.mock import AsyncMock, MagicMock, patch
+from zoneinfo import ZoneInfo
+
+from homeassistant.components.recorder import statistics as rs
+import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.components.recorder.common import (
+    async_wait_recording_done,
+)
+from sqlalchemy.exc import SQLAlchemyError
+
+from custom_components.pseg import coordinator as cm
+from custom_components.pseg.const import CONF_STATISTICS_IMPORT_ENABLED, DOMAIN
+from custom_components.pseg.coordinator import (
+    PsegDataUpdateCoordinator as Coordinator,
+    PsegStatisticsError,
+)
+from custom_components.pseg.pseg_client import PsegClient, PsegOktaSessionExpired
+from custom_components.pseg.statistics_hourly import expected_hour_starts, validate_hourly_day
+from tests.test_statistics_recorder import (
+    CONSUMPTION_ID,
+    COST_ID,
+    _Client,
+    _daily_with,
+    _day_rows,
+    _hourly,
+    _recs,
+    _rows,
+)
+
+pytestmark = pytest.mark.independent
+
+
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations(recorder_mock, enable_custom_integrations):
+    yield
+
+
+def entry_for(hass, uid='m1'):
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=uid, data={})
+    entry.add_to_hass(hass)
+    return entry
+
+
+def restart_runtime(hass, entry, old):
+    old.stop_keepalive()
+    hass.data[f'{DOMAIN}_statistics_runtimes'].pop(entry.entry_id)
+    return Coordinator(hass, _Client(), {}, config_entry=entry)
+
+
+async def test_actual_setup_unload_serialization_and_other_entry(hass):
+    entry = entry_for(hass)
+    with patch.object(Coordinator, 'async_config_entry_first_refresh', AsyncMock()):
+        assert await hass.config_entries.async_setup(entry.entry_id)
+    old = hass.data[DOMAIN][entry.entry_id]
+    old.client = _Client()
+    daily = _recs('2026-10-02', 1, 24)
+    await old.async_record_statistics(daily, meter_id='m1')
+    entered, release = asyncio.Event(), asyncio.Event()
+    real_get = cm._async_get_stats_from
+
+    async def hold(h, sid, start):
+        rows = await real_get(h, sid, start)
+        if asyncio.current_task().get_name() == 'old-import' and sid == COST_ID:
+            entered.set()
+            await release.wait()
+        return rows
+
+    old_task = new_task = None
+    with patch.object(cm, '_async_get_stats_from', hold):
+        try:
+            old_task = asyncio.create_task(old.async_record_statistics(_recs('2026-10-02', 1, 26), meter_id='m1'), name='old-import')
+            await asyncio.wait_for(entered.wait(), 3)
+            with patch.object(Coordinator, 'async_config_entry_first_refresh', AsyncMock()):
+                assert await hass.config_entries.async_unload(entry.entry_id)
+                assert old._stopped and not old._stats_runtime.is_current(old._stats_token)
+                assert await hass.config_entries.async_setup(entry.entry_id)
+            new = hass.data[DOMAIN][entry.entry_id]
+            new.client = _Client()
+            assert new._stats_lock is old._stats_lock
+            assert new._stats_state is old._stats_state
+            new_task = asyncio.create_task(new.async_record_statistics(daily, meter_id='m1', hourly_records=_hourly('2026-10-02'), hourly_granularity='hourly'))
+            await asyncio.sleep(0)
+            assert not new_task.done()
+            other_entry = entry_for(hass, 'other')
+            other = Coordinator(hass, _Client(), {}, config_entry=other_entry)
+            await asyncio.wait_for(other.async_record_statistics(daily, meter_id='other'), 3)
+        finally:
+            release.set()
+            if old_task:
+                await asyncio.wait_for(old_task, 3)
+            if new_task:
+                await asyncio.wait_for(new_task, 3)
+    await async_wait_recording_done(hass)
+    rows = await _rows(hass)
+    assert len(rows) == 24 and sum(r[1] for r in rows) == 24
+    assert [r[2] for r in rows] == list(range(1, 25))
+    restarted = restart_runtime(hass, entry, new)
+    await restarted._stats_state.async_load()
+    assert '2026-10-02' in restarted._stats_state.promoted(CONSUMPTION_ID)
+    assert '2026-10-02' in restarted._stats_state.promoted(COST_ID)
+
+
+@pytest.mark.parametrize('mode', ['daily_only', 'mixed', 'wrong_sum'])
+async def test_fault_recovery_from_fresh_store_complete_chain(hass, mode):
+    entry = entry_for(hass)
+    old = Coordinator(hass, _Client(), {}, config_entry=entry)
+    baseline = _recs('2026-10-01', 3)
+    await old.async_record_statistics(baseline, meter_id='m1')
+    corrected = _daily_with(baseline, '2026-10-01', 20)
+    hourly = []
+    if mode != 'daily_only':
+        corrected = _daily_with(corrected, '2026-10-02', 24)
+        hourly = _hourly('2026-10-02')
+    real_import = rs.import_statistics
+
+    def fault(instance, metadata, stats, table):
+        if metadata['statistic_id'] == COST_ID:
+            if mode == 'wrong_sum':
+                stats = [{**r, 'sum': r['sum'] + 3} for r in stats]
+            else:
+                raise SQLAlchemyError('independent cost failure')
+        return real_import(instance, metadata, stats, table)
+
+    with patch.object(rs, 'import_statistics', fault):
+        with pytest.raises(PsegStatisticsError, match='did not persist'):
+            await old.async_record_statistics(corrected, meter_id='m1', hourly_records=hourly, hourly_granularity='hourly')
+    new = restart_runtime(hass, entry, old)
+    await new._stats_state.async_load()
+    pending = new._stats_state.pending_mutations()
+    assert len(pending) == 1
+    mutation = next(iter(pending.values()))
+    expected_rows = 26 if mode != 'daily_only' else 3
+    assert all(len(rows) == expected_rows for rows in mutation['series'].values())
+    # The next request deliberately omits Oct 1/2: recovery must use the durable
+    # complete journal rather than data supplied by the new request.
+    await new.async_record_statistics(_recs('2026-10-03', 1), meter_id='m1')
+    await async_wait_recording_done(hass)
+    e, c = await _rows(hass), await _rows(hass, COST_ID)
+    assert _day_rows(e, '2026-10-01')[0][1:] == (20, 20)
+    assert _day_rows(c, '2026-10-01')[0][1:] == (5, 5)
+    total = 54 if mode != 'daily_only' else 40
+    assert e[-1][2] == total and c[-1][2] == total * .25
+    assert not new._stats_state.has_pending()
+    before = (e, c)
+    await new.async_record_statistics(corrected, meter_id='m1')
+    assert (await _rows(hass), await _rows(hass, COST_ID)) == before
+
+
+async def test_cancel_during_readback_fresh_store_recovers(hass):
+    entry = entry_for(hass)
+    old = Coordinator(hass, _Client(), {}, config_entry=entry)
+    daily = _recs('2026-10-02', 1, 24)
+    entered = asyncio.Event()
+    real_get = cm._async_get_series_with_sums
+    async def hold(*args):
+        rows = await real_get(*args)
+        entered.set()
+        await asyncio.Event().wait()
+        return rows
+    with patch.object(cm, '_async_get_series_with_sums', hold):
+        task = asyncio.create_task(old.async_record_statistics(daily, meter_id='m1', hourly_records=_hourly('2026-10-02'), hourly_granularity='hourly'))
+        await asyncio.wait_for(entered.wait(), 3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    new = restart_runtime(hass, entry, old)
+    await new._stats_state.async_load()
+    assert new._stats_state.has_pending()
+    await new.async_record_statistics(daily, meter_id='m1')
+    assert not new._stats_state.has_pending()
+    assert len(await _rows(hass)) == len(await _rows(hass, COST_ID)) == 24
+
+
+async def test_cancelled_begin_past_drain_never_replays_before_durability(hass):
+    entry = entry_for(hass)
+    old = Coordinator(hass, _Client(), {}, config_entry=entry)
+    daily = _recs('2026-10-02', 1, 24)
+    await old.async_record_statistics(daily, meter_id='m1')
+    store = old._stats_state
+    real_save = store._store.async_save
+    entered, release, replayed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    completed_saves = []
+    async def held_physical_save(data):
+        entered.set()
+        await release.wait()
+        await real_save(data)
+        completed_saves.append(copy.deepcopy(data))
+    real_add = cm.async_add_external_statistics
+    def track_queue(h, metadata, stats):
+        replayed.set()
+        return real_add(h, metadata, stats)
+    old_task = new_task = None
+    violation = False
+    try:
+        with patch.object(store._store, 'async_save', held_physical_save):
+            old_task = asyncio.create_task(old.async_record_statistics(daily, meter_id='m1', hourly_records=_hourly('2026-10-02'), hourly_granularity='hourly'))
+            await asyncio.wait_for(entered.wait(), 3)
+            old_task.cancel()
+            # Do not shorten the production five-second drain: exercise its expiry.
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(old_task, 7)
+            assert not completed_saves
+            old.stop_keepalive()
+            new = Coordinator(hass, _Client(), {}, config_entry=entry)
+            with patch.object(cm, 'async_add_external_statistics', track_queue):
+                new_task = asyncio.create_task(new.async_record_statistics(daily, meter_id='m1'))
+                try:
+                    await asyncio.wait_for(replayed.wait(), 1)
+                    violation = not completed_saves
+                except TimeoutError:
+                    pass
+                finally:
+                    release.set()
+                    with pytest.raises(PsegStatisticsError, match='not durable'):
+                        await asyncio.wait_for(new_task, 4)
+    finally:
+        release.set()
+        for task in (old_task, new_task):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    assert not violation, 'RECORDER REPLAY OCCURRED BEFORE CANCELLED JOURNAL SAVE WAS DURABLE after actual 5s drain expiry'
+
+
+# v1.6.0 contract supersession (parent-approved; contract KB 5e0c2b1a, reviews
+# 0ce46ae2/8f4541f2): x is the NY wall-clock hour start, strict MM/DD/YYYY
+# date-only label pairs prove an hour, and a fall-back day stays daily
+# (dst_ambiguous) whatever its labels. The archived probe asserted the pre-1.6.0
+# rule "only aware labels promote" with x as true UTC; see PROVENANCE.md.
+# (complete, reason) declared per (day, labels):
+V160_EXPECTED = {
+    ('2026-03-08', 'date_only'): (True, None),
+    ('2026-10-02', 'date_only'): (True, None),
+    ('2026-11-01', 'date_only'): (False, 'dst_ambiguous'),
+    ('2026-03-08', 'bare_clock'): (False, 'label_mismatch'),
+    ('2026-10-02', 'bare_clock'): (False, 'label_mismatch'),
+    # Contradicting labels outrank dst_ambiguous: validate_hourly_day reports
+    # label_mismatch before any interval reason (unchanged since pre-1.6.0).
+    ('2026-11-01', 'bare_clock'): (False, 'label_mismatch'),
+    ('2026-03-08', 'end_stamped'): (False, 'label_mismatch'),
+    ('2026-10-02', 'end_stamped'): (False, 'label_mismatch'),
+    ('2026-11-01', 'end_stamped'): (False, 'label_mismatch'),
+    ('2026-03-08', 'aware_valid'): (True, None),
+    ('2026-10-02', 'aware_valid'): (True, None),
+    ('2026-11-01', 'aware_valid'): (False, 'dst_ambiguous'),
+}
+
+
+@pytest.mark.parametrize('labels', ['date_only', 'bare_clock', 'end_stamped', 'aware_valid'])
+@pytest.mark.parametrize('day_text', ['2026-03-08', '2026-10-02', '2026-11-01'])
+def test_interval_evidence_all_day_lengths(day_text, labels):
+    day = date.fromisoformat(day_text)
+    starts = expected_hour_starts(day)
+    points = []
+    for i, start in enumerate(starts):
+        if labels == 'date_only':
+            a = b = day.strftime('%m/%d/%Y')
+        elif labels == 'bare_clock':
+            a, b = start.strftime('%m/%d/%Y %H:%M'), (start + timedelta(hours=1)).strftime('%m/%d/%Y %H:%M')
+        elif labels == 'end_stamped':
+            a, b = (start - timedelta(hours=1)).isoformat(), start.isoformat()
+        else:
+            a, b = start.isoformat(), (start + timedelta(hours=1)).isoformat()
+        # Every label variant gets a contract-correct x (NY wall clock as UTC ms),
+        # so a rejection is caused by the labels, never by a shifted timestamp.
+        local = start.astimezone(ZoneInfo('America/New_York'))
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        x_val = int(wall_utc.timestamp() * 1000)
+        points.append({'x': x_val, 'y': float(i + 1), 'hs': {'start': a, 'end': b}})
+    parsed = PsegClient()._parse_hourly_chart({'Data': {'series': [{'name': 'Meter #123', 'data': points}]}})
+    result = validate_hourly_day(day, parsed['hourly_records'], sum(range(1, len(starts) + 1)), datetime(2026, 12, 1, tzinfo=UTC))
+    expected_complete, expected_reason = V160_EXPECTED[(day_text, labels)]
+    assert result.complete is expected_complete
+    assert result.reason == expected_reason
+
+
+@pytest.mark.parametrize('hourly_mode', [False, True])
+async def test_executor_save_drain_expiry_crash_loses_correction_journal(hass, tmp_path, hourly_mode):
+    entry = entry_for(hass)
+    old = Coordinator(hass, _Client(), {}, config_entry=entry)
+    daily = _daily_with(_recs('2026-10-01', 2), '2026-10-02', 24)
+    await old.async_record_statistics(daily, meter_id='m1')
+    store = old._stats_state
+    disk = Path(store._store.path)
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    corrected = _daily_with(daily, '2026-10-01', 20)
+
+    def physical_write(snapshot):
+        loop.call_soon_threadsafe(entered.set)
+        if not release.wait(15):
+            raise TimeoutError('bounded synthetic executor write')
+        disk.write_text(json.dumps({'version': store._store.version, 'minor_version': store._store.minor_version, 'key': store._store.key, 'data': snapshot}))
+
+    async def blocked_executor_save(snapshot):
+        await hass.async_add_executor_job(physical_write, copy.deepcopy(snapshot))
+
+    real_import = rs.import_statistics
+    def fail_cost(instance, metadata, stats, table):
+        if metadata['statistic_id'] == COST_ID:
+            raise SQLAlchemyError('independent real recorder cost failure')
+        return real_import(instance, metadata, stats, table)
+
+    try:
+        with patch.object(store._store, 'async_save', blocked_executor_save):
+            task = asyncio.create_task(old.async_record_statistics(corrected, meter_id='m1', hourly_records=_hourly('2026-10-02') if hourly_mode else [], hourly_granularity='hourly'))
+            await asyncio.wait_for(entered.wait(), 3)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 7)
+            old.stop_keepalive()
+            recovery = Coordinator(hass, _Client(), {}, config_entry=entry)
+            with patch.object(rs, 'import_statistics', fail_cost):
+                with pytest.raises(PsegStatisticsError, match='not durable'):
+                    await asyncio.wait_for(recovery.async_record_statistics(_recs('2026-10-02', 1, 24), meter_id='m1'), 1)
+            await async_wait_recording_done(hass)
+            # At this precise crash boundary physical I/O is STILL blocked, yet
+            # real recorder consumption has changed and cost failed independently.
+            assert _day_rows(await _rows(hass), '2026-10-01')[0][1] == 10
+            assert _day_rows(await _rows(hass, COST_ID), '2026-10-01')[0][1] == 2.5
+            crash_disk = json.loads(disk.read_text())['data']
+            assert not crash_disk['pending']
+    finally:
+        release.set()
+        async with asyncio.timeout(4):
+            async with store._io_lock:
+                pass
+
+    saved = json.loads(disk.read_text())['data']
+    assert saved['pending']
+    assert all(CONSUMPTION_ID in m['series'] and COST_ID in m['series'] for m in saved['pending'].values())
+    with patch.object(rs, 'import_statistics', fail_cost):
+        with pytest.raises(PsegStatisticsError, match='did not persist'):
+            await asyncio.wait_for(recovery.async_record_statistics(_recs('2026-10-02', 1, 24), meter_id='m1'), 4)
+    await async_wait_recording_done(hass)
+    assert _day_rows(await _rows(hass), '2026-10-01')[0][1] == 20
+    assert _day_rows(await _rows(hass, COST_ID), '2026-10-01')[0][1] == 2.5
+    crash_disk = json.loads(disk.read_text())['data']
+    assert crash_disk['pending']
+    # Fresh process from persisted bytes after real partial recorder failure.
+    cold = restart_runtime(hass, entry, recovery)
+    await cold._stats_state.async_load()
+    assert cold._stats_state._data == crash_disk
+    await cold.async_record_statistics(_recs('2026-10-02', 1, 24), meter_id='m1')
+    e, c = await _rows(hass), await _rows(hass, COST_ID)
+    assert not cold._stats_state.has_pending()
+    assert e[-1][2] == 44 and c[-1][2] == 11
+    assert _day_rows(c, '2026-10-01')[0][1] == 5, 'CRASH LOST JOURNAL: Oct 1 consumption=20 kWh but cost remains $2.50, expected $5.00 at $0.25'
+    assert len(_day_rows(e, '2026-10-02')) == len(_day_rows(c, '2026-10-02')) == (24 if hourly_mode else 1)
+
+
+@pytest.mark.parametrize('stage', ['final_read', 'recovery'])
+async def test_pause_after_await_prevents_recorder_mutation(hass, stage):
+    entry = entry_for(hass)
+    c = Coordinator(hass, _Client(), {}, config_entry=entry)
+    daily = _recs('2026-10-02', 1, 24)
+    if stage == 'recovery':
+        real_import = rs.import_statistics
+        def fail_cost(instance, metadata, stats, table):
+            if metadata['statistic_id'] == COST_ID:
+                raise SQLAlchemyError('synthetic cost failure for pause recovery')
+            return real_import(instance, metadata, stats, table)
+        with patch.object(rs, 'import_statistics', fail_cost):
+            with pytest.raises(PsegStatisticsError):
+                await c.async_record_statistics(daily, meter_id='m1', hourly_records=_hourly('2026-10-02'), hourly_granularity='hourly')
+    before = (await _rows(hass), await _rows(hass, COST_ID))
+    pending = copy.deepcopy(c._stats_state.pending_mutations())
+    entered, release = asyncio.Event(), asyncio.Event()
+    method = '_async_get_stats_from' if stage == 'final_read' else '_async_get_series_with_sums'
+    real_read = getattr(cm, method)
+    async def hold(h, sid, start):
+        result = await real_read(h, sid, start)
+        if sid == COST_ID:
+            entered.set()
+            await release.wait()
+        return result
+    with patch.object(cm, method, hold), patch.object(cm, 'async_add_external_statistics') as write:
+        task = asyncio.create_task(c.async_record_statistics(daily, meter_id='m1'))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            hass.config_entries.async_update_entry(entry, options={CONF_STATISTICS_IMPORT_ENABLED: False})
+        finally:
+            release.set()
+            await asyncio.wait_for(task, 3)
+        write.assert_not_called()
+    assert before == (await _rows(hass), await _rows(hass, COST_ID))
+    assert pending == c._stats_state.pending_mutations()
+
+
+@pytest.mark.parametrize('mode', ['portal', 'okta'])
+@pytest.mark.parametrize('leg', ['setup', 'data'])
+@pytest.mark.parametrize('status', [401, 403, 503])
+def test_hourly_auth_vs_transient_and_daily_authority(mode, leg, status):
+    client = PsegClient(okta_cookies='idx=synthetic' if mode == 'okta' else '')
+    start = date(2026, 10, 2)
+    from test_pseg_client import _daily_chart
+    daily = _daily_chart(start, 24.04)
+    good = MagicMock(status_code=200)
+    good.json.return_value = daily
+    bad = MagicMock(status_code=status)
+    client.session.post = MagicMock(side_effect=[good, bad] if leg == 'setup' else [good, good])
+    client.session.get = MagicMock(side_effect=[good] if leg == 'setup' else [good, bad])
+    with patch.object(client, '_get_verification_token', return_value='synthetic'):
+        if status in (401, 403):
+            with pytest.raises(PsegOktaSessionExpired):
+                client.fetch_energy_data()
+            assert client.auth_reason == ('okta_session_expired' if mode == 'okta' else 'portal_session_expired')
+        else:
+            result = client.fetch_energy_data()
+            assert result['latest_kwh'] == 24.04
+            assert result['hourly_records'] == []
+            assert not client.auth_reason
+
+
+def test_valid_hourly_does_not_replace_authoritative_daily_sensor():
+    client = PsegClient(price_per_kwh=.25)
+    from test_pseg_client import _daily_chart, _hourly_chart
+    day = date(2026, 10, 2)
+    daily = _daily_chart(day, 24.04)
+    hourly = _hourly_chart(day, 1)
+    setup = MagicMock(status_code=200)
+    dr, hr = MagicMock(status_code=200), MagicMock(status_code=200)
+    dr.json.return_value, hr.json.return_value = daily, hourly
+    client.session.post = MagicMock(return_value=setup)
+    client.session.get = MagicMock(side_effect=[dr, hr])
+    with patch.object(client, '_get_verification_token', return_value='synthetic'):
+        result = client.fetch_energy_data()
+    assert result['hourly_complete_days'] == 1
+    assert result['latest_kwh'] == 24.04 and result['latest_cost'] == 6.01
+    assert result['history_14d'] == result['daily_records']
+
+
+@pytest.mark.parametrize('mode', ['portal', 'okta'])
+@pytest.mark.parametrize('leg', ['setup', 'data'])
+def test_hourly_login_redirect_is_typed_auth_loss(mode, leg):
+    import requests_mock
+    from test_pseg_client import _daily_chart
+
+    from custom_components.pseg.const import PORTAL_BASE_URL
+    client = PsegClient(okta_cookies='idx=synthetic' if mode == 'okta' else '')
+    daily = _daily_chart(date(2026, 10, 2), 24)
+    login = PORTAL_BASE_URL + '/'
+    with requests_mock.Mocker(session=client.session) as mock, patch.object(client, '_get_verification_token', return_value='synthetic'):
+        mock.post(PORTAL_BASE_URL + '/Dashboard/Chart', [{'text': 'ok'}, {'status_code': 302, 'headers': {'Location': login}}] if leg == 'setup' else [{'text': 'ok'}])
+        mock.get(PORTAL_BASE_URL + '/Dashboard/ChartData', [{'json': daily}, {'status_code': 302, 'headers': {'Location': login}}])
+        mock.get(login, text='<html>anonymous portal page</html>')
+        with pytest.raises(PsegOktaSessionExpired):
+            result = client.fetch_energy_data()
+            assert result['statistics_granularity'] == 'daily'
+            assert client.auth_reason is None
+
