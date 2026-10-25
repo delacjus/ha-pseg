@@ -1,0 +1,35 @@
+{
+  "group": "auth_r5",
+  "status": "active",
+  "reviewer_kb": "0ce46ae2-76f1-4f59-8b73-e744c48e3f62",
+  "expected_collection": 58,
+  "sources": [
+    {
+      "original_path": "/tmp/pseg-auth-review-r5-20261023/test_r5_boundaries.py",
+      "original_sha256": "c3de33d7f7c9026051ba5a6de64f294201c8e9c56d99673d6ad7e943b30a9c8c",
+      "archived_path": "auth_r5/test_r5_boundaries.py.txt",
+      "archived_sha256": "c3de33d7f7c9026051ba5a6de64f294201c8e9c56d99673d6ad7e943b30a9c8c",
+      "role": "probe",
+      "collect": false
+    }
+  ],
+  "transformation_rationale": [
+    "Preserve assertion and parameter ASTs verbatim",
+    "Normalize import of test_auth_review_r3_regressions helpers to tests.test_auth_review_r3_regressions",
+    "Apply independent pytest marker via conftest.py"
+  ],
+  "promoted_files": [
+    {
+      "relative_path": "__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": "conftest.py",
+      "sha256": "2c96ef9d59a0699e41f0c2da7dfc3bac5e20864376f204fe605b45a4d8917892"
+    },
+    {
+      "relative_path": "test_independent_auth_r5.py",
+      "sha256": "c22de62a735c4fd824ab9541611d1981dfc3689babb9959a1ab4b632459a2825"
+    }
+  ]
+}

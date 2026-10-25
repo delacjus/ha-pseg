@@ -1,0 +1,229 @@
+"""R9 independent scratch probes (own R6 BaseAdapter portal, no requests_mock, network blocked).
+
+Q1  renewal identity proof whose DAILY ChartData has a valid KNOWN meter point plus an
+    unrelated non-meter series with non-list data (the R8-N2 "shape anomaly") and a
+    Set-Cookie: does the anomalous response's cookie get adopted / persisted through
+    keepalive + 2 polls + cold?  Controls: same anomaly on the poll DAILY leg (must
+    not persist, builder claim) and a clean valid renewal (must persist, R7B control).
+Q2  attached poll: DAILY rejected (known label, no points) + HOURLY valid KNOWN point
+    with Set-Cookie: informational, records whether the hourly cookie is persisted.
+Q3  unattached human config flow in label-identity mode: DAILY label-only, HOURLY
+    valid/anomalous/unavailable with Set-Cookie on the daily or hourly response.
+"""
+from __future__ import annotations
+
+import copy
+
+from homeassistant.config_entries import SOURCE_USER
+from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.helpers.update_coordinator import UpdateFailed
+from homeassistant.util import dt as dt_util
+import pytest
+
+import custom_components.pseg as pkg
+import custom_components.pseg.config_flow as flow_mod
+from custom_components.pseg.const import (
+    CONF_KNOWN_METER_IDS,
+    CONF_OKTA_COOKIES,
+    CONF_PORTAL_COOKIES,
+    CONF_RENEWAL_ADMISSION,
+    DOMAIN,
+)
+from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
+from custom_components.pseg.pseg_client import PsegClient
+from tests.independent.auth_r6.test_independent_auth_r6 import (
+    METER,
+    POISON,
+    SEED,
+    R6Portal,
+    build,
+    daily_payload,
+    hourly_payload,
+    poisoned,
+)
+
+pytestmark = pytest.mark.independent
+
+REAL_CLIENT = PsegClient
+BAD_TEMP = {"name": "Temperature", "data": {"unexpected": "shape"}}
+LABEL_ONLY = {"Data": {"series": [{"name": f"Meter #{METER}", "data": []}]}}
+MARK = [f"MM_RememberMe={POISON}; Path=/"]
+
+
+@pytest.fixture(autouse=True)
+def _enabled(enable_custom_integrations):
+    yield
+
+
+def with_anomaly(payload: dict) -> dict:
+    payload = copy.deepcopy(payload)
+    payload["Data"]["series"].append(copy.deepcopy(BAD_TEMP))
+    return payload
+
+
+async def follow_through(hass, entry, coord, portal) -> list:
+    """keepalive, two healthy polls, then a cold client + poll on the persisted jar."""
+    trail = []
+    await coord._async_keepalive(dt_util.utcnow())
+    trail.append(("keepalive", poisoned(entry.data.get("cookies"), "MM_RememberMe")))
+    for i in range(2):
+        try:
+            await coord._async_update_data()
+        except UpdateFailed as err:
+            trail.append((f"poll{i}", type(err).__name__))
+        trail.append((f"poll{i}", poisoned(entry.data.get("cookies"), "MM_RememberMe")))
+    coord.stop_keepalive()
+    hass.data.pop(f"{DOMAIN}_renewal_runtimes", None)
+    cold = PsegClient(cookie_list=copy.deepcopy(entry.data.get("cookies")))
+    cold.session.mount("https://", portal)
+    cold_coord = PsegDataUpdateCoordinator(hass, cold, dict(entry.data), config_entry=entry)
+    try:
+        await cold_coord._async_update_data()
+        trail.append(("cold", poisoned(entry.data.get("cookies"), "MM_RememberMe")))
+        trail.append(("cold_dispatch", POISON in " ".join(
+            c.value for c in cold.session.cookies if c.value)))
+    finally:
+        cold_coord.stop_keepalive()
+    return trail
+
+
+class CookieSpy(R6Portal):
+    """Records every request that carried the poisoned cookie value."""
+
+    def __init__(self):
+        super().__init__()
+        self.poison_dispatches = []
+
+    def send(self, request, **kwargs):
+        if POISON in request.headers.get("Cookie", ""):
+            self.poison_dispatches.append(request.url.split("?")[0].rsplit("/", 1)[-1])
+        return super().send(request, **kwargs)
+
+
+RENEWAL_CASES = {
+    "renewal_proof_anomaly": True,
+    "renewal_proof_clean_control": False,
+}
+
+
+@pytest.mark.parametrize("case", sorted(RENEWAL_CASES))
+async def test_q1_renewal_proof_shape_anomaly_cookie(hass, case):
+    anomaly = RENEWAL_CASES[case]
+    portal = CookieSpy()
+    payload = with_anomaly(daily_payload()) if anomaly else daily_payload()
+    portal.dash.extend([{"kind": "login"}, {"kind": "dash"}])
+    portal.daily.append((payload, MARK))
+    client, entry, coord = build(hass, portal)
+    admission_before = copy.deepcopy(entry.data.get(CONF_RENEWAL_ADMISSION))
+    try:
+        await coord._async_keepalive(dt_util.utcnow())
+        after_renewal = poisoned(entry.data.get("cookies"), "MM_RememberMe")
+        admission_after = copy.deepcopy(entry.data.get(CONF_RENEWAL_ADMISSION))
+        renewals = client.sso_renewals
+        trail = await follow_through(hass, entry, coord, portal)
+        print("Q1", case, "renewals=", renewals, "persisted_after_renewal=", after_renewal,
+              "trail=", trail, "poison_dispatches=", portal.poison_dispatches[:6],
+              "admission_changed=", admission_before != admission_after,
+              "admission_after=", admission_after)
+        if anomaly:
+            assert not after_renewal and not any(v is True for _, v in trail), (
+                "shape-anomalous renewal proof response cookie adopted", trail)
+        else:
+            assert after_renewal, "clean valid renewal proof cookie must be adopted (control)"
+    finally:
+        coord.stop_keepalive()
+
+
+async def test_q1_poll_daily_shape_anomaly_control(hass):
+    portal = CookieSpy()
+    portal.daily.append((with_anomaly(daily_payload()), MARK))
+    portal.hourly.append(({"Data": None}, ()))
+    client, entry, coord = build(hass, portal)
+    try:
+        data = await coord._async_update_data()
+        trail = await follow_through(hass, entry, coord, portal)
+        print("Q1c poll_daily_anomaly latest_kwh=", data.get("latest_kwh"), "trail=", trail,
+              "poison_dispatches=", portal.poison_dispatches[:6])
+        assert data.get("latest_kwh") == 3.0
+        assert not any(v is True for _, v in trail), trail
+    finally:
+        coord.stop_keepalive()
+
+
+async def test_q2_rejected_daily_with_valid_known_hourly_cookie_informational(hass):
+    portal = CookieSpy()
+    portal.daily.append((LABEL_ONLY, ()))
+    portal.hourly.append((hourly_payload(METER), MARK))
+    client, entry, coord = build(hass, portal)
+    try:
+        with pytest.raises(UpdateFailed):
+            await coord._async_update_data()
+        persisted = poisoned(entry.data.get("cookies"), "MM_RememberMe")
+        print("Q2 rejected_daily+valid_known_hourly persisted_hourly_cookie=", persisted,
+              "last_valid=", coord._last_valid_data is not None, "status=", coord.status,
+              "known=", entry.data.get(CONF_KNOWN_METER_IDS))
+        assert coord._last_valid_data is None
+        assert coord.status == "error"
+    finally:
+        coord.stop_keepalive()
+
+
+def _factory(portal):
+    def make(**kwargs):
+        client = REAL_CLIENT(**kwargs)
+        client.session.mount("https://", portal)
+        return client
+    return make
+
+
+async def _true(*_a, **_k):
+    return True
+
+
+FLOW_CASES = {
+    # (daily response, hourly response)
+    "label_daily_cookie_hourly_unavailable": ((LABEL_ONLY, MARK), ({"Data": None}, ())),
+    "label_daily_hourly_anomalous_valid_cookie": ((LABEL_ONLY, ()), (with_anomaly(hourly_payload()), MARK)),
+    "label_daily_hourly_valid_cookie_informational": ((LABEL_ONLY, ()), (hourly_payload(), MARK)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(FLOW_CASES))
+async def test_q3_label_identity_flow_cookie_acceptance(hass, monkeypatch, case):
+    portal = CookieSpy()
+    d, h = FLOW_CASES[case]
+    portal.daily.append(d)
+    portal.hourly.append(h)
+    monkeypatch.setattr(flow_mod, "PsegClient", _factory(portal))
+    monkeypatch.setattr(pkg, "async_setup_entry", _true)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER},
+        data={CONF_OKTA_COOKIES: "", CONF_PORTAL_COOKIES: SEED},
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY, result.get("errors")
+    entry = result["result"]
+    saved = poisoned(entry.data.get("cookies"), "MM_RememberMe")
+    print("Q3", case, "unique_id=", entry.unique_id, "known=", entry.data.get(CONF_KNOWN_METER_IDS),
+          "saved_marked_cookie=", saved)
+    if case != "label_daily_hourly_valid_cookie_informational":
+        assert not saved, case
+
+
+async def test_q5_backfill_chunk_shape_anomaly_cookie(hass):
+    portal = CookieSpy()
+    portal.daily.append((with_anomaly(daily_payload("10/05/2026")), MARK))
+    client, entry, coord = build(hass, portal)
+
+    async def no_stats(records, **kwargs):
+        return None
+
+    coord.async_record_statistics = no_stats
+    try:
+        await coord.async_backfill_history("2026-10-01", "2026-10-20")
+        after = poisoned(entry.data.get("cookies"), "MM_RememberMe")
+        trail = await follow_through(hass, entry, coord, portal)
+        print("Q5 backfill_chunk_anomaly persisted=", after, "trail=", trail,
+              "poison_dispatches=", portal.poison_dispatches[:6])
+        assert not after and not any(v is True for _, v in trail), trail
+    finally:
+        coord.stop_keepalive()

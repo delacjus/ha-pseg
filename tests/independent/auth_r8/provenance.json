@@ -1,0 +1,34 @@
+{
+  "group": "auth_r8",
+  "status": "active",
+  "reviewer_kb": "0ce46ae2-76f1-4f59-8b73-e744c48e3f62",
+  "expected_collection": 22,
+  "sources": [
+    {
+      "original_path": "/tmp/pseg-auth-review-r8-20261024/test_r8_probes.py",
+      "original_sha256": "4f7a4ee6b63d4fe7882e4f2948433828f15c6b148711136216a9c76ca9298fd7",
+      "archived_path": "auth_r8/test_r8_probes.py.txt",
+      "archived_sha256": "4f7a4ee6b63d4fe7882e4f2948433828f15c6b148711136216a9c76ca9298fd7",
+      "role": "probe",
+      "collect": false
+    }
+  ],
+  "transformation_rationale": [
+    "Preserve assertion and parameter ASTs verbatim",
+    "Apply independent pytest marker via conftest.py"
+  ],
+  "promoted_files": [
+    {
+      "relative_path": "__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": "conftest.py",
+      "sha256": "c0e15dcb839aee307da68db86fd1d769fa7f987113e9c5009a2a16b96638ae53"
+    },
+    {
+      "relative_path": "test_independent_auth_r8.py",
+      "sha256": "e9fca65299a786b7d3f21d112bf3a22b913588878c534a251500850653f6ff66"
+    }
+  ]
+}

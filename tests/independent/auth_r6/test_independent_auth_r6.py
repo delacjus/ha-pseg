@@ -1,0 +1,385 @@
+"""R6 independent scratch probes (synthetic, in-process; no vendor/live HA).
+
+Families:
+* epsilon - a read's payload must validate before its response cookies are confirmed
+  (authoritative DAILY leg of an ordinary poll; history/backfill chunks);
+* beta - cookies from a failed/aborted read must never be promoted later by an
+  ordinary healthy keepalive/poll (fault -> keepalive -> 2 polls -> cold restart);
+* alpha/gamma controls - no new hop after real unload; latest validated daily
+  rotation survives cancellation.
+
+Independent adapter (BaseAdapter, no requests_mock); real PsegClient, real
+PsegDataUpdateCoordinator with a MockConfigEntry, real entry setup/unload where used.
+No cookie value other than the synthetic "r6-*" strings is ever produced.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime
+from http.client import HTTPMessage
+import json
+import threading
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
+
+from homeassistant.util import dt as dt_util
+import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+import requests
+from requests.adapters import BaseAdapter
+
+import custom_components.pseg as pkg
+from custom_components.pseg.const import (
+    CONF_PORTAL_COOKIES,
+    DOMAIN,
+    PORTAL_BASE_URL,
+    PORTAL_HOST,
+    USAGE_INTERVAL_HOURLY,
+)
+from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
+from custom_components.pseg.pseg_client import PsegClient
+
+pytestmark = pytest.mark.independent
+
+METER = "13579"
+SEED = "MM_SID=r6-live-sid; MM_RememberMe=r6-gen-a; r6_aux=r6-aux-a"
+POISON = "r6-poison"
+TOKEN_PAGE = b'<html><input name="__RequestVerificationToken" value="r6-af"/>Dashboard</html>'
+LOGIN_FORM = (
+    b'<html><form action="/Home/Login"><input name="LoginEmail"/><input id="LoginPassword"/>'
+    b'<input name="__RequestVerificationToken" value="r6-form"/></form></html>'
+)
+
+
+@pytest.fixture(autouse=True)
+def _enabled(enable_custom_integrations):
+    yield
+
+
+def daily_payload(day: str = "10/21/2026", meter: str = METER) -> dict:
+    return {"Data": {"series": [{"name": f"Meter #{meter}", "data": [
+        {"x": 1792540800000, "y": 3.0, "hs": {"start": day}}]}]}}
+
+
+def hourly_payload(meter: str = METER) -> dict:
+    return {"Data": {"series": [{"name": f"Meter #{meter}", "data": [{
+        "x": 1792540800000, "y": 1.0,
+        "hs": {"start": "2026-10-21T00:00:00+00:00", "end": "2026-10-21T01:00:00+00:00"},
+    }]}]}}
+
+
+DAILY_BAD = {
+    # Same three 200-JSON shapes R5-C used for the optional hourly leg.
+    "no_matching_meter": {"Data": {"series": [{"name": "Temperature", "data": [
+        {"y": 51.0, "hs": {"start": "10/21/2026"}}]}]}},
+    "empty_meter": {"Data": {"series": [{"name": f"Meter #{METER}", "data": []}]}},
+    "invalid_points": {"Data": {"series": [{"name": f"Meter #{METER}", "data": [
+        {"x": None, "y": "bad", "hs": {"start": "not-a-date"}}]}]}},
+}
+
+
+class R6Portal(BaseAdapter):
+    """Scripted MyMeter portal: dashboard queue + per-interval ChartData queues."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dash: list[dict] = []
+        self.daily: list[tuple] = []
+        self.hourly: list[tuple] = []
+        self.events: list[tuple[str, str]] = []
+        self.mode = "daily"
+        self.start = "10/21/2026"
+        self.gate_path: str | None = None
+        self.gate_mode: str | None = None
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def send(self, request, **kwargs):
+        u = urlparse(request.url)
+        self.events.append((request.method, u.path))
+        if u.hostname != PORTAL_HOST:
+            raise AssertionError("non-portal host contacted")
+        r = requests.Response()
+        r.status_code = 200
+        r.url = request.url
+        r.request = request
+        r._content = b"ok"
+        r._content_consumed = True
+        msg = HTTPMessage()
+        r.raw = SimpleNamespace(_original_response=SimpleNamespace(msg=msg))
+
+        def add(cookies):
+            for header in cookies or ():
+                msg.add_header("Set-Cookie", header)
+
+        if request.method == "GET" and u.path in ("/Dashboard", "/Dashboard/Next"):
+            spec = self.dash.pop(0) if self.dash else {"kind": "dash"}
+            add(spec.get("set_cookie"))
+            if spec.get("gate") and self.gate_path == u.path:
+                self.entered.set()
+                assert self.release.wait(5), "scratch gate timed out"
+            kind = spec["kind"]
+            if kind == "dash":
+                r._content = TOKEN_PAGE
+            elif kind == "redirect":
+                r.status_code = 302
+                r.headers["Location"] = "/Dashboard/Next"
+            elif kind == "login":
+                r.url = PORTAL_BASE_URL + "/"
+                r._content = LOGIN_FORM
+            else:
+                raise AssertionError("bad dashboard spec")
+        elif request.method == "GET" and u.path == "/":
+            r._content = LOGIN_FORM
+        elif request.method == "POST" and u.path == "/Dashboard/Chart":
+            body = request.body.decode() if isinstance(request.body, bytes) else (request.body or "")
+            form = parse_qs(body)
+            self.mode = "hourly" if form.get("UsageInterval") == [USAGE_INTERVAL_HOURLY] else "daily"
+            start = (form.get("Start") or ["2026-10-21"])[0]
+            try:
+                self.start = datetime.strptime(start, "%Y-%m-%d").strftime("%m/%d/%Y")
+            except ValueError:
+                self.start = "10/21/2026"
+        elif request.method == "GET" and u.path == "/Dashboard/ChartData":
+            if self.gate_path == u.path and self.gate_mode == self.mode:
+                self.entered.set()
+                assert self.release.wait(5), "scratch gate timed out"
+            queue = self.hourly if self.mode == "hourly" else self.daily
+            if queue:
+                payload, cookies = queue.pop(0)
+            else:
+                payload = hourly_payload() if self.mode == "hourly" else daily_payload(self.start)
+                cookies = ()
+            add(cookies)
+            if isinstance(payload, dict) and "__status__" in payload:
+                r.status_code = payload["__status__"]
+                r._content = b"<html>server error</html>"
+            elif payload == "__default__":
+                r._content = json.dumps(daily_payload(self.start)).encode()
+            else:
+                r._content = json.dumps(payload).encode()
+        elif request.method == "POST" and u.path == "/Home/Login":
+            r._content = json.dumps({"AjaxResults": [], "Data": {}}).encode()
+        else:
+            raise AssertionError(f"unexpected route {request.method} {u.path}")
+        return r
+
+    def close(self):
+        pass
+
+    def count(self, method: str, path: str) -> int:
+        return sum(1 for e in self.events if e == (method, path))
+
+
+def poisoned(cookies, name: str) -> bool:
+    return any(c.get("name") == name and c.get("value") == POISON for c in (cookies or []))
+
+
+def build(hass, portal: R6Portal):
+    client = PsegClient(portal_cookies=SEED)
+    client.session.mount("https://", portal)
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    return client, entry, coord
+
+
+async def follow_on(hass, client, entry, coord, name: str) -> list[str]:
+    """Mandatory follow-on: keepalive, two healthy polls, then cold restart."""
+    trail = []
+    await coord._async_keepalive(dt_util.utcnow())
+    trail.append(f"after keepalive persisted={poisoned(entry.data.get('cookies'), name)}")
+    for i in range(2):
+        try:
+            await coord._async_update_data()
+        except Exception as err:  # noqa: BLE001 - record only the class
+            trail.append(f"poll{i} {type(err).__name__}")
+        trail.append(f"after poll{i} persisted={poisoned(entry.data.get('cookies'), name)}")
+    cold = PsegClient(cookie_list=entry.data.get("cookies"))
+    trail.append(f"cold jar poisoned={poisoned(cold.export_cookies(), name)}")
+    return trail
+
+
+# ---------------------------------------------------------------- epsilon: DAILY leg
+
+
+@pytest.mark.parametrize("payload", sorted(DAILY_BAD))
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe", "r6_aux"])
+async def test_daily_leg_must_validate_before_confirming_cookie(hass, payload, cookie):
+    portal = R6Portal()
+    portal.daily.append((DAILY_BAD[payload], [f"{cookie}={POISON}; Path=/"]))
+    client, entry, coord = build(hass, portal)
+    try:
+        outcome = "ok"
+        try:
+            await coord._async_update_data()
+        except Exception as err:  # noqa: BLE001
+            outcome = type(err).__name__
+        fault_persisted = poisoned(entry.data.get("cookies"), cookie)
+        snap = client.pending_confirmed_snapshot()
+        fault_snapshot = poisoned(snap["cookies"], cookie) if snap else False
+        fault_live = poisoned(client.export_cookies(), cookie)
+        trail = await follow_on(hass, client, entry, coord, cookie)
+        final = poisoned(entry.data.get("cookies"), cookie)
+        assert not (fault_persisted or fault_snapshot or final), (
+            f"daily 200 without target data confirmed its {cookie} cookie: poll={outcome} "
+            f"persisted={fault_persisted} snapshot={fault_snapshot} live={fault_live} {trail}"
+        )
+    finally:
+        coord.stop_keepalive()
+
+
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe", "r6_aux"])
+async def test_control_daily_healthy_rotation_persists(hass, cookie):
+    portal = R6Portal()
+    portal.daily.append(("__default__", [f"{cookie}={POISON}; Path=/"]))
+    client, entry, coord = build(hass, portal)
+    try:
+        await coord._async_update_data()
+        assert poisoned(entry.data.get("cookies"), cookie), "control: a validated daily rotation must persist"
+    finally:
+        coord.stop_keepalive()
+
+
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe", "r6_aux"])
+async def test_control_daily_empty_series_rolls_back(hass, cookie):
+    portal = R6Portal()
+    portal.daily.append(({"Data": {"series": []}}, [f"{cookie}={POISON}; Path=/"]))
+    client, entry, coord = build(hass, portal)
+    try:
+        with pytest.raises(Exception):
+            await coord._async_update_data()
+        trail = await follow_on(hass, client, entry, coord, cookie)
+        assert not poisoned(entry.data.get("cookies"), cookie), trail
+    finally:
+        coord.stop_keepalive()
+
+
+# ------------------------------------------------- epsilon/beta: history chunks
+
+GOOD = ("__default__", ())
+CHUNK_VARIANTS = {
+    # 4 chunks for 2026-01-01..2026-10-20 at 90 days; fault chunk position + payload.
+    "abort_null_data": [GOOD, ({"Data": None}, "P"), GOOD, GOOD],
+    "abort_unrelated_series": [GOOD, (DAILY_BAD["no_matching_meter"], "P"), GOOD, GOOD],
+    "abort_empty_meter": [GOOD, (DAILY_BAD["empty_meter"], "P"), GOOD, GOOD],
+    "edge_null_data": [({"Data": None}, "P"), GOOD, GOOD, GOOD],
+    "edge_empty_object": [({}, "P"), GOOD, GOOD, GOOD],
+}
+
+
+@pytest.mark.parametrize("variant", sorted(CHUNK_VARIANTS))
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe", "r6_aux"])
+async def test_backfill_chunk_cookie_never_promoted(hass, variant, cookie):
+    portal = R6Portal()
+    for payload, mark in CHUNK_VARIANTS[variant]:
+        portal.daily.append((payload, [f"{cookie}={POISON}; Path=/"] if mark == "P" else ()))
+    client, entry, coord = build(hass, portal)
+    recorded = []
+
+    async def no_stats(records, meter_id=None, **_kw):  # statistics are not the subject
+        recorded.append(len(records))
+
+    coord.async_record_statistics = no_stats
+    try:
+        outcome = "ok"
+        try:
+            await coord.async_backfill_history("2026-01-01", "2026-10-20")
+        except Exception as err:  # noqa: BLE001
+            outcome = type(err).__name__
+        assert portal.count("GET", "/Dashboard/ChartData") >= 2
+        after_backfill_persisted = poisoned(entry.data.get("cookies"), cookie)
+        live = poisoned(client.export_cookies(), cookie)
+        trail = await follow_on(hass, client, entry, coord, cookie)
+        final = poisoned(entry.data.get("cookies"), cookie)
+        assert not (after_backfill_persisted or final), (
+            f"{variant}: backfill={outcome} live_after_backfill={live} {trail}"
+        )
+    finally:
+        coord.stop_keepalive()
+
+
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe", "r6_aux"])
+async def test_control_backfill_chunk_500_quarantined(hass, cookie):
+    portal = R6Portal()
+    portal.daily.extend([GOOD, ({"__status__": 500}, [f"{cookie}={POISON}; Path=/"])])
+    client, entry, coord = build(hass, portal)
+    try:
+        with pytest.raises(Exception):
+            await coord.async_backfill_history("2026-01-01", "2026-10-20")
+        assert not poisoned(client.export_cookies(), cookie)
+        trail = await follow_on(hass, client, entry, coord, cookie)
+        assert not poisoned(entry.data.get("cookies"), cookie), trail
+    finally:
+        coord.stop_keepalive()
+
+
+# ------------------------------------------------------------ alpha controls
+
+
+async def _setup_entry(hass, monkeypatch, portal):
+    client = PsegClient(portal_cookies=SEED)
+    client.session.mount("https://", portal)
+    monkeypatch.setattr(pkg, "PsegClient", lambda **kwargs: client)
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER, data={CONF_PORTAL_COOKIES: SEED})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    return client, entry, hass.data[DOMAIN][entry.entry_id]
+
+
+async def test_alpha_keepalive_redirect_hop_not_dispatched_after_unload(hass, monkeypatch):
+    portal = R6Portal()
+    client, entry, coord = await _setup_entry(hass, monkeypatch, portal)
+    portal.dash.append({"kind": "redirect", "gate": True})
+    portal.gate_path = "/Dashboard"
+    task = asyncio.create_task(coord._async_keepalive(dt_util.utcnow()))
+    try:
+        assert await asyncio.to_thread(portal.entered.wait, 3)
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        portal.release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        assert portal.count("GET", "/Dashboard/Next") == 0, "redirect hop dispatched after real unload"
+    finally:
+        portal.release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+
+
+async def test_alpha_backfill_next_chunk_not_dispatched_after_unload(hass, monkeypatch):
+    portal = R6Portal()
+    client, entry, coord = await _setup_entry(hass, monkeypatch, portal)
+    portal.gate_path = "/Dashboard/ChartData"
+    portal.gate_mode = "daily"
+    base_posts = portal.count("POST", "/Dashboard/Chart")
+    task = asyncio.create_task(coord.async_backfill_history("2026-01-01", "2026-10-20"))
+    try:
+        assert await asyncio.to_thread(portal.entered.wait, 3)
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        portal.release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        assert portal.count("POST", "/Dashboard/Chart") - base_posts == 1, "next chunk dispatched after unload"
+    finally:
+        portal.release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+
+
+# --------------------------------------------------------------- gamma control
+
+
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe", "r6_aux"])
+async def test_gamma_daily_rotation_survives_cancel_during_hourly(hass, cookie):
+    portal = R6Portal()
+    portal.daily.append(("__default__", [f"{cookie}={POISON}; Path=/"]))
+    portal.gate_path = "/Dashboard/ChartData"
+    portal.gate_mode = "hourly"
+    client, entry, coord = build(hass, portal)
+    task = asyncio.create_task(coord._async_update_data())
+    try:
+        assert await asyncio.to_thread(portal.entered.wait, 3)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        assert poisoned(entry.data.get("cookies"), cookie), "latest validated daily rotation lost on cancel"
+    finally:
+        portal.release.set()
+        await asyncio.sleep(0.2)
+        coord.stop_keepalive()

@@ -1,0 +1,71 @@
+{
+  "group": "auth_r6",
+  "status": "active",
+  "reviewer_kb": "0ce46ae2-76f1-4f59-8b73-e744c48e3f62",
+  "expected_collection": 48,
+  "sources": [
+    {
+      "original_path": "/tmp/pseg-auth-review-r6-20261023/test_r6_extra.py",
+      "original_sha256": "100448dfe65e23dc3aba1c0831ba1b85f830e9483a7d4fd73955e4fdc6daa349",
+      "archived_path": "auth_r6/test_r6_extra.py.txt",
+      "archived_sha256": "100448dfe65e23dc3aba1c0831ba1b85f830e9483a7d4fd73955e4fdc6daa349",
+      "role": "probe",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-auth-review-r6-20261023/test_r6_flows.py",
+      "original_sha256": "bb4ee828b67db466753bc924ffa0e52c4db59fb880c463f856c8f187ff03c523",
+      "archived_path": "auth_r6/test_r6_flows.py.txt",
+      "archived_sha256": "bb4ee828b67db466753bc924ffa0e52c4db59fb880c463f856c8f187ff03c523",
+      "role": "probe",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-auth-review-r6-20261023/test_r6_probes.py",
+      "original_sha256": "7e28cd4713d218e93414e5e3c23dd516d11fff48f252b8c955a8da620abab630",
+      "archived_path": "auth_r6/test_r6_probes.py.txt",
+      "archived_sha256": "7e28cd4713d218e93414e5e3c23dd516d11fff48f252b8c955a8da620abab630",
+      "role": "probe",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-auth-review-r6-20261023/test_r6_race.py",
+      "original_sha256": "fb2ec3e154087f43908447d1586f8f0f5f8f70ebd437819744c85e5b8ab19851",
+      "archived_path": "auth_r6/test_r6_race.py.txt",
+      "archived_sha256": "fb2ec3e154087f43908447d1586f8f0f5f8f70ebd437819744c85e5b8ab19851",
+      "role": "probe",
+      "collect": false
+    }
+  ],
+  "transformation_rationale": [
+    "Preserve assertion and parameter ASTs verbatim",
+    "Normalize imports from test_r6_probes to tests.independent.auth_r6.test_independent_auth_r6",
+    "Apply independent pytest marker via conftest.py"
+  ],
+  "promoted_files": [
+    {
+      "relative_path": "__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": "conftest.py",
+      "sha256": "39150a6f5dacd69b5214747cfec5096958675214493918d2a0dbe3991df500b3"
+    },
+    {
+      "relative_path": "test_independent_auth_r6.py",
+      "sha256": "107ad5baae59a7bb22b29938e5b6aabebb1bac054d1a749df517719077f816b5"
+    },
+    {
+      "relative_path": "test_independent_auth_r6_extra.py",
+      "sha256": "f7c2ae00fa51afbd7b86eb7b35ac809e733b5ce0f1484ee5c753f8c6ebac7d33"
+    },
+    {
+      "relative_path": "test_independent_auth_r6_flows.py",
+      "sha256": "305d2228fa5254fd1c12a4fdd3c6f39f0d969217a846fd5d770ab175d275ce8e"
+    },
+    {
+      "relative_path": "test_independent_auth_r6_race.py",
+      "sha256": "e900539e178ff240115a81caf17094f2197a50ff953a3d583bbf5a75932a664e"
+    }
+  ]
+}

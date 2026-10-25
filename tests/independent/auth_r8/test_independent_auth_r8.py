@@ -1,0 +1,332 @@
+"""R8 independent scratch probes (no requests_mock; own BaseAdapter; network blocked).
+
+P1  fresh human sign-in (unattached config flow, real client) whose 1-day DAILY window
+    has the meter series but no published/valid point yet (vendor lag) must still
+    create the entry; a valid-point control must pass.
+P2  rejected DAILY identity through a REAL DataUpdateCoordinator.async_refresh(): the
+    previous reading must not be replaced by a placeholder and the poll must not be
+    reported as a success.
+P3  informational: hourly co-listed valid meter teaches known_meter_ids.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+from http.client import HTTPMessage
+import json
+from types import SimpleNamespace
+from typing import Any
+from urllib.parse import parse_qs, urlparse
+
+from homeassistant.config_entries import SOURCE_USER
+from homeassistant.data_entry_flow import FlowResultType
+import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+import requests
+from requests.adapters import BaseAdapter
+
+import custom_components.pseg as pkg
+import custom_components.pseg.config_flow as flow_mod
+from custom_components.pseg.const import (
+    CONF_OKTA_COOKIES,
+    CONF_PORTAL_COOKIES,
+    DOMAIN,
+    PORTAL_HOST,
+)
+from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
+from custom_components.pseg.pseg_client import PsegClient
+
+pytestmark = pytest.mark.independent
+
+try:
+    from custom_components.pseg.const import CONF_KNOWN_METER_IDS
+except ImportError:  # HEAD differential
+    CONF_KNOWN_METER_IDS = "known_meter_ids"
+
+METER = "13579"
+SEED = "MM_SID=r8-sid; MM_RememberMe=r8-gen"
+TOKEN_PAGE = b'<html><input name="__RequestVerificationToken" value="r8-af"/>Dashboard</html>'
+LOGIN_FORM = (
+    b'<html><form action="/Home/Login"><input name="LoginEmail"/><input id="LoginPassword"/>'
+    b'<input name="__RequestVerificationToken" value="r8-form"/></form></html>'
+)
+REAL_CLIENT = PsegClient
+
+
+def daily(meter: str = METER, day: str = "10/21/2026", y: Any = 3.0) -> dict[str, Any]:
+    return {"Data": {"series": [{"name": f"Meter #{meter}",
+                                 "data": [{"x": 1792540800000, "y": y, "hs": {"start": day}}]}]}}
+
+
+def hourly(meter: str = METER) -> dict[str, Any]:
+    return {"Data": {"series": [{"name": f"Meter #{meter}", "data": [{
+        "x": 1792540800000, "y": 1.0,
+        "hs": {"start": "2026-10-21T00:00:00+00:00", "end": "2026-10-21T01:00:00+00:00"}}]}]}}
+
+
+class Portal(BaseAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.daily: list[Any] = []
+        self.hourly: list[Any] = []
+        self.events: list[tuple[str, str]] = []
+        self.mode = "daily"
+        self.start = "10/21/2026"
+
+    def send(self, request: requests.PreparedRequest, **kwargs: Any) -> requests.Response:
+        u = urlparse(request.url)
+        self.events.append((request.method or "", u.path))
+        assert u.hostname == PORTAL_HOST, "non-portal host"
+        resp = requests.Response()
+        resp.status_code = 200
+        resp.url = request.url
+        resp.request = request
+        resp._content_consumed = True
+        resp.raw = SimpleNamespace(_original_response=SimpleNamespace(msg=HTTPMessage()))
+        if request.method == "GET" and u.path == "/Dashboard":
+            resp._content = TOKEN_PAGE
+        elif request.method == "GET" and u.path == "/":
+            resp._content = LOGIN_FORM
+        elif request.method == "POST" and u.path == "/Dashboard/Chart":
+            body = request.body.decode() if isinstance(request.body, bytes) else (request.body or "")
+            form = parse_qs(body)
+            self.mode = "hourly" if form.get("UsageInterval") == ["5"] else "daily"
+            start = (form.get("Start") or ["2026-10-21"])[0]
+            self.start = datetime.strptime(start, "%Y-%m-%d").strftime("%m/%d/%Y")
+            resp._content = b"{}"
+        elif request.method == "GET" and u.path == "/Dashboard/ChartData":
+            queue = self.hourly if self.mode == "hourly" else self.daily
+            payload = queue.pop(0) if queue else (
+                {"Data": None} if self.mode == "hourly" else daily(day=self.start))
+            if callable(payload):
+                payload = payload(self.start)
+            resp._content = json.dumps(payload).encode()
+        else:
+            raise AssertionError(f"unexpected {request.method} {u.path}")
+        return resp
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _enabled(enable_custom_integrations):
+    yield
+
+
+def _factory(portal: Portal):
+    def make(**kwargs: Any) -> PsegClient:
+        client = REAL_CLIENT(**kwargs)
+        client.session.mount("https://", portal)
+        return client
+    return make
+
+
+async def _true(*_a: Any, **_k: Any) -> bool:
+    return True
+
+
+LAG_WINDOWS = {
+    # Published series label, no point yet for the 1-day window (vendor lag).
+    "label_no_points": lambda start: {"Data": {"series": [{"name": f"Meter #{METER}", "data": []}]}},
+    # Points present for the window, usage not yet published (null y).
+    "null_usage_points": lambda start: daily(day=start, y=None),
+    # Control: a published valid point in the window.
+    "control_valid_point": lambda start: daily(day=start, y=2.5),
+}
+
+
+@pytest.mark.parametrize("window", sorted(LAG_WINDOWS))
+async def test_p1_fresh_cookie_sign_in_with_lagging_daily_window(hass, monkeypatch, window):
+    portal = Portal()
+    portal.daily.append(LAG_WINDOWS[window])
+    monkeypatch.setattr(flow_mod, "PsegClient", _factory(portal))
+    monkeypatch.setattr(pkg, "async_setup_entry", _true)
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": SOURCE_USER},
+        data={CONF_OKTA_COOKIES: "", CONF_PORTAL_COOKIES: SEED},
+    )
+    print("P1", window, result.get("type"), result.get("errors") or result.get("reason"),
+          getattr(result.get("result"), "unique_id", None))
+    assert result["type"] == FlowResultType.CREATE_ENTRY, (window, result.get("errors"))
+    assert result["result"].unique_id == METER
+
+
+def _build(hass, portal: Portal):
+    client = PsegClient(portal_cookies=SEED)
+    client.session.mount("https://", portal)
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED, CONF_KNOWN_METER_IDS: [METER]})
+    entry.add_to_hass(hass)
+    coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
+    return client, entry, coord
+
+
+REJECTED = {
+    "unknown_meter_only_hourly_unavailable": (lambda s: daily(meter="99999", day=s, y=7.0), {"Data": None}),
+    "unknown_meter_only_hourly_known_valid": (lambda s: daily(meter="99999", day=s, y=7.0), hourly()),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REJECTED))
+async def test_p2_rejected_daily_real_refresh_keeps_previous_reading(hass, case):
+    portal = Portal()
+    client, entry, coord = _build(hass, portal)
+    try:
+        portal.daily.append(lambda s: daily(day=s, y=3.0))
+        await coord.async_refresh()
+        assert coord.data and coord.data["latest_kwh"] == 3.0, coord.data
+        before_success = coord.last_successful_update
+        before_status = coord.status
+        d, h = REJECTED[case]
+        portal.daily.append(d)
+        portal.hourly.append(h)
+        await coord.async_refresh()
+        shown = (coord.data or coord._last_valid_data or {}).get("latest_kwh")
+        print("P2", case, "shown_latest_kwh=", shown,
+              "latest_date=", (coord.data or {}).get("latest_date"),
+              "last_update_success=", coord.last_update_success,
+              "status=", coord.status, "/", before_status,
+              "success_ts_changed=", coord.last_successful_update != before_success,
+              "known=", entry.data.get(CONF_KNOWN_METER_IDS))
+        assert "99999" not in (entry.data.get(CONF_KNOWN_METER_IDS) or [])
+        assert shown == 3.0, f"rejected DAILY replaced the reading with {shown!r}"
+        assert coord.last_successful_update == before_success, "rejected DAILY reported success"
+    finally:
+        coord.stop_keepalive()
+
+
+async def test_p3_hourly_colisted_valid_meter_learning_informational(hass):
+    portal = Portal()
+    client, entry, coord = _build(hass, portal)
+    try:
+        two = hourly()
+        two["Data"]["series"].append({"name": "Meter #77777", "data": [{
+            "x": 1792544400000, "y": 2.0,
+            "hs": {"start": "2026-10-21T01:00:00+00:00", "end": "2026-10-21T02:00:00+00:00"}}]})
+        portal.daily.append(lambda s: daily(day=s, y=3.0))
+        portal.hourly.append(two)
+        await coord.async_refresh()
+        print("P3 known after daily(known)+hourly(known+77777 valid):", entry.data.get(CONF_KNOWN_METER_IDS))
+    finally:
+        coord.stop_keepalive()
+
+
+@pytest.mark.parametrize("window", sorted(LAG_WINDOWS))
+async def test_p1b_human_cookie_reauth_with_lagging_daily_window(hass, monkeypatch, window):
+    portal = Portal()
+    monkeypatch.setattr(pkg, "PsegClient", _factory(portal))
+    monkeypatch.setattr(flow_mod, "PsegClient", _factory(portal))
+    entry = MockConfigEntry(domain=DOMAIN, version=2, unique_id=METER,
+                            data={CONF_PORTAL_COOKIES: SEED, CONF_KNOWN_METER_IDS: [METER]})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    try:
+        result = await entry.start_reauth_flow(hass)
+        portal.daily.append(LAG_WINDOWS[window])
+        result = await hass.config_entries.flow.async_configure(
+            result["flow_id"], {CONF_OKTA_COOKIES: "", CONF_PORTAL_COOKIES: "MM_SID=r8-h; MM_RememberMe=r8-h-gen"},
+        )
+        print("P1b", window, result.get("type"), result.get("errors") or result.get("reason"))
+        assert result.get("reason") == "reauth_successful", (window, result.get("errors"))
+    finally:
+        await hass.async_block_till_done()
+        await hass.config_entries.async_unload(entry.entry_id)
+
+
+POISON = "r8-poison"
+
+
+class PoisonPortal(Portal):
+    """Portal whose queued ChartData entries may be (payload, set_cookie_headers)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.poison_sent: list[tuple[str, str]] = []
+
+    def send(self, request, **kwargs):
+        u = urlparse(request.url)
+        if POISON in (request.headers.get("Cookie") or ""):
+            self.poison_sent.append((request.method or "", u.path))
+        cookies = ()
+        if request.method == "GET" and u.path == "/Dashboard/ChartData":
+            queue = self.hourly if self.mode == "hourly" else self.daily
+            if queue and isinstance(queue[0], tuple):
+                payload, cookies = queue.pop(0)
+                queue.insert(0, payload)
+        resp = super().send(request, **kwargs)
+        for header in cookies:
+            resp.raw._original_response.msg.add_header("Set-Cookie", header)
+        return resp
+
+
+SWEEP = {
+    "daily_unknown_only__hourly_known_valid": (
+        (lambda s: daily(meter="99999", day=s, y=7.0), True), (hourly(), False)),
+    "daily_known_empty__hourly_known_valid": (
+        ({"Data": {"series": [{"name": f"Meter #{METER}", "data": []}]}}, True), (hourly(), False)),
+    "daily_valid__hourly_unknown_only": (
+        (lambda s: daily(day=s, y=3.0), False), (hourly(meter="88888"), True)),
+    "daily_valid__hourly_series_data_dict": (
+        (lambda s: daily(day=s, y=3.0), False),
+        ({"Data": {"series": [{"name": f"Meter #{METER}", "data": {"x": 1}}]}}, True)),
+    "daily_nonmeter_series_data_dict": (
+        ({"Data": {"series": [{"name": "Temperature", "data": {"y": 1}},
+                              {"name": f"Meter #{METER}", "data": [
+                                  {"x": 1792540800000, "y": 3.0, "hs": {"start": "10/21/2026"}}]}]}}, True),
+        ({"Data": None}, False)),
+}
+
+
+@pytest.mark.parametrize("cookie", ["MM_SID", "MM_RememberMe"])
+@pytest.mark.parametrize("case", sorted(SWEEP))
+async def test_p4_failed_leg_cookie_never_dispatched_or_persisted(hass, case, cookie):
+    portal = PoisonPortal()
+    client, entry, coord = _build(hass, portal)
+    try:
+        (d, d_poison), (h, h_poison) = SWEEP[case]
+        header = [f"{cookie}={POISON}; Path=/"]
+        portal.daily.append((d, header) if d_poison else d)
+        portal.hourly.append((h, header) if h_poison else h)
+        await coord.async_refresh()
+        await coord._async_keepalive(datetime.now())
+        for _ in range(2):
+            await coord.async_refresh()
+        cold = PsegClient(cookie_list=entry.data.get("cookies"))
+        cold_poison = any(c.get("value") == POISON for c in cold.export_cookies())
+        persisted = any(c.get("value") == POISON for c in entry.data.get("cookies") or [])
+        print("P4", case, cookie, "sent=", portal.poison_sent[:3], "persisted=", persisted, "cold=", cold_poison)
+        assert not portal.poison_sent and not persisted and not cold_poison
+    finally:
+        coord.stop_keepalive()
+
+
+async def test_p4_control_validated_leg_cookie_is_accepted(hass):
+    portal = PoisonPortal()
+    client, entry, coord = _build(hass, portal)
+    try:
+        portal.daily.append((lambda s: daily(day=s, y=3.0), [f"MM_SID={POISON}; Path=/"]))
+        await coord.async_refresh()
+        await coord._async_keepalive(datetime.now())
+        persisted = any(c.get("value") == POISON for c in entry.data.get("cookies") or [])
+        print("P4-control sent=", portal.poison_sent[:2], "persisted=", persisted)
+        assert portal.poison_sent and persisted
+    finally:
+        coord.stop_keepalive()
+
+
+@pytest.mark.parametrize("hourly_payload", ["known_valid", "unavailable"])
+async def test_p5_daily_proven_successor_learning_vs_hourly_overwrite(hass, hourly_payload):
+    portal = Portal()
+    client, entry, coord = _build(hass, portal)
+    try:
+        def swap(s):
+            return {"Data": {"series": [
+                {"name": f"Meter #{METER}", "data": [{"x": 1792454400000, "y": 3.5, "hs": {"start": "10/20/2026"}}]},
+                {"name": "Meter #99999", "data": [{"x": 1792540800000, "y": 4.5, "hs": {"start": "10/21/2026"}}]}]}}
+        portal.daily.append(swap)
+        portal.hourly.append(hourly() if hourly_payload == "known_valid" else {"Data": None})
+        await coord.async_refresh()
+        print("P5", hourly_payload, "known=", entry.data.get(CONF_KNOWN_METER_IDS))
+    finally:
+        coord.stop_keepalive()

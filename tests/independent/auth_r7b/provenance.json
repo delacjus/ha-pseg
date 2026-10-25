@@ -1,0 +1,45 @@
+{
+  "group": "auth_r7b",
+  "status": "active",
+  "reviewer_kb": "0ce46ae2-76f1-4f59-8b73-e744c48e3f62",
+  "expected_collection": 29,
+  "sources": [
+    {
+      "original_path": "/tmp/pseg-auth-review-r7b-20261023/test_r7b_boundaries.py",
+      "original_sha256": "cad14c01124eeb0b3842f9d9f6b5e17193b58917f224e8487ae930035504c597",
+      "archived_path": "auth_r7b/test_r7b_boundaries.py.txt",
+      "archived_sha256": "cad14c01124eeb0b3842f9d9f6b5e17193b58917f224e8487ae930035504c597",
+      "role": "probe",
+      "collect": false
+    },
+    {
+      "original_path": "/tmp/pseg-auth-review-r9-20261024/r7b-adapted/test_r7b_boundaries_adapted.py",
+      "original_sha256": "177e07484bd19d9fbd0c250e96cb1fdfb28411aec44cb7bb51f7e81a847cd7e9",
+      "archived_path": "auth_r7b/test_r7b_boundaries_adapted.py.txt",
+      "archived_sha256": "177e07484bd19d9fbd0c250e96cb1fdfb28411aec44cb7bb51f7e81a847cd7e9",
+      "role": "probe",
+      "collect": false
+    }
+  ],
+  "transformation_rationale": [
+    "Promote reviewer-approved adapted copy (177e0748) superseding return-vs-typed-UpdateFailed (29/29 target)",
+    "Archive preserves both original (cad14c01, 28/29) and adapted copies",
+    "Preserve assertion and parameter ASTs verbatim from adapted source",
+    "Normalize imports from test_r6_probes to tests.independent.auth_r6.test_independent_auth_r6",
+    "Apply independent pytest marker via conftest.py"
+  ],
+  "promoted_files": [
+    {
+      "relative_path": "__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "relative_path": "conftest.py",
+      "sha256": "af42e9e28fced4ba799e82d16010b89ffd736704e98668023283988fcaf1a468"
+    },
+    {
+      "relative_path": "test_independent_auth_r7b.py",
+      "sha256": "42d1389aaa217d197c646c867bd8779e5b21fcbb13091196ad85f441d817ee0d"
+    }
+  ]
+}
