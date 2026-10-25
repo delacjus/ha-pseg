@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.13", "3.14"]
+        python-version: ["3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -24,7 +24,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv pip install --system "homeassistant==2026.10.2" "pytest-homeassistant-custom-component==0.13.373" "requests-mock==1.12.1" "requests>=2.32.0" "beautifulsoup4" "ruff" "pytest"
+          uv pip install --system "homeassistant==2026.10.2" "pytest-homeassistant-custom-component==0.13.373" "requests-mock==1.12.1" "requests==2.34.2" "beautifulsoup4==4.15.0" "ruff==0.17.1" "pytest==9.0.3"
 
       - name: Run Ruff
         run: |

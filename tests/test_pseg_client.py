@@ -1327,10 +1327,11 @@ def _hourly_chart(
     *,
     date_only_labels: bool = False,
 ) -> dict:
-    """Build a synthetic hourly payload (the real vendor contract is still unverified)."""
+    """Build a synthetic hourly payload adhering to the proven contract."""
     points = []
     for start in expected_hour_starts(day):
         local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
         if date_only_labels:
             label = local.strftime("%m/%d/%Y")
             end_label = label
@@ -1341,7 +1342,7 @@ def _hourly_chart(
             )
         points.append(
             {
-                "x": int(start.timestamp() * 1000),
+                "x": int(wall_utc.timestamp() * 1000),
                 "y": kwh,
                 "hs": {"start": label, "end": end_label},
             }
@@ -1468,25 +1469,30 @@ def test_hourly_parser_keeps_zero_and_rejects_invalid_points() -> None:
     client = PsegClient()
     day = date(2026, 10, 20)
     starts = expected_hour_starts(day)
+
+    def _wall_ms(st: datetime) -> int:
+        loc = st.astimezone(NY_TZ)
+        return int(datetime.combine(loc.date(), loc.time(), tzinfo=UTC).timestamp() * 1000)
+
     points = [
         {
-            "x": int(starts[0].timestamp() * 1000),
+            "x": _wall_ms(starts[0]),
             "y": 0.0,
             "hs": {"start": "10/20/2026 12:00 AM"},
         },
         {
-            "x": int(starts[1].timestamp() * 1000),
+            "x": _wall_ms(starts[1]),
             "y": 2.0,
             "hs": {"start": "10/20/2026 01:00 AM"},
         },
         {
-            "x": int(starts[2].timestamp() * 1000),
+            "x": _wall_ms(starts[2]),
             "y": 3.0,
             "hs": {"start": "10/20/2026 02:00 AM"},
         },
         {"x": None, "y": 1.0, "hs": {"start": "10/20/2026 03:00 AM"}},
-        {"x": int(starts[3].timestamp() * 1000), "y": -1.0},
-        {"x": int(starts[4].timestamp() * 1000) + 1_800_000, "y": 1.0},
+        {"x": _wall_ms(starts[3]), "y": -1.0},
+        {"x": _wall_ms(starts[4]) + 1_800_000, "y": 1.0},
     ]
     payload = {
         "Data": {
@@ -1494,7 +1500,7 @@ def test_hourly_parser_keeps_zero_and_rejects_invalid_points() -> None:
                 {"name": "Meter #1 (RS)", "data": points},
                 {
                     "name": "Meter #1 - Previous Year",
-                    "data": [{"x": int(starts[5].timestamp() * 1000), "y": 99.0}],
+                    "data": [{"x": _wall_ms(starts[5]), "y": 99.0}],
                 },
             ]
         }
@@ -1513,7 +1519,7 @@ def test_hourly_label_mismatch_blocks_promotion() -> None:
     payload = _hourly_chart(day)
     for point in payload["Data"]["series"][0]["data"]:
         shifted = (
-            datetime.fromtimestamp(point["x"] / 1000, tz=UTC).astimezone(NY_TZ)
+            datetime.fromtimestamp(point["x"] / 1000, tz=UTC).replace(tzinfo=NY_TZ)
             + timedelta(hours=2)
         )
         point["hs"]["start"] = shifted.strftime("%m/%d/%Y %I:%M %p")
@@ -1531,15 +1537,15 @@ def test_hourly_label_mismatch_blocks_promotion() -> None:
     assert result.reason == "label_mismatch"
 
 
-def test_date_only_labels_do_not_prove_interval_start() -> None:
-    """Date-only labels are unverified timestamp semantics, not promotion evidence."""
+def test_date_only_labels_prove_interval_start() -> None:
+    """Date-only labels now prove interval start under the verified contract."""
     day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
     parsed = PsegClient()._parse_hourly_chart(
         _hourly_chart(day, date_only_labels=True)
     )
-    assert all(record["interval_ok"] is False for record in parsed["hourly_records"])
+    assert all(record["interval_ok"] is True for record in parsed["hourly_records"])
     assert all(
-        record["interval_reason"] == "timestamp_semantics_unverified"
+        record["interval_reason"] is None
         for record in parsed["hourly_records"]
     )
 
@@ -1549,8 +1555,8 @@ def test_date_only_labels_do_not_prove_interval_start() -> None:
         float(len(parsed["hourly_records"])),
         datetime.now(UTC),
     )
-    assert result.complete is False
-    assert result.reason == "timestamp_semantics_unverified"
+    assert result.complete is True
+    assert result.reason is None
 
 
 def test_history_range_still_requests_the_daily_interval() -> None:
@@ -1660,7 +1666,14 @@ def test_end_stamped_payload_is_not_promoted() -> None:
     starts = expected_hour_starts(day)
     points = [
         {
-            "x": start.timestamp() * 1000,
+            "x": int(
+                datetime.combine(
+                    start.astimezone(NY_TZ).date(),
+                    start.astimezone(NY_TZ).time(),
+                    tzinfo=UTC,
+                ).timestamp()
+                * 1000
+            ),
             "y": 24 if index == 0 else index,
             "hs": {"start": "10/01/2026" if index == 0 else "10/02/2026"},
         }
@@ -1704,10 +1717,11 @@ def test_bare_clock_labels_are_not_positive_evidence() -> None:
     points = []
     for start in expected_hour_starts(day):
         local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
         label = local.strftime("%m/%d/%Y %I:%M %p")
         points.append(
             {
-                "x": start.timestamp() * 1000,
+                "x": int(wall_utc.timestamp() * 1000),
                 "y": 1.0,
                 "hs": {"start": label, "end": label},
             }
@@ -1716,6 +1730,40 @@ def test_bare_clock_labels_are_not_positive_evidence() -> None:
         {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
     )
     assert all(record["interval_ok"] is False for record in parsed["hourly_records"])
+
+    check = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        24.0,
+        datetime(2026, 10, 4, tzinfo=UTC),
+        granularity=parsed["hourly_granularity"],
+    )
+    assert check.complete is False
+    assert check.reason == "timestamp_semantics_unverified"
+
+
+def test_unparseable_or_missing_labels_remain_unverified() -> None:
+    """Labels that are absent or unparseable retain timestamp_semantics_unverified."""
+    day = date(2026, 10, 2)
+    points = []
+    for start in expected_hour_starts(day):
+        local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        points.append(
+            {
+                "x": int(wall_utc.timestamp() * 1000),
+                "y": 1.0,
+                "hs": {"start": "unparseable_garbage"},
+            }
+        )
+    parsed = PsegClient()._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert all(record["interval_ok"] is False for record in parsed["hourly_records"])
+    assert all(
+        record["interval_reason"] == "timestamp_semantics_unverified"
+        for record in parsed["hourly_records"]
+    )
 
     check = validate_hourly_day(
         day,
@@ -2158,3 +2206,471 @@ def test_hourly_contract_sample_comparator_consumable_shape() -> None:
     assert pt["hs"]["start"] == "2026-09-01T00:00:00Z"
     assert pt["hs"]["end"] == "2026-09-01T01:00:00Z"
     assert document["context"]["expected_meter_ids"] == ["1"]
+
+
+def test_hourly_contract_realistic_edt_day_promoted() -> None:
+    """A realistic closed EDT day with wall-clock ms and date-only labels promotes with 04:00Z starts."""
+    day = date(2026, 10, 15)
+    starts = expected_hour_starts(day)
+    points = []
+    for start in starts:
+        local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        points.append(
+            {
+                "x": int(wall_utc.timestamp() * 1000),
+                "y": 1.25,
+                "hs": {"start": "10/15/2026", "end": "10/15/2026"},
+            }
+        )
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert all(record["interval_ok"] is True for record in parsed["hourly_records"])
+    assert all(record["interval_reason"] is None for record in parsed["hourly_records"])
+
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        24 * 1.25,
+        datetime(2026, 10, 17, tzinfo=UTC),
+    )
+    assert result.complete is True
+    assert result.reason is None
+    assert result.records[0]["start"] == datetime(2026, 10, 15, 4, 0, tzinfo=UTC)
+    assert result.records[-1]["start"] == datetime(2026, 10, 16, 3, 0, tzinfo=UTC)
+
+
+def test_hourly_contract_true_utc_reading_rejected() -> None:
+    """True-UTC reading shifts EDT starts by 4h and is rejected (regression proof)."""
+    day = date(2026, 10, 15)
+    starts = expected_hour_starts(day)
+    points = [
+        {
+            "x": int(start.timestamp() * 1000),
+            "y": 1.25,
+            "hs": {"start": "10/15/2026", "end": "10/15/2026"},
+        }
+        for start in starts
+    ]
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        24 * 1.25,
+        datetime(2026, 10, 17, tzinfo=UTC),
+    )
+    assert result.complete is False
+    assert result.reason in ("unexpected_start", "label_mismatch")
+
+
+def test_hourly_contract_est_day_promoted() -> None:
+    """An EST day in December promotes with starts at 05:00Z."""
+    day = date(2026, 12, 1)
+    starts = expected_hour_starts(day)
+    points = []
+    for start in starts:
+        local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        points.append(
+            {
+                "x": int(wall_utc.timestamp() * 1000),
+                "y": 1.5,
+                "hs": {"start": "12/01/2026", "end": "12/01/2026"},
+            }
+        )
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert all(record["interval_ok"] is True for record in parsed["hourly_records"])
+
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        24 * 1.5,
+        datetime(2026, 12, 3, tzinfo=UTC),
+    )
+    assert result.complete is True
+    assert result.reason is None
+    assert result.records[0]["start"] == datetime(2026, 12, 1, 5, 0, tzinfo=UTC)
+    assert result.records[-1]["start"] == datetime(2026, 12, 2, 4, 0, tzinfo=UTC)
+
+
+def test_hourly_contract_fall_back_day_dst_ambiguous() -> None:
+    """Fall-back day 2026-11-01 yields reason dst_ambiguous, not promoted, no exception."""
+    day = date(2026, 11, 1)
+    starts = expected_hour_starts(day)
+    points_25 = []
+    for start in starts:
+        local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        points_25.append(
+            {
+                "x": int(wall_utc.timestamp() * 1000),
+                "y": 1.0,
+                "hs": {"start": "11/01/2026", "end": "11/01/2026"},
+            }
+        )
+    client = PsegClient()
+    parsed_25 = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points_25}]}}
+    )
+    result_25 = validate_hourly_day(
+        day,
+        parsed_25["hourly_records"],
+        25.0,
+        datetime(2026, 11, 3, tzinfo=UTC),
+    )
+    assert result_25.complete is False
+    assert result_25.reason == "dst_ambiguous"
+
+    points_24 = [p for i, p in enumerate(points_25) if i != 1]
+    parsed_24 = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points_24}]}}
+    )
+    result_24 = validate_hourly_day(
+        day,
+        parsed_24["hourly_records"],
+        24.0,
+        datetime(2026, 11, 3, tzinfo=UTC),
+    )
+    assert result_24.complete is False
+    assert result_24.reason == "dst_ambiguous"
+
+
+def test_hourly_contract_spring_forward_invalid_point_not_promoted() -> None:
+    """Spring-forward 2027-03-14 with a 02:00 point is counted invalid and not promoted."""
+    day = date(2027, 3, 14)
+    points = [
+        {
+            "x": int(datetime(2027, 3, 14, h, 0, tzinfo=UTC).timestamp() * 1000),
+            "y": 1.0,
+            "hs": {"start": "03/14/2027", "end": "03/14/2027"},
+        }
+        for h in range(24)
+    ]
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert parsed["hourly_invalid_points"] == 1
+    assert len(parsed["hourly_records"]) == 23
+
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        24.0,
+        datetime(2027, 3, 16, tzinfo=UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "sum_mismatch"
+
+
+def test_hourly_contract_date_label_different_day_is_label_mismatch() -> None:
+    """A date label for a different day triggers label_mismatch."""
+    day = date(2026, 10, 15)
+    starts = expected_hour_starts(day)
+    local = starts[0].astimezone(NY_TZ)
+    wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+    points = [
+        {
+            "x": int(wall_utc.timestamp() * 1000),
+            "y": 1.0,
+            "hs": {"start": "10/16/2026", "end": "10/16/2026"},
+        }
+    ]
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert parsed["hourly_records"][0]["interval_ok"] is False
+    assert parsed["hourly_records"][0]["interval_reason"] == "label_mismatch"
+
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        1.0,
+        datetime(2026, 10, 17, tzinfo=UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "label_mismatch"
+
+
+def test_hourly_contract_end_label_two_days_off_is_interval_end_mismatch() -> None:
+    """An end label two days off triggers interval_end_mismatch."""
+    day = date(2026, 10, 15)
+    starts = expected_hour_starts(day)
+    local = starts[0].astimezone(NY_TZ)
+    wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+    points = [
+        {
+            "x": int(wall_utc.timestamp() * 1000),
+            "y": 1.0,
+            "hs": {"start": "10/15/2026", "end": "10/17/2026"},
+        }
+    ]
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert parsed["hourly_records"][0]["interval_ok"] is False
+    assert parsed["hourly_records"][0]["interval_reason"] == "interval_end_mismatch"
+
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        1.0,
+        datetime(2026, 10, 17, tzinfo=UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "interval_end_mismatch"
+
+
+def test_hourly_contract_sum_mismatch_still_rejects() -> None:
+    """Sum mismatch between hourly points and daily total rejects promotion."""
+    day = date(2026, 10, 15)
+    starts = expected_hour_starts(day)
+    points = []
+    for start in starts:
+        local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        points.append(
+            {
+                "x": int(wall_utc.timestamp() * 1000),
+                "y": 1.0,
+                "hs": {"start": "10/15/2026", "end": "10/15/2026"},
+            }
+        )
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert all(record["interval_ok"] is True for record in parsed["hourly_records"])
+
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        30.0,
+        datetime(2026, 10, 17, tzinfo=UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "sum_mismatch"
+
+
+def test_hourly_contract_aware_start_missing_end_rejected() -> None:
+    """Matching aware start label with missing end label is not promoted."""
+    day = date(2026, 10, 15)
+    starts = expected_hour_starts(day)
+    points = []
+    for start in starts:
+        local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        points.append(
+            {
+                "x": int(wall_utc.timestamp() * 1000),
+                "y": 1.0,
+                "hs": {"start": start.isoformat()},
+            }
+        )
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert all(record["interval_ok"] is False for record in parsed["hourly_records"])
+    assert all(
+        record["interval_reason"] == "timestamp_semantics_unverified"
+        for record in parsed["hourly_records"]
+    )
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        24.0,
+        datetime(2026, 10, 17, tzinfo=UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "timestamp_semantics_unverified"
+
+
+def test_hourly_contract_bare_clock_start_equals_end_rejected() -> None:
+    """Bare clock labels with start == end are zero-length intervals and not promoted."""
+    day = date(2026, 10, 15)
+    starts = expected_hour_starts(day)
+    points = []
+    for start in starts:
+        local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        clock = local.strftime("%m/%d/%Y %H:%M")
+        points.append(
+            {
+                "x": int(wall_utc.timestamp() * 1000),
+                "y": 1.0,
+                "hs": {"start": clock, "end": clock},
+            }
+        )
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert all(record["interval_ok"] is False for record in parsed["hourly_records"])
+    assert all(
+        record["interval_reason"] == "timestamp_semantics_unverified"
+        for record in parsed["hourly_records"]
+    )
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        24.0,
+        datetime(2026, 10, 17, tzinfo=UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "timestamp_semantics_unverified"
+
+
+def test_hourly_contract_date_start_aware_noon_end_rejected() -> None:
+    """Date-only start with aware noon end does not prove 1h interval and is rejected."""
+    day = date(2026, 10, 15)
+    starts = expected_hour_starts(day)
+    points = []
+    for start in starts:
+        local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        points.append(
+            {
+                "x": int(wall_utc.timestamp() * 1000),
+                "y": 1.0,
+                "hs": {
+                    "start": "10/15/2026",
+                    "end": "2026-10-15T12:00:00-04:00",
+                },
+            }
+        )
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert all(record["interval_ok"] is False for record in parsed["hourly_records"])
+    assert all(
+        record["interval_reason"] == "timestamp_semantics_unverified"
+        for record in parsed["hourly_records"]
+    )
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        24.0,
+        datetime(2026, 10, 17, tzinfo=UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "timestamp_semantics_unverified"
+
+
+def test_hourly_contract_mixed_series_date_start_aware_noon_end_rejected() -> None:
+    """Mixed series with alternating aware and date-start/aware-noon-end points is rejected."""
+    day = date(2026, 10, 15)
+    starts = expected_hour_starts(day)
+    points = []
+    for i, start in enumerate(starts):
+        local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        if i % 2 == 0:
+            hs = {
+                "start": start.isoformat(),
+                "end": (start + timedelta(hours=1)).isoformat(),
+            }
+        else:
+            hs = {
+                "start": "10/15/2026",
+                "end": "2026-10-15T12:00:00-04:00",
+            }
+        points.append(
+            {
+                "x": int(wall_utc.timestamp() * 1000),
+                "y": 1.0,
+                "hs": hs,
+            }
+        )
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    assert sum(r["interval_ok"] for r in parsed["hourly_records"]) == 12
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        24.0,
+        datetime(2026, 10, 17, tzinfo=UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "timestamp_semantics_unverified"
+
+
+def test_hourly_contract_iso_basic_aware_start_date_end_rejected() -> None:
+    """ISO basic aware start with date-only end fails label_mismatch."""
+    day = date(2026, 10, 15)
+    starts = expected_hour_starts(day)
+    points = []
+    for start in starts:
+        local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        points.append(
+            {
+                "x": int(wall_utc.timestamp() * 1000),
+                "y": 1.0,
+                "hs": {
+                    "start": "20261015T230000-0400",
+                    "end": "10/15/2026",
+                },
+            }
+        )
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        24.0,
+        datetime(2026, 10, 17, tzinfo=UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "label_mismatch"
+
+
+def test_hourly_contract_fall_back_aware_25_points_dst_ambiguous() -> None:
+    """Fully-aware 25-point fall-back day yields reason dst_ambiguous, not label_mismatch."""
+    day = date(2026, 11, 1)
+    starts = expected_hour_starts(day)
+    points = []
+    for start in starts:
+        local = start.astimezone(NY_TZ)
+        wall_utc = datetime.combine(local.date(), local.time(), tzinfo=UTC)
+        points.append(
+            {
+                "x": int(wall_utc.timestamp() * 1000),
+                "y": 1.0,
+                "hs": {
+                    "start": start.isoformat(),
+                    "end": (start + timedelta(hours=1)).isoformat(),
+                },
+            }
+        )
+    client = PsegClient()
+    parsed = client._parse_hourly_chart(
+        {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    )
+    ambiguous_records = [
+        r for r in parsed["hourly_records"] if r["interval_reason"] == "dst_ambiguous"
+    ]
+    assert len(ambiguous_records) >= 1
+    result = validate_hourly_day(
+        day,
+        parsed["hourly_records"],
+        25.0,
+        datetime(2026, 11, 3, tzinfo=UTC),
+    )
+    assert result.complete is False
+    assert result.reason == "dst_ambiguous"

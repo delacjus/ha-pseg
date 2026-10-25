@@ -12,6 +12,8 @@ from custom_components.pseg.statistics_hourly import (
     ny_day_bounds,
     ny_day_of,
     ny_midnight_utc,
+    ny_wall_ms_to_utc,
+    parse_date_only_label,
     promotion_tolerance,
     validate_hourly_day,
     validate_hourly_days,
@@ -271,3 +273,44 @@ def test_label_consistency_helpers() -> None:
     assert label_matches_ny_time("10/20/2026 02:00 AM", start) is False
     assert label_matches_ny_time("2026-10-20T04:00:00+00:00", start) is True
     assert label_matches_ny_time("garbage", start) is None
+
+
+def test_ny_wall_ms_to_utc() -> None:
+    """Unit test ny_wall_ms_to_utc for EDT, EST, fall-back and spring-forward."""
+    # EDT: 2026-10-10 00:00 wall -> 04:00Z
+    edt_ms = int(datetime(2026, 10, 10, 0, 0, tzinfo=UTC).timestamp() * 1000)
+    utc_dt, status = ny_wall_ms_to_utc(edt_ms)
+    assert status == "ok"
+    assert utc_dt == datetime(2026, 10, 10, 4, 0, tzinfo=UTC)
+
+    # EST: 2026-12-01 00:00 wall -> 05:00Z
+    est_ms = int(datetime(2026, 12, 1, 0, 0, tzinfo=UTC).timestamp() * 1000)
+    utc_dt, status = ny_wall_ms_to_utc(est_ms)
+    assert status == "ok"
+    assert utc_dt == datetime(2026, 12, 1, 5, 0, tzinfo=UTC)
+
+    # Fall-back: 2026-11-01 01:00 (ambiguous)
+    fall_ms = int(datetime(2026, 11, 1, 1, 0, tzinfo=UTC).timestamp() * 1000)
+    utc_dt, status = ny_wall_ms_to_utc(fall_ms)
+    assert status == "dst_ambiguous"
+    assert utc_dt == datetime(2026, 11, 1, 5, 0, tzinfo=UTC)
+
+    # Spring-forward: 2027-03-14 02:00 (nonexistent)
+    spring_ms = int(datetime(2027, 3, 14, 2, 0, tzinfo=UTC).timestamp() * 1000)
+    utc_dt, status = ny_wall_ms_to_utc(spring_ms)
+    assert status == "dst_nonexistent"
+    assert utc_dt is None
+
+
+def test_parse_date_only_label() -> None:
+    """parse_date_only_label strictly parses MM/DD/YYYY and rejects all other formats."""
+    assert parse_date_only_label("10/15/2026") == date(2026, 10, 15)
+    assert parse_date_only_label(" 10/15/2026 ") == date(2026, 10, 15)
+    assert parse_date_only_label("2026-10-15") is None
+    assert parse_date_only_label("10/15/2026 01:00") is None
+    assert parse_date_only_label("20261015") is None
+    assert parse_date_only_label("10/15/2026 12:00 AM") is None
+    assert parse_date_only_label("10/15/26") is None
+    assert parse_date_only_label("13/40/2026") is None
+    assert parse_date_only_label("") is None
+    assert parse_date_only_label(None) is None

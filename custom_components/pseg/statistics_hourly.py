@@ -20,6 +20,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 import math
+import re
 from typing import Any
 import zoneinfo
 
@@ -61,6 +62,7 @@ STATISTICS_INCOMPLETE_REASONS = frozenset(
         "missing_hours",
         "unexpected_hours",
         "sum_mismatch",
+        "dst_ambiguous",
     }
 )
 
@@ -188,6 +190,50 @@ def parse_aware_label(label: Any) -> datetime | None:
     if parsed is None or parsed.tzinfo is None:
         return None
     return parsed
+
+
+def ny_wall_ms_to_utc(ms: float | int) -> tuple[datetime | None, str]:
+    """Convert a New York wall-clock timestamp encoded as UTC epoch ms to true UTC.
+
+    ChartData encodes the America/New_York wall clock as if it were UTC epoch ms
+    (e.g. 00:00 local midnight is encoded as 00:00 UTC).
+
+    Returns:
+        (utc_dt, "ok"): Unique wall time in America/New_York.
+        (utc_dt, "dst_ambiguous"): Fall-back hour occurring twice (fold 0 used).
+        (None, "dst_nonexistent"): Spring-forward gap hour (skipped).
+    """
+    wall = datetime.fromtimestamp(ms / 1000, tz=UTC).replace(tzinfo=None)
+    a0 = wall.replace(tzinfo=NY_TZ, fold=0)
+    a1 = wall.replace(tzinfo=NY_TZ, fold=1)
+    if a0.astimezone(UTC).astimezone(NY_TZ).replace(tzinfo=None) != wall:
+        return (None, "dst_nonexistent")
+    if a0.utcoffset() != a1.utcoffset():
+        return (a0.astimezone(UTC), "dst_ambiguous")
+    return (a0.astimezone(UTC), "ok")
+
+
+_DATE_ONLY_LABEL_RE = re.compile(r"^\s*(\d{2})/(\d{2})/(\d{4})\s*$")
+
+
+def parse_date_only_label(label: Any) -> date | None:
+    """Parse a strict MM/DD/YYYY date-only label.
+
+    Matches only strings of the form MM/DD/YYYY (with optional leading/trailing
+    whitespace). Returns a datetime.date object or None if the format does not match
+    or represents an invalid calendar date.
+    """
+    if label is None:
+        return None
+    text = str(label)
+    m = _DATE_ONLY_LABEL_RE.fullmatch(text)
+    if not m:
+        return None
+    month_str, day_str, year_str = m.groups()
+    try:
+        return date(int(year_str), int(month_str), int(day_str))
+    except ValueError:
+        return None
 
 
 def label_matches_ny_time(label: Any, start_utc: datetime) -> bool | None:

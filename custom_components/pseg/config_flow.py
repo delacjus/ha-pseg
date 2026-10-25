@@ -48,6 +48,7 @@ from .const import (
     DEFAULT_PRICE_PER_KWH,
     DEFAULT_STATISTICS_IMPORT_ENABLED,
     DOMAIN,
+    PORTAL_BASE_URL,
     REMEMBER_ME_COOKIE,
 )
 from .pseg_client import (
@@ -471,7 +472,13 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
-            description_placeholders={"helper_url": self._helper_url()},
+            description_placeholders={
+                "helper_url": self._helper_url(),
+                # hassfest rejects URLs inside translation strings.
+                "chrome_extensions_url": "chrome://extensions",
+                "edge_extensions_url": "edge://extensions",
+                "portal_url": PORTAL_BASE_URL,
+            },
         )
 
     def _async_show_credentials_form(

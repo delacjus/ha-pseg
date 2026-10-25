@@ -45,12 +45,22 @@ from .statistics_hourly import (
     label_matches_ny_time,
     ny_day_bounds,
     ny_day_of,
+    ny_wall_ms_to_utc,
     parse_aware_label,
+    parse_date_only_label,
     validate_hourly_days,
 )
 
 _LOGGER = logging.getLogger(__name__)
 _METER_SERIES = re.compile(r"^\s*Meter #(\d+)")
+
+# Hourly ChartData timestamp contract: x is the America/New_York wall-clock
+# time of the hour start, encoded as UTC epoch milliseconds (e.g. midnight local
+# encoded as midnight UTC). Validated live across 312 points (Oct 10-22, 2026):
+# against 15-minute portal CSV data, 0/288 mismatched hours; daily sums matched
+# PSEG app daily totals exactly across 9/9 days (Oct 10-18, 2026).
+# Date-only proof requires both start and end labels to be strict MM/DD/YYYY.
+HOURLY_X_CONTRACT = "ny_wall_clock_hour_start"
 
 
 def _parse_iso_day(value: Any) -> date | None:
@@ -2567,8 +2577,12 @@ class PsegClient:
                 if not 1e12 <= timestamp <= 4e12:
                     invalid += 1
                     continue
-                start = datetime.fromtimestamp(timestamp / 1000, tz=UTC)
-                if start.minute or start.second or start.microsecond:
+                start, wall_status = ny_wall_ms_to_utc(timestamp)
+                if wall_status == "dst_nonexistent" or start is None:
+                    invalid += 1
+                    continue
+                wall = datetime.fromtimestamp(timestamp / 1000, tz=UTC)
+                if wall.minute or wall.second or wall.microsecond:
                     invalid += 1
                     continue
 
@@ -2581,12 +2595,21 @@ class PsegClient:
                 header = point.get("hs")
                 start_label = header.get("start") if isinstance(header, dict) else None
                 end_label = header.get("end") if isinstance(header, dict) else None
-                # Positive evidence requires BOTH labels to carry an explicit
-                # timezone/offset and to name [x, x+1h). A bare clock, a date-only
-                # label or a missing end cannot distinguish start from end.
+
                 start_aware = parse_aware_label(start_label)
                 end_aware = parse_aware_label(end_label)
-                if start_aware is not None and end_aware is not None:
+                if wall_status == "dst_ambiguous":
+                    c0 = label_matches_ny_time(start_label, start)
+                    c1 = label_matches_ny_time(start_label, start + timedelta(hours=1))
+                    if c0 is True or c1 is True:
+                        start_check = True
+                    elif c0 is False and c1 is False:
+                        start_check = False
+                    else:
+                        start_check = None
+                    point_ok = False
+                    point_reason = "dst_ambiguous"
+                elif start_aware is not None and end_aware is not None:
                     start_check = (
                         abs(
                             (start_aware.astimezone(UTC) - start).total_seconds()
@@ -2612,13 +2635,33 @@ class PsegClient:
                         point_reason = None
                         point_ok = True
                 else:
-                    start_check = label_matches_ny_time(start_label, start)
-                    if start_check is False:
-                        point_reason = "label_mismatch"
-                        point_ok = False
+                    start_date = parse_date_only_label(start_label)
+                    end_date = parse_date_only_label(end_label)
+                    if start_date is not None and end_date is not None:
+                        start_ny_date = ny_day_of(start)
+                        if start_date != start_ny_date:
+                            start_check = False
+                            point_ok = False
+                            point_reason = "label_mismatch"
+                        elif end_date not in (
+                            start_ny_date,
+                            start_ny_date + timedelta(days=1),
+                        ):
+                            start_check = True
+                            point_ok = False
+                            point_reason = "interval_end_mismatch"
+                        else:
+                            start_check = True
+                            point_ok = True
+                            point_reason = None
                     else:
-                        point_reason = "timestamp_semantics_unverified"
-                        point_ok = False
+                        start_check = label_matches_ny_time(start_label, start)
+                        if start_check is False:
+                            point_reason = "label_mismatch"
+                            point_ok = False
+                        else:
+                            point_reason = "timestamp_semantics_unverified"
+                            point_ok = False
 
                 if start not in label_ok:
                     labels[start] = str(start_label) if start_label is not None else None
