@@ -423,12 +423,6 @@ class CostEvidenceStore:
 
     async def _async_verify_persisted(self, expected_data: dict[str, Any]) -> bool:
         """Require the exact expected data on disk, independent of in-memory caches."""
-        if hasattr(self._store, "async_save"):
-            from unittest.mock import AsyncMock, MagicMock
-
-            if isinstance(self._store.async_save, (AsyncMock, MagicMock)):
-                return True
-
         if getattr(self._hass, "is_stopping", False) or getattr(self._hass, "state", None) in (
             CoreState.stopping,
             CoreState.stopped,
@@ -485,6 +479,27 @@ class CostEvidenceStore:
             return COST_MODE_OFF
         return str(self._data.get("mode", COST_MODE_OFF))
 
+    async def _async_save_settled(self, save_data: dict[str, Any]) -> None:
+        """Save, and never let a caller's cancellation abandon a running write.
+
+        Store.async_save finishes its file write in an executor thread that a
+        cancellation cannot stop. If the caller returned early, reconciliation
+        would read the old file and release the entry lock while that write is
+        still pending, so the stale write could later overwrite a newer save.
+        Wait for the write to settle first, then surface the cancellation.
+        """
+        save = asyncio.ensure_future(self._store.async_save(save_data))
+        cancelled = False
+        while not save.done():
+            try:
+                await asyncio.shield(save)
+            except asyncio.CancelledError:
+                if not save.done():
+                    cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+        save.result()
+
     async def _async_reconcile_after_save_failure(self) -> None:
         """Force in-memory state to match disk after a failed save, or fail closed.
 
@@ -531,7 +546,7 @@ class CostEvidenceStore:
             self._data["mode"] = mode
             save_data = {k: v for k, v in self._data.items() if k != "__corrupted__"}
             try:
-                await self._store.async_save(save_data)
+                await self._async_save_settled(save_data)
             except BaseException:
                 # Raised writes (including cancellation) must never leave memory
                 # claiming a mode the disk does not hold.
@@ -616,7 +631,7 @@ class CostEvidenceStore:
             self._data["last_interval"] = interval
             save_data = {k: v for k, v in self._data.items() if k != "__corrupted__"}
             try:
-                await self._store.async_save(save_data)
+                await self._async_save_settled(save_data)
             except BaseException:
                 # A raised write (including cancellation) may have persisted
                 # nothing: re-read the disk so memory never claims a permit or

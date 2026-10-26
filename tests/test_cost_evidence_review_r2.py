@@ -190,14 +190,12 @@ async def test_simultaneous_first_load_and_reserve(hass):
         patch.object(b._store, "async_load", side_effect=load),
     ):
         await asyncio.gather(a.async_load(), b.async_load())
-    with (
-        patch.object(a._store, "async_save", new=AsyncMock()),
-        patch.object(b._store, "async_save", new=AsyncMock()),
-    ):
-        issued = await asyncio.gather(
-            a.async_reserve_permit(date(2026, 10, 25), "2026-10-11", "2026-10-25"),
-            b.async_reserve_permit(date(2026, 10, 25), "2026-10-11", "2026-10-25"),
-        )
+    # R2 stubbed async_save here; since R4 a permit requires a physically verified
+    # write, so the reservations go through the real (tmp_path-routed) Store.
+    issued = await asyncio.gather(
+        a.async_reserve_permit(date(2026, 10, 25), "2026-10-11", "2026-10-25"),
+        b.async_reserve_permit(date(2026, 10, 25), "2026-10-11", "2026-10-25"),
+    )
     print("LOAD_RACE_PERMITS", sum(p is not None for p in issued), "same_data", a._data is b._data)
     assert sum(p is not None for p in issued) == 1
 
