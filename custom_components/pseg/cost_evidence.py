@@ -490,12 +490,16 @@ class CostEvidenceStore:
         """
         save = asyncio.ensure_future(self._store.async_save(save_data))
         cancelled = False
-        while not save.done():
+        while True:
             try:
                 await asyncio.shield(save)
+                break
             except asyncio.CancelledError:
-                if not save.done():
-                    cancelled = True
+                # Remember every accepted cancellation, including one that lands
+                # after the write finished but before this caller resumed.
+                cancelled = True
+                if save.done():
+                    break
         if cancelled:
             raise asyncio.CancelledError
         save.result()
