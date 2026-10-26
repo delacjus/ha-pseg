@@ -401,5 +401,31 @@
       },
       "approved_deltas": []
     }
+  ],
+  "reviewed_exclusions": [
+    {
+      "path": "custom_components/pseg/statistics_hourly.py",
+      "name": "_DATE_ONLY_LABEL_RE",
+      "mutant": "p02-broaden-date-only",
+      "reason": "Explicit dependency exclusion from the existing selected-function byte guard. The regex is byte-equal to v1.6.0, but tests/test_stats_baseline.py independently fixes the manifest at 20 surfaces and is outside Gate C edit scope. Expanding or replacing those pins would require changing that frozen contract; tools/stats_baseline.py semantics must stay intact. The full-day label table and exact p02 parser mutant test enforce strict date-only acceptance, including both meter orders. No claim that parse_date_only_label pin covers its regex dependency.",
+      "behavioral_guard": "tests/stats_suite/test_interval_table.py; tests/mutations/statistics_parser.py p02",
+      "reviewer": "Codex master-coder Gate C scope/source audit 2026-10-26; subject to parent review"
+    },
+    {
+      "path": "custom_components/pseg/coordinator.py",
+      "name": "PsegDataUpdateCoordinator._async_verify_mutation",
+      "mutant": "w02-skip-second-series-verification",
+      "reason": "Excluded from historical byte pins: current formatting and Python 3.14 except syntax differ from v1.6.0 (AST equal with include_attributes=False). Pinning HEAD as v1.6.0 would be false; adding the existing approved-delta mechanism conflicts with frozen tests/test_stats_baseline.py assertions of 20 equal and zero approved. Exact w02 detector physically drops one series, checks pending retention, and cold-replays both series. Keep semantic fault coverage rather than silently reseeding tag hashes.",
+      "behavioral_guard": "tests/stats_suite/fault_cases.py::test_writer_partial_sql_failure_and_cold_replay[normal]; tests/mutations/statistics_writer.py w02",
+      "reviewer": "Codex master-coder Gate C source/AST audit 2026-10-26; subject to parent review"
+    },
+    {
+      "path": "custom_components/pseg/coordinator.py",
+      "name": "PsegDataUpdateCoordinator._async_record_statistics_locked",
+      "mutant": "w03-clear-journal-before-import",
+      "reason": "Excluded from historical byte pins for the same reviewed formatting-only tag-to-HEAD delta (AST equal with include_attributes=False). Existing baseline tests fix 20 equal and zero approved outside this edit scope; do not change tool semantics to evade them. The strengthened full matrix now rejects w03 on physical pending/promotion state before any cold reconstruction, and the preserved S5 detector independently kills w03. This orchestration remains outside the byte-identity claim.",
+      "behavioral_guard": "tests/stats_suite/test_fault_points.py::test_full_matrix_applicable_fault_convergence[recorder_import_cost__sqlalchemy_error]; tests/mutations/statistics_writer.py w03",
+      "reviewer": "Codex master-coder Gate C source/AST audit 2026-10-26; subject to parent review"
+    }
   ]
 }
