@@ -224,7 +224,7 @@ the integration was refusing.
 - Promotion requires an independent daily total; point count alone is never enough.
 - Cost is an estimate, never a PSE&G bill. Changing the rate affects future imports;
   it does not rewrite already promoted days through a daily-only retry.
-- Portal-reported actual dollar cost (`UsageType: "2"`) is governed by the
+- Portal-reported actual dollar cost (`UsageType: "3"`) is governed by the
   independent portal cost contract in `docs/portal-cost.md`. In v1.7.0, cost evidence
   is non-authoritative and isolated; it does not write to recorder statistics or
   alter the estimated cost series (`_energy_cost`). A zero observation in portal cost

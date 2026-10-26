@@ -112,13 +112,24 @@ Filter to a single mutant label for quick diagnosis:
 ## Contract Testing Suites
 
 - **`tests/test_cost_contract.py`**: Offline pure contract test suite freezing the
-  PSE&G portal dollar contract (`UsageType: "2"`) and non-authoritative request seam.
+  PSE&G portal dollar contract (`UsageType: "3"`, `jsTargetName: "UsageType"`) and
+  non-authoritative request seam.
   It enforces preservation of the 13 canonical Chart form fields, verifies the current
   production consumption request baseline, enumerates the 8 non-authoritative evidence
   statuses, validates authoritative meter matching (rejecting upstream `series[0]` and
   unauthoritative discovery), verifies that zero is a valid numeric observation
   (rejecting upstream zero-to-estimate substitution), and quarantines booleans, NaN/Inf,
   negative credits, duplicates, and non-USD units.
+- **`tests/test_cost_contract_usagetype3.py`**: Production guards for the observed
+  contract. It runs the real sampler against
+  `tests/fixtures/cost_contract/usagetype3_daily_synthetic.json` (a synthetic copy of a
+  captured `ChartData` body, structure only — see its `PROVENANCE.md`) and asserts that
+  the chart POST carries `UsageType: "3"` with the daily/hourly interval, that every
+  point of the authoritative meter series is parsed at source precision while the
+  navigator, temperature and marker series are ignored, and that dollar proof needs the
+  exact `tooltipOptions.currency` plus an exact `Dollar` usage name: a bare `$` label or
+  axis title is corroboration only (`currency_unproven`), while another currency, a
+  `kWh` usage type or a non-`$` meter prefix is `unsupported_unit`.
 
 ## Freeze and Snapshot Utilities
 

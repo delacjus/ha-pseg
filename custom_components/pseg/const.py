@@ -120,9 +120,15 @@ COST_MODE_IMPORT = "import"
 COST_MODES = frozenset({COST_MODE_OFF, COST_MODE_EVIDENCE, COST_MODE_IMPORT})
 DEFAULT_COST_MODE = COST_MODE_OFF
 
-# MyMeter /Dashboard/Chart UsageType
+# MyMeter /Dashboard/Chart UsageType. Observed in the browser on 2026-10-26:
+# the consumption chart sends "1" and the cost chart sends "3". "2" was an upstream
+# assumption, and the sample it produced proved no dollar unit (docs/portal-cost.md).
 USAGE_TYPE_CONSUMPTION = "1"
-USAGE_TYPE_COST = "2"
+USAGE_TYPE_COST = "3"
+
+# jsTargetName names the chart control the browser changed. Consumption keeps
+# "StorageType"; the cost chart names the usage-type selector instead.
+JS_TARGET_USAGE_TYPE = "UsageType"
 
 SERVICE_SET_COST_MODE = "set_cost_mode"
 

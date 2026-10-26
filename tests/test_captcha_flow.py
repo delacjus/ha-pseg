@@ -265,7 +265,7 @@ def _fetch_meter_with_successor(client: PsegClient, days: int) -> dict:
     """Report the account's active meter plus a successor meter."""
     return {
         "meter": "Meter 12345678",
-        "meter_ids": ["12345678", "000303817579"],
+        "meter_ids": ["12345678", "000011112222"],
         "history_14d": [],
     }
 
@@ -317,7 +317,7 @@ async def test_captcha_duplicate_sign_in_updates_existing_entry(hass: HomeAssist
     # The proven local login and the union of account meters are stored.
     assert existing.data[CONF_MYMETER_EMAIL] == FRESH_EMAIL
     assert existing.data[CONF_MYMETER_PASSWORD] == FRESH_PASSWORD
-    assert set(existing.data[CONF_KNOWN_METER_IDS]) == {"12345678", "000303817579"}
+    assert set(existing.data[CONF_KNOWN_METER_IDS]) == {"12345678", "000011112222"}
     assert PROOF not in json.dumps(dict(existing.data))
     # A disabled entry is updated only: no reload (it would set it up).
     assert reloads == []
@@ -330,11 +330,11 @@ async def test_captcha_ambiguous_duplicates_are_not_updated(hass: HomeAssistant)
     second = MockConfigEntry(
         domain=DOMAIN,
         version=2,
-        unique_id="000303817579",
+        unique_id="000011112222",
         data={
             CONF_MYMETER_EMAIL: "other@example.com",
             CONF_MYMETER_PASSWORD: "other-secret",
-            CONF_KNOWN_METER_IDS: ["000303817579", "12345678"],
+            CONF_KNOWN_METER_IDS: ["000011112222", "12345678"],
         },
     )
     second.add_to_hass(hass)
@@ -428,7 +428,7 @@ async def test_reauth_captcha_keeps_disabled_entry_and_known_meters(hass: HomeAs
         data={
             CONF_MYMETER_EMAIL: EMAIL,
             CONF_MYMETER_PASSWORD: PASSWORD,
-            CONF_KNOWN_METER_IDS: ["12345678", "000303817579"],
+            CONF_KNOWN_METER_IDS: ["12345678", "000011112222"],
         },
     )
     result = await entry.start_reauth_flow(hass)
@@ -446,7 +446,7 @@ async def test_reauth_captcha_keeps_disabled_entry_and_known_meters(hass: HomeAs
     assert done["reason"] == "reauth_successful"
     assert entry.disabled_by is ConfigEntryDisabler.USER
     assert entry.unique_id == "12345678"
-    assert set(entry.data[CONF_KNOWN_METER_IDS]) == {"12345678", "000303817579"}
+    assert set(entry.data[CONF_KNOWN_METER_IDS]) == {"12345678", "000011112222"}
     assert entry.data[CONF_MYMETER_EMAIL] == EMAIL
     assert entry.data[CONF_MYMETER_PASSWORD] == PASSWORD
 

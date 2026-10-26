@@ -1,7 +1,7 @@
-"""Offline contract tests for PSE&G portal cost (UsageType 2) and non-authoritative seam.
+"""Offline contract tests for PSE&G portal cost (UsageType 3) and non-authoritative seam.
 
 This module defines the pure offline reference validator and unit tests for RC-01:
-- Freezes the request shape and parameter validation for UsageType "1" and "2".
+- Freezes the request shape and parameter validation for UsageType "1" and "3".
 - Enforces preservation of all 13 canonical Chart form fields.
 - Verifies that the current production request builder maintains the UsageType "1" baseline.
 - Defines and enumerates the complete status vocabulary.
@@ -71,13 +71,14 @@ class CostEvidenceStatus(StrEnum):
 def validate_usage_type(usage_type: str = "1") -> str:
     """Validate usage_type parameter.
 
-    Default is '1' (Consumption). Only '1' and '2' (Cost) are valid.
+    Default is '1' (Consumption). Only '1' and '3' (Cost) are valid; the browser's
+    cost chart sends '3' (observed 2026-10-26, docs/portal-cost.md §2.1).
     """
     if not isinstance(usage_type, str):
         raise TypeError(f"usage_type must be a string, got {type(usage_type).__name__}")
-    if usage_type not in ("1", "2"):
+    if usage_type not in ("1", "3"):
         raise ValueError(
-            f"Invalid usage_type '{usage_type}': only '1' (consumption) and '2' (cost) are supported"
+            f"Invalid usage_type '{usage_type}': only '1' (consumption) and '3' (cost) are supported"
         )
     return usage_type
 
@@ -88,6 +89,7 @@ def build_chart_request_payload(
     start_str: str,
     end_str: str,
     usage_type: str = "1",
+    js_target_name: str = "StorageType",
 ) -> dict[str, str]:
     """Pure reference request builder for POST /Dashboard/Chart."""
     validated_type = validate_usage_type(usage_type)
@@ -95,7 +97,7 @@ def build_chart_request_payload(
         "__RequestVerificationToken": token,
         "UsageInterval": usage_interval,
         "UsageType": validated_type,
-        "jsTargetName": "StorageType",
+        "jsTargetName": js_target_name,
         "EnableHoverChart": "true",
         "Start": start_str,
         "End": end_str,
@@ -264,14 +266,15 @@ def validate_cost_payload(
 
 
 def test_usage_type_argument_validation() -> None:
-    """Validate usage_type parameter defaults to '1', accepts '1'/'2', and rejects others."""
+    """Validate usage_type parameter defaults to '1', accepts '1'/'3', and rejects others."""
     # Default is "1"
     assert validate_usage_type() == "1"
     assert validate_usage_type("1") == "1"
-    assert validate_usage_type("2") == "2"
+    assert validate_usage_type("3") == "3"
 
-    # Rejection of invalid types and values
-    for invalid in ("0", "3", "cost", "kwh", "", " "):
+    # Rejection of invalid types and values ("2" is the upstream cost assumption, not
+    # the browser's cost chart, which sends "3").
+    for invalid in ("0", "2", "cost", "kwh", "", " "):
         with pytest.raises(ValueError, match="Invalid usage_type"):
             validate_usage_type(invalid)
 
@@ -281,22 +284,25 @@ def test_usage_type_argument_validation() -> None:
 
 
 def test_chart_request_form_fields_preserved() -> None:
-    """All 13 canonical Chart form fields are preserved identical between UsageType '1' and '2'."""
+    """All 13 canonical Chart form fields are preserved for UsageType '1' and the cost chart."""
     token = "token_abc123"
     start = "2026-10-10"
     end = "2026-10-24"
 
     daily_kwh = build_chart_request_payload(token, USAGE_INTERVAL_DAILY, start, end, "1")
-    daily_cost = build_chart_request_payload(token, USAGE_INTERVAL_DAILY, start, end, "2")
+    daily_cost = build_chart_request_payload(
+        token, USAGE_INTERVAL_DAILY, start, end, "3", js_target_name="UsageType"
+    )
     hourly_kwh = build_chart_request_payload(token, USAGE_INTERVAL_HOURLY, start, end, "1")
-    hourly_cost = build_chart_request_payload(token, USAGE_INTERVAL_HOURLY, start, end, "2")
+    hourly_cost = build_chart_request_payload(
+        token, USAGE_INTERVAL_HOURLY, start, end, "3", js_target_name="UsageType"
+    )
 
     for payload in (daily_kwh, daily_cost, hourly_kwh, hourly_cost):
         assert set(payload.keys()) == EXPECTED_CHART_FIELDS
         assert payload["__RequestVerificationToken"] == token
         assert payload["Start"] == start
         assert payload["End"] == end
-        assert payload["jsTargetName"] == "StorageType"
         assert payload["EnableHoverChart"] == "true"
         assert payload["IsRangeOpen"] == "False"
         assert payload["MaintainMaxDate"] == "true"
@@ -306,13 +312,18 @@ def test_chart_request_form_fields_preserved() -> None:
         assert payload["ChartComparison3"] == "0"
         assert payload["ChartComparison4"] == "0"
 
-    # Verify that the ONLY difference between kWh and Cost requests is UsageType
+    for payload in (daily_kwh, hourly_kwh):
+        assert payload["jsTargetName"] == "StorageType"
+
+    # The browser's cost chart differs in exactly two fields: the usage type it asks
+    # for and the chart control it names (observed 2026-10-26).
+    for hourly_or_daily in (daily_cost, hourly_cost):
+        assert hourly_or_daily["jsTargetName"] == "UsageType"
+        assert hourly_or_daily["UsageType"] == "3"
     for k in EXPECTED_CHART_FIELDS:
-        if k == "UsageType":
-            assert daily_kwh[k] == "1"
-            assert daily_cost[k] == "2"
-        else:
-            assert daily_kwh[k] == daily_cost[k]
+        if k in ("UsageType", "jsTargetName"):
+            continue
+        assert daily_kwh[k] == daily_cost[k]
 
 
 def test_production_request_builder_kwh_baseline() -> None:

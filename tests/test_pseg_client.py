@@ -609,10 +609,10 @@ TWO_METER_CHART = {
         "series": [
             {"data": [[1792281600000, 17.6]], "showInLegend": False},  # unnamed navigator
             _meter(
-                "Meter #000303817579 (Residential Service (RS))",
+                "Meter #000011112222 (Residential Service (RS))",
                 [("10/18/2026", 17.586), ("10/19/2026", 14.5368)],
             ),
-            _meter("Meter #000126274191 (Residential Service (RS))", []),
+            _meter("Meter #000033334444 (Residential Service (RS))", []),
             {
                 "name": "Temperature",
                 "type": "spline",
@@ -630,8 +630,8 @@ def test_parse_uses_meter_with_data_when_replaced_meter_listed_last() -> None:
     assert [r["date"] for r in parsed["history_14d"]] == ["2026-10-18", "2026-10-19"]
     assert parsed["latest_kwh"] == 14.54
     assert parsed["previous_kwh"] == 17.59
-    assert parsed["meter"].startswith("Meter #000303817579")
-    assert parsed["meter_ids"] == ["000303817579", "000126274191"]
+    assert parsed["meter"].startswith("Meter #000011112222")
+    assert parsed["meter_ids"] == ["000011112222", "000033334444"]
 
 
 def test_parse_sums_both_meters_on_swap_day() -> None:
@@ -659,8 +659,8 @@ def test_history_range_reads_every_meter_series() -> None:
     chart = {
         "Data": {
             "series": [
-                _meter("Meter #000126274191 (RS)", []),
-                _meter("Meter #000303817579 (RS)", [("10/18/2026", 17.586)]),
+                _meter("Meter #000033334444 (RS)", []),
+                _meter("Meter #000011112222 (RS)", [("10/18/2026", 17.586)]),
             ]
         }
     }

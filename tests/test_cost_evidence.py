@@ -42,10 +42,14 @@ from custom_components.pseg.pseg_client import (
 
 RAW_VALID_COST_PAYLOAD = {
     "Data": {
-        "unit": "USD",
+        # Dollars are proven by the response, not assumed from the request
+        # (observed contract, docs/portal-cost.md §2.4).
+        "usageType": "Dollar",
+        "tooltipOptions": {"currency": "USD", "usageTypeDisplayName": "Dollar"},
         "series": [
             {
                 "name": "Meter #12345678",
+                "tooltip": {"valuePrefix": "$", "valueDecimals": 2},
                 "data": [
                     {
                         "x": 1729828800000,
@@ -284,7 +288,7 @@ def test_allow_redirects_false_any_30x_is_unsupported() -> None:
 
 
 def test_two_dispatch_sequence_post_then_get() -> None:
-    """NN3: Exactly one POST /Dashboard/Chart (UsageType 2) then one GET /Dashboard/ChartData."""
+    """NN3: Exactly one POST /Dashboard/Chart (UsageType 3) then one GET /Dashboard/ChartData."""
     main_cookies = requests.cookies.RequestsCookieJar()
     permit = _make_dummy_permit(usage_interval=USAGE_INTERVAL_HOURLY)
 
@@ -306,7 +310,7 @@ def test_two_dispatch_sequence_post_then_get() -> None:
         post_req = mock.request_history[0]
         assert post_req.method == "POST"
         parsed_body = urllib.parse.parse_qs(post_req.text)
-        assert parsed_body["UsageType"] == ["2"]
+        assert parsed_body["UsageType"] == ["3"]
         assert parsed_body["UsageInterval"] == [USAGE_INTERVAL_HOURLY]
         assert parsed_body["__RequestVerificationToken"] == ["token_xyz"]
 
@@ -624,7 +628,8 @@ def test_diagnostics_quarantines_synthetic_secret_sentinels() -> None:
         "password": "LEAKED_PASSWORD_SENTINEL",
         "token": "LEAKED_TOKEN_SENTINEL",
         "Data": {
-            "unit": "USD",
+            "usageType": "Dollar",
+            "tooltipOptions": {"currency": "USD", "usageTypeDisplayName": "Dollar"},
             "secret_note": "LEAKED_SECRET_NOTE",
             "series": [
                 {
@@ -675,7 +680,8 @@ def test_diagnostics_oversized_payload_flags_truncated_and_non_promotable() -> N
     permit = _make_dummy_permit()
     oversized_series = {
         "Data": {
-            "unit": "USD",
+            "usageType": "Dollar",
+            "tooltipOptions": {"currency": "USD", "usageTypeDisplayName": "Dollar"},
             "series": [
                 {"name": f"Meter #1234567{i}", "data": [{"x": 1000, "y": 1.0}]}
                 for i in range(5)  # 5 series > MAX_COST_SERIES (4)

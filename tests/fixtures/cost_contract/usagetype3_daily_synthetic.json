@@ -1,0 +1,366 @@
+{
+  "_capture": {
+    "source": "synthetic fixture reconstructed from a private browser capture of the MyMeter cost chart; see PROVENANCE.md",
+    "private": "raw capture is private and is not in git"
+  },
+  "AjaxResults": [],
+  "Data": {
+    "colors": [
+      "#39D0DE",
+      "#39D0DE",
+      "#4B898F",
+      "#32C853",
+      "#ccc"
+    ],
+    "series": [
+      {
+        "dataGrouping": {
+          "enabled": false
+        },
+        "showInLegend": true,
+        "visible": false,
+        "data": [
+          [
+            1764547200000,
+            1.11
+          ],
+          [
+            1764633600000,
+            2.22
+          ],
+          [
+            1764720000000,
+            3.33
+          ],
+          [
+            1789257600000,
+            4.44
+          ],
+          [
+            1789344000000,
+            5.55
+          ],
+          [
+            1789430400000,
+            6.66
+          ]
+        ],
+        "showMinMax_MM": false,
+        "_note": "synthetic fixture: navigator series carries 6 of 298 points, 2-decimal values"
+      },
+      {
+        "name": "Meter #000012345678 (Residential Service (RS))",
+        "tooltip": {
+          "valuePrefix": "$",
+          "valueDecimals": 2
+        },
+        "type": "column",
+        "dataGrouping": {
+          "enabled": false
+        },
+        "showInLegend": false,
+        "visible": true,
+        "data": [
+          {
+            "x": 1788220800000,
+            "y": 3.751234567890123,
+            "hs": {
+              "start": "09/01/2026",
+              "end": "09/02/2026"
+            },
+            "xs": 1788220800000,
+            "xe": 1788307199999,
+            "v": false
+          },
+          {
+            "x": 1788307200000,
+            "y": 4.128765432109876,
+            "hs": {
+              "start": "09/02/2026",
+              "end": "09/03/2026"
+            },
+            "xs": 1788307200000,
+            "xe": 1788393599999,
+            "v": false
+          },
+          {
+            "x": 1788393600000,
+            "y": 2.9876543210987654,
+            "hs": {
+              "start": "09/03/2026",
+              "end": "09/04/2026"
+            },
+            "xs": 1788393600000,
+            "xe": 1788479999999,
+            "v": false
+          },
+          {
+            "x": 1788480000000,
+            "y": 5.24680135792468,
+            "hs": {
+              "start": "09/04/2026",
+              "end": "09/05/2026"
+            },
+            "xs": 1788480000000,
+            "xe": 1788566399999,
+            "v": false
+          },
+          {
+            "x": 1788566400000,
+            "y": 4.86420975318642,
+            "hs": {
+              "start": "09/05/2026",
+              "end": "09/06/2026"
+            },
+            "xs": 1788566400000,
+            "xe": 1788652799999,
+            "v": false
+          },
+          {
+            "x": 1788652800000,
+            "y": 3.109876543210987,
+            "hs": {
+              "start": "09/06/2026",
+              "end": "09/07/2026"
+            },
+            "xs": 1788652800000,
+            "xe": 1788739199999,
+            "v": false
+          },
+          {
+            "x": 1788739200000,
+            "y": 6.357913579135792,
+            "hs": {
+              "start": "09/07/2026",
+              "end": "09/08/2026"
+            },
+            "xs": 1788739200000,
+            "xe": 1788825599999,
+            "v": false
+          },
+          {
+            "x": 1788825600000,
+            "y": 5.024680246802468,
+            "hs": {
+              "start": "09/08/2026",
+              "end": "09/09/2026"
+            },
+            "xs": 1788825600000,
+            "xe": 1788911999999,
+            "v": false
+          },
+          {
+            "x": 1788912000000,
+            "y": 4.24680246802468,
+            "hs": {
+              "start": "09/09/2026",
+              "end": "09/10/2026"
+            },
+            "xs": 1788912000000,
+            "xe": 1788998399999,
+            "v": false
+          },
+          {
+            "x": 1788998400000,
+            "y": 3.642086420864208,
+            "hs": {
+              "start": "09/10/2026",
+              "end": "09/11/2026"
+            },
+            "xs": 1788998400000,
+            "xe": 1789084799999,
+            "v": false
+          },
+          {
+            "x": 1789084800000,
+            "y": 5.531086420864208,
+            "hs": {
+              "start": "09/11/2026",
+              "end": "09/12/2026"
+            },
+            "xs": 1789084800000,
+            "xe": 1789171199999,
+            "v": false
+          },
+          {
+            "x": 1789171200000,
+            "y": 4.975308642097531,
+            "hs": {
+              "start": "09/12/2026",
+              "end": "09/13/2026"
+            },
+            "xs": 1789171200000,
+            "xe": 1789257599999,
+            "v": false
+          },
+          {
+            "x": 1789257600000,
+            "y": 3.864197530864197,
+            "hs": {
+              "start": "09/13/2026",
+              "end": "09/14/2026"
+            },
+            "xs": 1789257600000,
+            "xe": 1789343999999,
+            "v": false
+          },
+          {
+            "x": 1789344000000,
+            "y": 5.185185185185185,
+            "hs": {
+              "start": "09/14/2026",
+              "end": "09/15/2026"
+            },
+            "xs": 1789344000000,
+            "xe": 1789430399999,
+            "v": false
+          },
+          {
+            "x": 1789430400000,
+            "y": 4.320987654320988,
+            "hs": {
+              "start": "09/15/2026",
+              "end": "09/16/2026"
+            },
+            "xs": 1789430400000,
+            "xe": 1789516799999,
+            "v": false
+          }
+        ],
+        "showHoverChart": true,
+        "dateFormatString": "%A, %b %e, %Y",
+        "showMinMax_MM": false
+      },
+      {
+        "name": "Meter #000087654321 (Residential Service (RS))",
+        "tooltip": {
+          "valuePrefix": "$",
+          "valueDecimals": 2
+        },
+        "type": "column",
+        "dataGrouping": {
+          "enabled": false
+        },
+        "showInLegend": false,
+        "visible": true,
+        "data": [],
+        "showHoverChart": true,
+        "showMinMax_MM": false
+      },
+      {
+        "name": "Temperature",
+        "tooltip": {
+          "valueSuffix": " \u00b0F",
+          "valueDecimals": 0
+        },
+        "type": "spline",
+        "yAxis": 1,
+        "dataGrouping": {
+          "enabled": false
+        },
+        "showInLegend": true,
+        "visible": true,
+        "lineWidth": 3,
+        "data": [
+          {
+            "x": 1788220800000,
+            "y": 68.0,
+            "tr": "72\u00b0 | 58\u00b0 | 65\u00b0F"
+          },
+          {
+            "x": 1789430400000,
+            "y": 63.0,
+            "tr": "70\u00b0 | 55\u00b0 | 63\u00b0F"
+          }
+        ],
+        "dateFormatString": "%A, %b %e, %Y",
+        "showMinMax_MM": false,
+        "_note": "synthetic fixture: temperature carries first and last of 15 points"
+      },
+      {
+        "name": "Energy Marker",
+        "type": "flags",
+        "dataGrouping": {
+          "enabled": false
+        },
+        "showInLegend": true,
+        "visible": true,
+        "data": [],
+        "shape": "circlepin",
+        "showMinMax_MM": false
+      }
+    ],
+    "usageType": "Dollar",
+    "maxUsageDate": 1788739200000,
+    "maxUsage": 6.357913579135792,
+    "minUsageDate": 1788393600000,
+    "minUsage": 2.9876543210987654,
+    "xAxis": {
+      "minRange": 1123200000,
+      "maxRange": 116035200000,
+      "startOfWeek": 1
+    },
+    "yAxis": [
+      {
+        "title": {
+          "text": "$"
+        }
+      }
+    ],
+    "chartLastMin": 1788220800000,
+    "chartLastMax": 1789430400000,
+    "useRangeMin": 1764547200000,
+    "useRangeMax": 1789430400000,
+    "rangeSelector": {
+      "buttons": [
+        {
+          "type": "day",
+          "count": 13,
+          "text": "2w"
+        },
+        {
+          "type": "month",
+          "count": 1,
+          "text": "1m"
+        },
+        {
+          "type": "month",
+          "count": 3,
+          "text": "3m"
+        },
+        {
+          "type": "year",
+          "count": 1,
+          "text": "1y"
+        },
+        {
+          "type": "year",
+          "count": 2,
+          "text": "2y"
+        }
+      ],
+      "inputEnabled": false
+    },
+    "plotOptions": {
+      "column": {
+        "stacking": "normal"
+      },
+      "series": {}
+    },
+    "tooltipOptions": {
+      "meterCount": 2,
+      "decimalFormat": 2,
+      "isSideBySide": false,
+      "hideAsteriskForEstimatedRead": false,
+      "enableHoverChart": true,
+      "storageType": "daily",
+      "additiveUsageType": true,
+      "averagedUsageType": false,
+      "usageTypeDisplayName": "Dollar",
+      "locale": "en-US",
+      "currency": "USD",
+      "currencyPositivePattern": "0",
+      "billingIncludeEndDate": 0
+    }
+  }
+}

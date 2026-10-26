@@ -41,12 +41,16 @@ def permit():
 
 
 def payload(points=None):
+    """ChartData body in the observed cost shape: dollars proven by the response itself."""
     return {
         "Data": {
-            "unit": "USD",
+            "usageType": "Dollar",
+            "tooltipOptions": {"currency": "USD", "usageTypeDisplayName": "Dollar"},
+            "yAxis": [{"title": {"text": "$"}}],
             "series": [
                 {
                     "name": "Meter #12345678",
+                    "tooltip": {"valuePrefix": "$", "valueDecimals": 2},
                     "data": points if points is not None else [{"x": 1000, "y": "1.25"}],
                 }
             ],
@@ -262,7 +266,7 @@ def test_close_failure_never_logs_exception_text(caplog):
 
 
 def test_json_numeric_precision_is_preserved():
-    raw = b'{"Data":{"unit":"USD","series":[{"name":"Meter #12345678","data":[{"x":1000,"y":0.12345678901234567890123456789}]}]}}'
+    raw = b'{"Data":{"usageType":"Dollar","tooltipOptions":{"currency":"USD"},"series":[{"name":"Meter #12345678","data":[{"x":1000,"y":0.12345678901234567890123456789}]}]}}'
     post = requests.Response()
     post.status_code = 200
     post._content = b"ok"

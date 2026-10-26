@@ -1,6 +1,7 @@
 # PSE&G Portal Cost Contract and Non-Authoritative Request Seam
 
-This document specifies the technical contract for PSE&G portal dollar data (`UsageType: "2"`),
+This document specifies the technical contract for PSE&G portal dollar data (`UsageType: "3"`,
+the value the browser's cost chart sends — see §2.4 for the observed contract),
 establishing the boundaries, request parameters, status vocabulary, data quarantine rules, and
 evidence requirements for Phase A (v1.7.0 evidence-only capture) and future Phase B (v1.8.0 statistics).
 
@@ -17,7 +18,7 @@ The integration distinguishes between two distinct cost concepts:
    (in cents). This series remains intact and continues to provide immediate, continuous cost tracking
    for Home Assistant Energy.
 2. **PSE&G Portal-Reported Cost (`pseg:<meter>_energy_cost_actual`)**: Sourced directly from the PSE&G
-   portal's billing chart data (`UsageType: "2"`). It is labeled **PSE&G portal-reported cost** until
+   portal's billing chart data (`UsageType: "3"`). It is labeled **PSE&G portal-reported cost** until
    comprehensive charge coverage across all bill components is formally verified against real utility bills.
 
 ### Rollout Phases
@@ -37,22 +38,29 @@ for consumption data, parameterized by `UsageType`.
 ### 2.1 UsageType Specification
 - `UsageType` parameter accepts only two valid string values:
   - `"1"`: Consumption (`kWh`) — default for all existing calls.
-  - `"2"`: Cost (`USD` / `$`).
+  - `"3"`: Cost (`USD` / `$`).
 - Validation rules:
   - Default value is `"1"`.
-  - Allowed values are strictly `{"1", "2"}`.
-  - Any other value (e.g., `"0"`, `"3"`, `"cost"`, `1`, `None`) is rejected with a validation error.
+  - Allowed values are strictly `{"1", "3"}`.
+  - Any other value (e.g., `"0"`, `"2"`, `"cost"`, `1`, `None`) is rejected with a validation error.
+
+**Correction (v1.7.2): `"2"` → `"3"`.** Releases 1.7.0 and 1.7.1 sent `UsageType: "2"`. That value was
+an upstream assumption (`sidprax/ha-pseg`), never observed, and the first live sample it produced proved
+no unit at all (`wrong_unit` / `currency_unproven`). The MyMeter dashboard's cost chart was then captured
+from the browser (2026-10-26) and it sends `UsageType: "3"` with `jsTargetName: "UsageType"`. The
+consumption chart keeps `UsageType: "1"` with `jsTargetName: "StorageType"`, so `jsTargetName` is not a
+free-form field: it names the chart control that changed.
 
 ### 2.2 Form Field Invariant
-The POST to `/Dashboard/Chart` MUST preserve all fourteen canonical form fields (as built today in `custom_components/pseg/pseg_client.py:2217-2232` `_fetch_chart_json` for the daily/hourly poll legs, and `:1895-1910` for backfill chunks; intervals from `custom_components/pseg/const.py` `USAGE_INTERVAL_DAILY`/`USAGE_INTERVAL_HOURLY`). Both builders hard-code `UsageType: "1"` (`:2220`, `:1898`). No field may be omitted,
+The POST to `/Dashboard/Chart` MUST preserve all fourteen canonical form fields (as built today in `custom_components/pseg/pseg_client.py:2217-2232` `_fetch_chart_json` for the daily/hourly poll legs, and `:1895-1910` for backfill chunks; intervals from `custom_components/pseg/const.py` `USAGE_INTERVAL_DAILY`/`USAGE_INTERVAL_HOURLY`). Both consumption builders hard-code `UsageType: "1"` (`:2220`, `:1898`). No field may be omitted,
 renamed, or altered when requesting cost data, ensuring identical request construction:
 
 | Field Name | Type | Value / Specification |
 |---|---|---|
 | `__RequestVerificationToken` | `str` | Antiforgery token from the active `/Dashboard` page |
 | `UsageInterval` | `str` | `"6"` for Daily, `"5"` for Hourly |
-| `UsageType` | `str` | `"1"` (Consumption) or `"2"` (Cost) |
-| `jsTargetName` | `str` | `"StorageType"` |
+| `UsageType` | `str` | `"1"` (Consumption) or `"3"` (Cost) |
+| `jsTargetName` | `str` | `"StorageType"` (Consumption) or `"UsageType"` (Cost) |
 | `EnableHoverChart` | `str` | `"true"` |
 | `Start` | `str` | Start date formatted as `YYYY-MM-DD` |
 | `End` | `str` | End date formatted as `YYYY-MM-DD` |
@@ -64,8 +72,7 @@ renamed, or altered when requesting cost data, ensuring identical request constr
 | `ChartComparison3` | `str` | `"0"` |
 | `ChartComparison4` | `str` | `"0"` |
 
-### 2.3 Non-Authoritative Transport Seam
-Cost sampling runs under strict isolation within the coordinator poll:
+### 2.3 Non-Authoritative Transport SeamCost sampling runs under strict isolation within the coordinator poll:
 - **Two extra dispatches**: One POST `/Dashboard/Chart` followed by one GET `/Dashboard/ChartData`.
 - **Locked sequence**: Executed within the client lock (`_locked`), immediately following the successful
   authoritative daily and hourly consumption fetches.
@@ -81,6 +88,62 @@ Cost sampling runs under strict isolation within the coordinator poll:
     in evidence mode and do NOT invalidate the authoritative session or disrupt kWh sensor updates.
   - Never writes to recorder statistics or the version-2 statistics store.
 
+### 2.4 Observed Contract (browser capture, 2026-10-26)
+
+Everything in this section was observed from one real session, not assumed. The raw capture is private
+(real meter numbers and real dollar values), is stored outside this repository, and is **not** in git. A
+synthetic fixture with the same structure lives in
+`tests/fixtures/cost_contract/usagetype3_daily_synthetic.json` (see its `PROVENANCE.md`).
+
+**Request** — `POST /Dashboard/Chart`, form-encoded, exactly the fourteen fields of §2.2 with
+`UsageType: "3"`, `jsTargetName: "UsageType"` and `UsageInterval: "6"` for the daily chart, followed by
+`GET /Dashboard/ChartData`. The daily cost window aligns with the daily kWh window: `x` is the day's
+`00:00 UTC`, `hs.start`/`hs.end` are date-only `MM/DD/YYYY` labels with `hs.end` one day after
+`hs.start`, `xs == x`, `xe == x + 86399999`, and `v` is `false`.
+
+**Response** — `{"_capture": …, "AjaxResults": [], "Data": {…}}`. `Data` carries `colors`, `series`,
+`usageType`, `maxUsageDate`, `maxUsage`, `minUsageDate`, `minUsage`, `xAxis`, `yAxis`, `chartLastMin`,
+`chartLastMax`, `useRangeMin`, `useRangeMax`, `rangeSelector`, `plotOptions` and `tooltipOptions`. The
+series list is, in order:
+
+| # | Series | Role |
+|---|---|---|
+| 0 | unnamed, `visible: false`, points as `[x, y]` pairs | hidden navigator: ignore |
+| 1 | `Meter #<digits> (…)`, `type: "column"`, `tooltip.valuePrefix: "$"` | authoritative meter |
+| 2 | `Meter #<digits> (…)`, `type: "column"` | second meter, may legitimately be empty |
+| 3 | `Temperature`, `type: "spline"`, `yAxis: 1` | weather overlay: ignore |
+| 4 | `Energy Marker`, `type: "flags"` | event flags: ignore |
+
+Only series matching `_METER_SERIES` (`^\s*Meter #(\d+)`) are evidence, and only when the meter id is in
+the authoritative set proven by the kWh leg (§4.2). Point values are parsed as `Decimal` at source
+precision; the extra point fields `xs`, `xe` and `v` are dropped and counted, never retained.
+
+**Currency proof.** `UsageType` asks for a chart; it does not guarantee the response is dollars, so the
+response must prove it:
+
+- **Proof** (both required):
+  - `Data.tooltipOptions.currency == "USD"` — exact and case-sensitive, and
+  - `Data.usageType == "Dollar"` **or** `Data.tooltipOptions.usageTypeDisplayName == "Dollar"`.
+- **Corroboration only, never sufficient alone**: `Data.yAxis[0].title.text == "$"` and a meter series
+  `tooltip.valuePrefix == "$"`. A chart can be labelled `$` and still encode something else; a label is
+  not a unit.
+- **Contradiction** — any present unit signal that is not dollars rejects the sample as
+  `wrong_unit` / `unsupported_unit`: another currency (e.g. `EUR`), a lower-case or otherwise inexact
+  currency token, a usage type that is not `Dollar` (e.g. `kWh`), a y-axis title, a legacy unit key or a
+  meter-series prefix naming another unit.
+- **Nothing present** → `wrong_unit` / `currency_unproven`. Absence is never proof, and this is exactly
+  what the first live sample (1.7.0, `UsageType: "2"`) produced.
+
+**Meaning of "real cost" here.** Over the observed window, every daily portal dollar value equalled that
+day's kWh multiplied by one constant per-kWh rate — the ratio was stable to the 2-decimal precision of the
+kWh values, and no fixed charge, delivery charge, rider, tax or net-metering adjustment appeared. So the
+portal's "Dollar" series is the **energy-supply charge at the portal's rate**, not the customer's bill.
+It remains labelled **PSE&G portal-reported cost**; full-bill coverage stays unproven (§7.1).
+
+**Hourly cost is still unproven.** The hourly slot keeps `UsageInterval: "5"` and the same `UsageType: "3"`
+payload, but nothing observed says the portal publishes hourly dollars. It may `HOLD`; daily acceptance
+never carries over (see `v1.8.0` gates in §8.4).
+
 ---
 
 ## 3. Status Vocabulary
@@ -94,7 +157,7 @@ All cost evidence evaluations produce a distinct, typed status code:
 | `unsupported` | Unsupported endpoint or flow | Portal returned HTTP 30x redirect, or account lacks cost chart feature |
 | `auth_rejected` | Authentication rejected | HTTP 401, 403, or login page detected on the cost request |
 | `wrong_meter` | Meter identity mismatch | Series meter ID does not match the authoritative kWh meter, or attempts to discover/enlarge meters |
-| `wrong_unit` | Incompatible unit of measure | Unit token is present and not `USD` or `$` (e.g., `EUR`, `kWh`) |
+| `wrong_unit` | Incompatible unit of measure | Dollars are not proven (`currency_unproven`), or a present unit signal contradicts them (`unsupported_unit`: another currency, a non-`Dollar` usage type, a non-`$` axis title or meter-series prefix) |
 | `budget_exhausted` | Sampling budget spent | The durable 1-attempt/day sampling permit was already spent |
 | `truncated` | Data exceeded safety bounds | Total points > 1,500, series > 4, or payload size > 256 KiB |
 | `ok` / `valid` | Healthy cost evidence | All structural, identity, and numeric constraints satisfied |
@@ -156,7 +219,8 @@ Any data point violating structural or mathematical validity is quarantined:
   are explicitly supported and verified.
 - **Duplicate timestamps or dates**: Multiple points sharing identical `x` timestamps or date keys
   are quarantined as `malformed`.
-- **Unknown currencies**: Any unit token other than `USD` or `$` is flagged as `wrong_unit`.
+- **Unknown currencies**: dollars must be proven from the response (§2.4); a payload that proves nothing is
+  `currency_unproven`, and any present token that contradicts dollars is `unsupported_unit`.
 
 ---
 
@@ -185,15 +249,18 @@ They remain explicitly **UNKNOWN** until observed across live, verified samples:
    - *Unknown*: Does the portal dollar series include delivery charges, customer fixed charges, state riders,
      clean energy taxes, and solar net-metering credits, or does it reflect only energy supply charges?
    - *Requirement*: Label remains **PSE&G portal-reported cost** until a user-provided redacted bill
-     proves line-item equivalence over an entire billing cycle.
+     proves line-item equivalence over an entire billing cycle. The observed window (§2.4) showed no
+     charge of any kind beyond kWh × the portal's flat per-kWh rate, so fixed/rider/tax coverage is not
+     merely unverified — it was absent for the days captured.
 2. **Hourly Cost Availability**:
-   - *Unknown*: Does PSE&G publish hourly cost points (`UsageInterval: "5"`, `UsageType: "2"`) for all
+   - *Unknown*: Does PSE&G publish hourly cost points (`UsageInterval: "5"`, `UsageType: "3"`) for all
      residential smart-meter customers, or is cost restricted to daily aggregates (`UsageInterval: "6"`)?
    - *Requirement*: Daily and hourly evidence gates remain decoupled. Hourly cost is not assumed to exist
      simply because hourly kWh exists.
-3. **UsageType 2 Timestamp Semantics**:
-   - *Unknown*: Does point timestamp `x` represent America/New_York wall-clock hour START encoded as UTC ms
-     (as proven for UsageType 1), or interval END, or true UTC?
+3. **Cost Timestamp Semantics (`UsageType: "3"`)**:
+   - *Unknown*: Does an hourly cost point timestamp `x` represent America/New_York wall-clock hour START
+     encoded as UTC ms (as proven for UsageType 1), or interval END, or true UTC? Daily cost points are
+     observed on day `00:00 UTC` with date-only `hs` labels (§2.4); that says nothing about hourly points.
    - *Requirement*: UsageType 1 timestamp proof (KB `5e0c2b1a-7f3d-4a91-9c2e-20261025a001`) must NOT be
      blindly imported. Independent hourly sum and start-alignment checks are required.
 4. **Rounding Quantum and Precision**:
@@ -214,8 +281,10 @@ They remain explicitly **UNKNOWN** until observed across live, verified samples:
 
 ## 8. v1.7.0 Release Scope — Evidence Only
 
-Release 1.7.0 is the first release that talks to the portal cost chart
-(`UsageType: "2"`). Its scope is deliberately narrow: **collect bounded evidence,
+Release 1.7.0 is the first release that talks to the portal cost chart, using the
+then-assumed `UsageType: "2"`; **1.7.2 corrects it to `"3"`, the value the browser's
+cost chart sends (§2.1, §2.4)**, and proves dollars from the response instead of
+assuming them. Its scope is deliberately narrow: **collect bounded evidence,
 change nothing else**. This section is the operator-facing summary; the request
 seam, status vocabulary, identity rules, numeric quarantine and sample bounds are
 defined in sections 2–6 above.

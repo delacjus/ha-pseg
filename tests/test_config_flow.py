@@ -332,7 +332,7 @@ async def test_user_flow_duplicate_aborts(hass: HomeAssistant) -> None:
         assert result["reason"] == "already_configured"
 
 
-@pytest.mark.parametrize("known_ids", [[], ["000303817579"]])
+@pytest.mark.parametrize("known_ids", [[], ["000011112222"]])
 async def test_user_flow_aborts_for_any_existing_account_meter(
     hass: HomeAssistant, known_ids: list[str]
 ) -> None:
@@ -340,7 +340,7 @@ async def test_user_flow_aborts_for_any_existing_account_meter(
     entry = MockConfigEntry(
         domain=DOMAIN,
         version=2,
-        unique_id="000126274191",
+        unique_id="000033334444",
         data={CONF_KNOWN_METER_IDS: known_ids},
     )
     entry.add_to_hass(hass)
@@ -352,8 +352,8 @@ async def test_user_flow_aborts_for_any_existing_account_meter(
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
             return_value={
-                "meter": "Meter #000303817579 (RS)",
-                "meter_ids": ["000303817579", "000126274191"] if not known_ids else ["000303817579"],
+                "meter": "Meter #000011112222 (RS)",
+                "meter_ids": ["000011112222", "000033334444"] if not known_ids else ["000011112222"],
             },
         ),
     ):
@@ -463,21 +463,21 @@ async def test_local_login_matches_existing_entry_by_known_meter(hass: HomeAssis
     """Identity can match a previously seen meter, not only the entry's unique_id."""
     entry = _existing_local_entry(
         hass,
-        unique_id="000126274191",
-        title="PSE&G (000126274191)",
+        unique_id="000033334444",
+        title="PSE&G (000033334444)",
         data={
-            CONF_METER_ID: "000126274191",
-            CONF_KNOWN_METER_IDS: ["000126274191", "000303817579"],
+            CONF_METER_ID: "000033334444",
+            CONF_KNOWN_METER_IDS: ["000033334444", "000011112222"],
         },
     )
     reloads: list[str] = []
     with patch.object(hass.config_entries, "async_schedule_reload", reloads.append):
-        result = await _run_local_add_flow(hass, "000303817579", ["000303817579"])
+        result = await _run_local_add_flow(hass, "000011112222", ["000011112222"])
 
     assert result["reason"] == "login_updated_existing"
     assert hass.config_entries.async_entries(DOMAIN) == [entry]
-    assert entry.unique_id == "000126274191"
-    assert set(entry.data[CONF_KNOWN_METER_IDS]) == {"000126274191", "000303817579"}
+    assert entry.unique_id == "000033334444"
+    assert set(entry.data[CONF_KNOWN_METER_IDS]) == {"000033334444", "000011112222"}
     assert entry.data[CONF_MYMETER_EMAIL] == NEW_EMAIL
     assert reloads == []
 
@@ -713,7 +713,7 @@ async def test_reauth_accepts_replaced_meter_still_on_account(hass: HomeAssistan
     entry = MockConfigEntry(
         domain=DOMAIN,
         version=2,
-        unique_id="000126274191",
+        unique_id="000033334444",
         data={CONF_OKTA_COOKIES: "idx=old"},
     )
     entry.add_to_hass(hass)
@@ -728,8 +728,8 @@ async def test_reauth_accepts_replaced_meter_still_on_account(hass: HomeAssistan
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
             return_value={
-                "meter": "Meter #000303817579 (Residential Service (RS))",
-                "meter_ids": ["000303817579", "000126274191"],
+                "meter": "Meter #000011112222 (Residential Service (RS))",
+                "meter_ids": ["000011112222", "000033334444"],
             },
         ),
         patch("custom_components.pseg.async_setup_entry", return_value=True),
@@ -751,8 +751,8 @@ async def test_reauthentication_survives_removed_old_meter(
     entry = MockConfigEntry(
         domain=DOMAIN,
         version=2,
-        unique_id="000126274191",
-        data={CONF_KNOWN_METER_IDS: ["000126274191", "000303817579"]},
+        unique_id="000033334444",
+        data={CONF_KNOWN_METER_IDS: ["000033334444", "000011112222"]},
     )
     entry.add_to_hass(hass)
     if source == "reauth":
@@ -769,8 +769,8 @@ async def test_reauthentication_survives_removed_old_meter(
         patch(
             "custom_components.pseg.pseg_client.PsegClient.fetch_energy_data",
             return_value={
-                "meter": "Meter #000303817579 (RS)",
-                "meter_ids": ["000303817579", "000999999999"],
+                "meter": "Meter #000011112222 (RS)",
+                "meter_ids": ["000011112222", "000999999999"],
             },
         ),
         patch("custom_components.pseg.async_setup_entry", return_value=True),
@@ -780,9 +780,9 @@ async def test_reauthentication_survives_removed_old_meter(
         )
     assert updated["type"] == FlowResultType.ABORT
     assert updated["reason"] == f"{source}_successful"
-    assert entry.unique_id == "000126274191"
+    assert entry.unique_id == "000033334444"
     assert set(entry.data[CONF_KNOWN_METER_IDS]) == {
-        "000126274191", "000303817579", "000999999999"
+        "000033334444", "000011112222", "000999999999"
     }
 
 

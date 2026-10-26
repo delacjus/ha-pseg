@@ -4,7 +4,8 @@ This module implements RC-02:
 - Bounded, isolated cost sampler inside the locked client sequence.
 - Uses a short-lived AllowlistedSession with RejectingCookieJar (rejects response cookies).
 - allow_redirects=False (any 30x HTTP response is an immediate evidence rejection).
-- Two-dispatch sequence: POST /Dashboard/Chart (UsageType "2") then GET /Dashboard/ChartData.
+- Two-dispatch sequence: POST /Dashboard/Chart (UsageType "3", the browser's cost chart)
+  then GET /Dashboard/ChartData.
 - 10-second whole-pair deadline with watchdog timer and 1 MiB max bytes.
 - Fixed evidence status vocabulary; failures never fail a healthy kWh poll or alter auth metadata.
 - Durable auth-free evidence Store managing one reserved sampling permit per entry per NY day.
@@ -47,6 +48,7 @@ from .const import (
     COST_MODE_EVIDENCE,
     COST_MODE_IMPORT,
     COST_MODE_OFF,
+    JS_TARGET_USAGE_TYPE,
     PORTAL_BASE_URL,
     PORTAL_HOST,
     USAGE_INTERVAL_DAILY,
@@ -118,6 +120,19 @@ _SHARED_STORE_LOCKS_KEY = "pseg_cost_evidence_shared_locks"
 REASON_TRUNCATED_BODY = "truncated_body"
 
 _DATE_REGEX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Observed dollar contract (portal capture 2026-10-26, docs/portal-cost.md §2.4).
+# The cost chart proves its own unit inside ChartData; the request guarantees nothing:
+#   Data.tooltipOptions.currency              "USD"     (exact, case-sensitive)
+#   Data.usageType / ...usageTypeDisplayName  "Dollar"
+#   Data.yAxis[0].title.text                  "$"       (corroborates only)
+#   meter series tooltip.valuePrefix          "$"       (corroborates only)
+# Everything else is a guess: an unobserved key may REFUTE a unit, never prove one.
+CURRENCY_USD_TOKEN = "USD"
+USAGE_DISPLAY_DOLLAR = "Dollar"
+DOLLAR_TOKENS = ("USD", "$")
+# Unit keys nothing in the observed cost chart emits. Kept as refutation-only signals.
+_LEGACY_UNIT_KEYS = ("unit", "unitOfMeasure", "yAxisTitle")
 
 
 @dataclass(frozen=True)
@@ -829,6 +844,86 @@ def _parse_and_format_date(val: Any) -> str | None:
     return None
 
 
+def _text_token(value: Any) -> str | None:
+    """Return a stripped, non-empty string signal; None when absent or not text.
+
+    Only strings count as unit evidence: a number or a nested object at a unit key is
+    not a signal the portal made, so it can neither prove nor refute a currency.
+    """
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    return token or None
+
+
+def _axis_unit_token(data_block: dict[str, Any]) -> str | None:
+    """Return ``Data.yAxis[0].title.text`` as a token signal, if it is text."""
+    y_axis = data_block.get("yAxis")
+    if not isinstance(y_axis, list) or not y_axis or not isinstance(y_axis[0], dict):
+        return None
+    title = y_axis[0].get("title")
+    if not isinstance(title, dict):
+        return None
+    return _text_token(title.get("text"))
+
+
+def _meter_series_prefix(series_item: dict[str, Any]) -> str | None:
+    """Return the tooltip value prefix of an authoritative-shaped meter series."""
+    tooltip = series_item.get("tooltip")
+    if not isinstance(tooltip, dict):
+        return None
+    return _text_token(tooltip.get("valuePrefix"))
+
+
+def currency_reason(data_block: dict[str, Any], raw_series: list[Any]) -> str | None:
+    """Judge the observed dollar contract for one ChartData ``Data`` block.
+
+    Returns None when USD is proven, otherwise a fixed reason code:
+
+    * ``unsupported_unit`` -- some present unit signal says something other than
+      dollars: another currency, a usage type that is not ``Dollar`` (e.g. ``kWh``),
+      a y-axis title, a legacy unit key or a meter-series prefix that is not ``USD``
+      or ``$``. One contradiction is enough; the rest are not weighed against it.
+    * ``currency_unproven`` -- no signal contradicts, but the pair that proves dollars
+      (exact currency plus an exact dollar usage name) is incomplete. Absence is never
+      proof, so a missing currency, a missing usage type or a bare ``$`` label alone
+      stays unproven.
+
+    Corroborating strings (axis title, meter-series prefix) can only reject: the chart
+    is dollar-denominated only when the block says so itself.
+    """
+    tooltip_options = data_block.get("tooltipOptions")
+    if not isinstance(tooltip_options, dict):
+        tooltip_options = {}
+
+    currency = _text_token(tooltip_options.get("currency"))
+    usage_type = _text_token(data_block.get("usageType"))
+    display_name = _text_token(tooltip_options.get("usageTypeDisplayName"))
+
+    signals: list[str | None] = [
+        _axis_unit_token(data_block),
+        *(_text_token(data_block.get(key)) for key in _LEGACY_UNIT_KEYS),
+        *(
+            _meter_series_prefix(item)
+            for item in raw_series
+            if isinstance(item, dict) and _METER_SERIES.match(str(item.get("name") or ""))
+        ),
+    ]
+
+    contradicted = (
+        any(token is not None and token not in DOLLAR_TOKENS for token in signals)
+        or (currency is not None and currency != CURRENCY_USD_TOKEN)
+        or (usage_type is not None and usage_type != USAGE_DISPLAY_DOLLAR)
+        or (display_name is not None and display_name != USAGE_DISPLAY_DOLLAR)
+    )
+    if contradicted:
+        return REASON_UNSUPPORTED_UNIT
+
+    if currency == CURRENCY_USD_TOKEN and USAGE_DISPLAY_DOLLAR in (usage_type, display_name):
+        return None
+    return REASON_CURRENCY_UNPROVEN
+
+
 def validate_and_sanitize_cost_payload(
     payload: Any,
     authoritative_meters: set[str] | list[str],
@@ -890,26 +985,12 @@ def validate_and_sanitize_cost_payload(
             False,
         )
 
-    # Unit / Currency check: USD must be PROVEN from closed set ("USD", "$")
-    proven_usd = False
-    for unit_key in ("unit", "unitOfMeasure", "currency", "yAxisTitle"):
-        val = data_block.get(unit_key)
-        if val is None or not str(val).strip():
-            continue
-        if str(val).strip().upper() not in ("USD", "$"):
-            return (
-                CostEvidenceStatus.WRONG_UNIT,
-                {
-                    "status": CostEvidenceStatus.WRONG_UNIT.value,
-                    "reason": REASON_UNSUPPORTED_UNIT,
-                },
-                False,
-            )
-        proven_usd = True
-    if not proven_usd:
+    # Unit / currency gate: the response must prove dollars (see currency_reason).
+    unit_reason = currency_reason(data_block, raw_series)
+    if unit_reason is not None:
         return (
             CostEvidenceStatus.WRONG_UNIT,
-            {"status": CostEvidenceStatus.WRONG_UNIT.value, "reason": REASON_CURRENCY_UNPROVEN},
+            {"status": CostEvidenceStatus.WRONG_UNIT.value, "reason": unit_reason},
             False,
         )
 
@@ -1647,11 +1728,14 @@ def execute_cost_sampler(
                 False,
             )
 
+        # Mirrors the browser's cost chart exactly (observed 2026-10-26): UsageType
+        # "3" and jsTargetName "UsageType". A different jsTargetName asks the portal
+        # for a different chart control, so it is not a cosmetic field.
         post_data = {
             "__RequestVerificationToken": token,
             "UsageInterval": permit.usage_interval,
             "UsageType": USAGE_TYPE_COST,
-            "jsTargetName": "StorageType",
+            "jsTargetName": JS_TARGET_USAGE_TYPE,
             "EnableHoverChart": "true",
             "Start": permit.start_str,
             "End": permit.end_str,
