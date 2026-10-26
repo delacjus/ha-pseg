@@ -56,6 +56,10 @@ Requires **Home Assistant 2026.10.2 or newer**, the minimum version tested by th
 
 ### Via HACS (Recommended)
 
+[![Open your Home Assistant instance and open this repository inside HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=delacjus&repository=ha-pseg&category=integration)
+
+Click the button above to open this repository in HACS on your own Home Assistant (it adds the custom repository for you), then click **Download** and restart Home Assistant. Or add it by hand:
+
 Install `delacjus/ha-pseg` as a custom repository in HACS:
 
 1. In Home Assistant, navigate to **HACS** > **Integrations**.
@@ -78,6 +82,10 @@ Install `delacjus/ha-pseg` as a custom repository in HACS:
 3. Restart Home Assistant.
 
 ## Configuration
+
+[![Open your Home Assistant instance and start setting up PSE&G Energy.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=pseg)
+
+After installing and restarting, click the button above to start setup directly, or:
 
 1. In Home Assistant, go to **Settings** > **Devices & Services** > **Add Integration**.
 2. Search for **PSE&G Energy (New Jersey)**.
