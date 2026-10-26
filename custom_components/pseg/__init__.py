@@ -22,6 +22,7 @@ from .const import (
     CONF_PRICE_PER_KWH,
     DEFAULT_PRICE_PER_KWH,
     DOMAIN,
+    sanitized_price_per_kwh,
 )
 from .coordinator import PsegDataUpdateCoordinator
 from .pseg_client import PsegClient
@@ -163,7 +164,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not portal_cookies and CONF_COOKIE in entry.data:
         portal_cookies = entry.data[CONF_COOKIE]
     cookie_list = entry.data.get("cookies")
-    price_per_kwh = entry.options.get(CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH)
+    # Quiet here: the coordinator's first refresh, which setup runs next, logs the
+    # single warning for an unusable saved rate.
+    price_per_kwh = sanitized_price_per_kwh(
+        entry.options.get(CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH), warn=False
+    )
 
     client = PsegClient(
         okta_cookies=okta_cookies,

@@ -159,7 +159,63 @@ reason to clear history.
 | `no_daily_total` | No independent daily total was available | Safe fallback; the hourly rows are not authoritative alone. |
 | `rejected before any statistics were written` | A daily total contradicts a promoted day | Nothing was written. Wait for a complete hourly poll, or use the kill switch and a backup. Do not hand-edit statistics. |
 | `Recorder did not commit ...` | The commit barrier timed out | The journal stays pending. Check recorder health; the next poll retries. If it repeats, disable imports. |
+| `Conflicting daily readings from the portal ...` | The portal returned two different totals for one meter and day | Nothing was written. Wait for the portal to settle; see "Conflicting daily readings" below. |
 | `hourly` shows 23 or 25 rows | A DST day | Expected: 23 hours in spring, 25 in fall, always at New York midnights. |
+
+## Conflicting daily readings
+
+Since the daily-reading validation was added, the integration refuses to guess
+when the portal contradicts itself. This failure is rare, deliberately loud, and
+safe.
+
+### How to recognise it
+
+- The **Connection Status** sensor (`sensor.pseg_connection_status`) reads
+  `error` and its icon is a red octagon. `auth_required` stays `false`: this is
+  a data problem, not a signed-out session.
+- The consumption sensor keeps its last good values, and no new day appears in
+  the Energy dashboard.
+- In **Settings** > **System** > **Logs**, filter for `pseg`, and look for:
+
+  `Transient error communicating with PSE&G: Conflicting daily readings from
+  the portal for one meter and date; refusing to choose a value`
+
+### Why it refuses to guess
+
+The portal returned two **different** daily totals for the same meter and the
+same New York calendar day in one response. Picking one of them, or adding them
+together, would silently corrupt that day's kWh and cost and every cumulative
+sum after it. The poll therefore fails as a transient error before anything is
+written: no energy statistics row, no hourly row, no backfill import, no change
+to the pending journal. The previous statistics stay exactly as they were.
+
+### What to do
+
+1. **Wait.** A conflicting response is usually the portal restating or
+   half-publishing a day. Polling retries on the normal schedule (every four
+   hours) and on the **Refresh data** button on the PSE&G device. The
+   integration recovers by itself as soon as a response is consistent again.
+2. **Check the PSE&G site** (`mysmartenergy.nj.pseg.com`) for that day. If the
+   site itself shows one stable value, the next poll usually succeeds. Do not
+   hand-edit, delete or re-create statistics to "fix" the day.
+3. **Do not clear the integration, reinstall it, or press backfill repeatedly.**
+   None of those change the portal's answer, and they are not needed for
+   recovery.
+4. **Sign in again only if the status becomes `auth_required`.** During a
+   Remember-Me renewal the same daily data proves the account identity. Two
+   consecutive conflicting responses can spend both renewal attempts, and the
+   next expiry then asks you to reauthenticate. Use the normal reauth prompt;
+   that is a sign-in, not a data repair.
+5. **Confirm recovery.** The status returns to `connected`,
+   `last_successful_update` advances, and **Download diagnostics** shows
+   `coordinator.status: connected`, `statistics.last_import` with a newer
+   timestamp and `statistics.pending_recovery: false`. `complete_days` and
+   `incomplete_days` then describe the latest hourly evaluation again.
+
+If the same log line keeps appearing for more than a day while the PSE&G site
+shows a settled day, open an issue with the diagnostics file (it is already
+redacted) and the log timestamp. Nothing has been lost or half-written while
+the integration was refusing.
 
 ## Limits and guarantees
 

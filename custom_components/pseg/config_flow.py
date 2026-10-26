@@ -6,7 +6,6 @@ from collections.abc import Callable
 from datetime import datetime
 import hashlib
 import logging
-import math
 import re
 import time
 from typing import Any
@@ -51,6 +50,8 @@ from .const import (
     DOMAIN,
     PORTAL_BASE_URL,
     REMEMBER_ME_COOKIE,
+    parse_price_per_kwh,
+    sanitized_price_per_kwh,
 )
 from .pseg_client import (
     PsegCaptchaRequired,
@@ -946,12 +947,8 @@ class PsegOptionsFlowHandler(OptionsFlowWithReload):
         """Manage integration options."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            raw_price = user_input.get(CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH)
-            try:
-                price = float(raw_price)
-                if isinstance(raw_price, bool) or not math.isfinite(price) or price < 0:
-                    raise ValueError
-            except (TypeError, ValueError, OverflowError):
+            price = parse_price_per_kwh(user_input.get(CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH))
+            if price is None:
                 errors[CONF_PRICE_PER_KWH] = "invalid_price"
             else:
                 return self.async_create_entry(
@@ -962,8 +959,12 @@ class PsegOptionsFlowHandler(OptionsFlowWithReload):
             {
                 vol.Optional(
                     CONF_PRICE_PER_KWH,
-                    default=self.config_entry.options.get(
-                        CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH
+                    # Never prefill an unusable saved rate; the shared rule decides
+                    # what the form may keep. A form default is not a rate in use, so
+                    # this read stays silent (setup already warned once).
+                    default=sanitized_price_per_kwh(
+                        self.config_entry.options.get(CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH),
+                        warn=False,
                     ),
                 ): vol.All(vol.Coerce(float), vol.Range(min=0)),
                 vol.Optional(

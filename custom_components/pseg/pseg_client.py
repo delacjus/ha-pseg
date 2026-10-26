@@ -2889,7 +2889,10 @@ class PsegClient:
                 usage = float(y)
                 if date_iso in meter_days:
                     if meter_days[date_iso] != usage:
-                        raise PsegTransientError("Conflicting daily readings for one meter and date")
+                        raise PsegTransientError(
+                            "Conflicting daily readings from the portal for one meter "
+                            "and date; refusing to choose a value"
+                        )
                     continue
                 meter_days[date_iso] = usage
                 totals[date_iso] = totals.get(date_iso, 0.0) + usage

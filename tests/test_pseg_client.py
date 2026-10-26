@@ -720,9 +720,9 @@ def test_conflicting_daily_points_abort_poll_and_backfill(values: tuple[float, f
         mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart)
-        with pytest.raises(PsegTransientError, match="Conflicting daily readings"):
+        with pytest.raises(PsegTransientError, match="Conflicting daily readings from the portal"):
             client.fetch_energy_data()
-        with pytest.raises(PsegTransientError, match="Conflicting daily readings"):
+        with pytest.raises(PsegTransientError, match="Conflicting daily readings from the portal"):
             client.fetch_history_range("2026-10-19", "2026-10-20")
 
 

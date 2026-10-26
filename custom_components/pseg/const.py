@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+import math
+
+_LOGGER = logging.getLogger(__name__)
+
 DOMAIN = "pseg"
 
 # Device name; with has_entity_name entities become sensor.pseg_<translation name>.
@@ -120,3 +125,57 @@ USAGE_TYPE_CONSUMPTION = "1"
 USAGE_TYPE_COST = "2"
 
 SERVICE_SET_COST_MODE = "set_cost_mode"
+
+# Fixed reasons a stored price_per_kwh option can be unusable. The reason is logged;
+# the stored value itself never is (it is user data and may change between releases).
+PRICE_REASON_NOT_A_NUMBER = "not a number"
+PRICE_REASON_NOT_FINITE = "not a finite number"
+PRICE_REASON_NEGATIVE = "negative"
+
+
+def classify_price_per_kwh(raw: object) -> tuple[float | None, str | None]:
+    """Apply the one validity rule for the price-per-kWh option.
+
+    A usable rate is a finite, non-negative number; the numeric string the options
+    form accepts is coerced exactly like it. Returns ``(rate, None)`` when usable and
+    ``(None, reason)`` otherwise. Both the options flow (new submissions) and the
+    load paths (previously saved options) call this, so they cannot disagree.
+    """
+    if isinstance(raw, bool):
+        return None, PRICE_REASON_NOT_A_NUMBER
+    try:
+        rate = float(raw)  # type: ignore[arg-type]
+    except TypeError, ValueError, OverflowError:
+        return None, PRICE_REASON_NOT_A_NUMBER
+    if not math.isfinite(rate):
+        return None, PRICE_REASON_NOT_FINITE
+    if rate < 0:
+        return None, PRICE_REASON_NEGATIVE
+    return rate, None
+
+
+def parse_price_per_kwh(raw: object) -> float | None:
+    """Return the usable rate, or None when the shared rule rejects it."""
+    rate, _reason = classify_price_per_kwh(raw)
+    return rate
+
+
+def sanitized_price_per_kwh(raw: object, *, warn: bool = True) -> float:
+    """Turn a stored price_per_kwh value into a rate that is safe to use.
+
+    Finite and non-negative values (including 0) are kept exactly as-is. Anything
+    else falls back to DEFAULT_PRICE_PER_KWH, because a negative, non-finite or
+    non-numeric rate would otherwise produce negative or NaN costs and can drop
+    accumulated statistics rows. The warning names only the reason, never the value.
+    The stored option is never rewritten here: the options flow stays its only writer.
+    """
+    rate, reason = classify_price_per_kwh(raw)
+    if rate is not None:
+        return rate
+    if warn:
+        _LOGGER.warning(
+            "Ignoring the saved price per kWh option because it is %s; "
+            "estimating costs with the default rate instead",
+            reason,
+        )
+    return DEFAULT_PRICE_PER_KWH

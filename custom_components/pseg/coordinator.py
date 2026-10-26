@@ -53,6 +53,8 @@ from .const import (
     LOCAL_KEEPALIVE_INTERVAL_MINUTES,
     SESSION_COOKIE_NAMES,
     STATISTICS_PRECISION,
+    classify_price_per_kwh,
+    sanitized_price_per_kwh,
 )
 from .cost_evidence import CostEvidenceStore
 from .pseg_client import (
@@ -427,6 +429,9 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Avoids repeating the typed identity-rejection warning on every poll; reset
         # by the next fully confirmed update.
         self._identity_rejection_logged = False
+        # Avoids repeating the invalid saved-rate warning on every poll. The rate
+        # itself is re-read and re-sanitized on every poll; only the log is deduped.
+        self._invalid_rate_warned = False
         self._unsub_keepalive: Callable[[], None] | None = None
         # Set on unload. A keepalive/poll still in the executor at that point belongs
         # to a dead coordinator and must not write to the entry or start reauth.
@@ -872,9 +877,13 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from PSE&G."""
         if self.config_entry and self.config_entry.options:
-            self.client.price_per_kwh = self.config_entry.options.get(
-                CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH
+            stored_rate = self.config_entry.options.get(CONF_PRICE_PER_KWH, DEFAULT_PRICE_PER_KWH)
+            _rate, rate_problem = classify_price_per_kwh(stored_rate)
+            self.client.price_per_kwh = sanitized_price_per_kwh(
+                stored_rate,
+                warn=rate_problem is not None and not self._invalid_rate_warned,
             )
+            self._invalid_rate_warned = rate_problem is not None
 
         try:
             async with self._update_lock:
