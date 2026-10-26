@@ -225,7 +225,7 @@ def test_source_change_detected(source: Path, monkeypatch: pytest.MonkeyPatch, c
     assert "source_changed_during_run" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("profile", ["slow", "nightly", "replay", "unknown"])
+@pytest.mark.parametrize("profile", ["slow", "nightly", "unknown"])
 def test_unavailable_profiles(source: Path, profile: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert run(source, profile) != 0
     assert capsys.readouterr().err
@@ -354,3 +354,170 @@ def test_stats_baseline_new_paths_from(
     assert run(source, "stats-baseline", "--paths-from", str(paths)) == 0
     child = next(row for row in records(capsys) if row.get("child") == "stats-baseline")
     assert child["counts"]["equal"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Replay profile (P2-11)
+# ---------------------------------------------------------------------------
+
+
+def _replay_report(**overrides: object) -> str:
+    report = {
+        "tool": "replay_check",
+        "ok": True,
+        "families_total": 4,
+        "proved": 4,
+        "failed": 0,
+        "invalid": 0,
+        "wrong_assertion": 0,
+        "claim": "mutant_fallback_only",
+    }
+    report.update(overrides)
+    return json.dumps(report)
+
+
+def test_replay_report_requires_every_family_proved() -> None:
+    """A partially-proved or noisy replay report is never accepted as green."""
+    counts, accepted = release_check._parse_replay_report(_replay_report())
+    assert accepted is True
+    assert counts == {
+        "families_total": 4,
+        "proved": 4,
+        "failed": 0,
+        "invalid": 0,
+        "wrong_assertion": 0,
+    }
+
+    for garbled in (
+        _replay_report(proved=3),
+        _replay_report(proved=0, families_total=0),
+        _replay_report(failed=1, proved=3),
+        _replay_report(invalid=1, proved=3),
+        _replay_report(wrong_assertion=1, proved=3),
+        _replay_report(error="cases_invalid"),
+        json.dumps({"tool": "replay_check", "families_total": 4}),
+        "not json at all",
+        "",
+    ):
+        _counts, accepted = release_check._parse_replay_report(garbled)
+        assert accepted is False, garbled
+
+
+def test_stub_replay_report_with_unproved_families_is_not_green() -> None:
+    """A tool that claims rc 0 while proving fewer families is refused."""
+    stub = json.dumps(
+        {
+            "tool": "replay_check",
+            "ok": True,
+            "families_total": 5,
+            "proved": 4,
+            "failed": 0,
+            "invalid": 1,
+            "wrong_assertion": 0,
+            "exit_code": 0,
+        }
+    )
+    counts, accepted = release_check._parse_replay_report(stub)
+    assert accepted is False
+    assert counts["proved"] < counts["families_total"]
+
+
+@pytest.mark.parametrize(
+    ("outer", "requested", "upper"),
+    [
+        (600.0, None, 600),
+        (1500.0, None, 1500),
+        (300.0, None, 300),
+        (222.0, None, 222),
+        (222.0, None, 222),
+        (600.0, 30, 600),
+        (600.0, 500, 600),
+    ],
+)
+def test_replay_detector_bound_is_strictly_below_outer(
+    outer: float, requested: int | None, upper: int
+) -> None:
+    """The inner per-detector timeout must fire before the outer child timeout."""
+    inner = release_check._replay_detector_timeout(outer, requested)
+    assert 0 < inner < upper
+    if requested is not None:
+        assert inner <= requested
+
+
+@pytest.mark.parametrize("outer", [0, 1, 5, 17, 221.9])
+def test_replay_bound_rejects_nonsense_outer_timeouts(outer: float) -> None:
+    """An outer bound too small for the run count is a usage error, not a bound."""
+    with pytest.raises(ValueError) as error:
+        release_check._replay_detector_timeout(outer)
+    assert "minimum" in str(error.value)
+
+
+def test_replay_bound_accounts_for_every_pytest_run() -> None:
+    """The inner bound is derived from the outer bound and the child's run count."""
+    # Observe the real frozen engine's baseline invocation; do not mirror its literal.
+    import ast
+    import inspect
+
+    from tools import mutation_check
+    calls = [node for node in ast.walk(ast.parse(inspect.getsource(mutation_check._run_mutation_check)))
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == "check_baseline"]
+    timeout = next(keyword.value for keyword in calls[0].keywords if keyword.arg == "timeout")
+    floor = eval(compile(ast.Expression(timeout), "<engine timeout>", "eval"), {"timeout": 1})
+    assert release_check._REPLAY_BASELINE_FLOOR == floor
+    # Cross-check the real declaration; the slow historical replay test also
+    # spies on actual engine/evidence invocations (3 per member + 2 historical).
+    declaration = json.loads((Path(release_check.__file__).parents[1]
+                              / "tests/systemic/replay_cases.json").read_text())
+    assert sum(len(family["transformations"]) for family in declaration["families"]) == 5
+    # Five baseline/mutant/evidence triples plus both historical processes.
+    assert release_check._REPLAY_PYTEST_RUNS == 5 * 3 + 2
+    minimum = 5 * floor + 12 + floor
+    assert release_check._REPLAY_MIN_OUTER_TIMEOUT == minimum
+    with pytest.raises(ValueError):
+        release_check._replay_detector_timeout(minimum - 0.01)
+    for outer in (minimum, 300, 600, 1500):
+        inner = release_check._replay_detector_timeout(outer)
+        assert inner >= 1
+        cost = 5 * max(floor, inner) + 12 * inner
+        assert cost + max(floor, inner) <= outer
+
+
+def test_replay_profile_rejects_a_tiny_outer_timeout(
+    source: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reviewer's accepted 17s bound refuses before copying or spawning."""
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("tiny replay timeout launched work")
+    monkeypatch.setattr(release_check, "snapshot", forbidden)
+    monkeypatch.setattr(release_check, "_child", forbidden)
+    assert run(source, "replay", "--timeout", "17") == 1
+    payload = next(
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("{")
+    )
+    assert payload["error"] == "invalid_replay_timeout"
+    assert payload["minimum"] == release_check._REPLAY_MIN_OUTER_TIMEOUT
+    assert payload["pytest_runs"] == release_check._REPLAY_PYTEST_RUNS
+
+
+
+def test_replay_child_uses_the_smaller_detector_bound(
+    source: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The dispatched replay command carries the clamped inner bound."""
+    seen: list[tuple[str, list[str], float]] = []
+
+    def fake(command: list[str], copy: Path, label: str, timeout: float) -> bool:
+        seen.append((label, command, timeout))
+        return True
+
+    monkeypatch.setattr(release_check, "_child", fake)
+    assert run(source, "replay", "--timeout", "600") == 0
+    label, command, outer = next(row for row in seen if row[0] == "replay")
+    inner = int(command[command.index("--timeout") + 1])
+    assert label == "replay"
+    assert 0 < inner < int(outer)
+    assert inner == release_check._replay_detector_timeout(outer, None)
+

@@ -609,8 +609,8 @@ BASELINE_FAST = {
         "90ee90aa08fd190d420275621fcea4c605d7c178fb2f3f89d65300023747e4af",
     ),
     "tests/test_release_check.py": (
-        31,
-        "c480883553e11b3d61c23963bfd84b593b6a29bbc28a512ad0963fc3fbfc9122",
+        47,
+        "7226a8438fed7c6ed97140d7a1cfccb1e49d23a5eb26ea79d9d82f8b572d2ceb",
     ),
     "tests/test_release_snapshot.py": (
         31,
@@ -619,6 +619,13 @@ BASELINE_FAST = {
     "tests/test_renewal_admission.py": (
         25,
         "524ceea2d60907d19e2b4bae7ec9f198e3ea91e82451dca46f37fcae4794bf7d",
+    ),
+    # P2-11 reviewed addition (KB pseg-suite-p2-11-fix-r2-20261026): pure replay
+    # classifier/refusal/mapped-assertion and bound-failure evidence tests; the
+    # real family contrasts are slow.
+    "tests/test_replay_check.py": (
+        47,
+        "5292242acecdfc7459df1839dc4750778612440459a745ac5a7c37fae34cad36",
     ),
     "tests/test_security_guards.py": (
         4,

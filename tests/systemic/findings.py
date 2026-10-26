@@ -879,6 +879,7 @@ FINDINGS = (
         ),
         "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "p1 setup verified renewal then daily timeout loses jar",
+        "replay_families": ("D",),
     },
     {
         "id": "R3-N2",
@@ -1002,6 +1003,7 @@ FINDINGS = (
         ),
         "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "optional hourly failed response cannot replace proof jar",
+        "replay_families": ("B",),
     },
     {
         "id": "R4-F2",
@@ -1064,6 +1066,7 @@ FINDINGS = (
         ),
         "systemic_gap_resolution": "P2-10 R1 fix: each fallback-owner guard is now parked at its own stage, so the observed stale request is that stage's request (renewal GET, proof read, login form, login POST, SAML POST), never a shared ChartData stage transition. R2 measured truth: the preserved rows are compound (stage guard plus the structural Session.send guard), so these fast cases detect the compound row. For rows 28, 29 and 31 the stage guard is redundant defence-in-depth behind the identical _check_active_owner predicate at Session.send, and row 27's verify path also goes through can_dispatch; row 1 is mapped to the uncertain-admission catalog case, where can_dispatch is the only refusal.",
         "evidence": "real unload retires saved password fallback",
+        "replay_families": ("A",),
     },
     {
         "id": "R5-A",
@@ -1093,6 +1096,7 @@ FINDINGS = (
         ),
         "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "saml redirect cannot dispatch new post after retirement",
+        "replay_families": ("A",),
     },
     {
         "id": "R5-B",
@@ -1221,6 +1225,7 @@ FINDINGS = (
         ),
         "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "invalid hourly 200 does not replace proven whole jar",
+        "replay_families": ("C",),
     },
     {
         "id": "R5-D",

@@ -9,6 +9,7 @@ same local, non-hostile-process threat model as tools._snapshot.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import math
 import os
@@ -50,6 +51,100 @@ _NODE_FILES = (
 
 # Scoped statistics-surface baseline; the child never regenerates it.
 _STATS_BASELINE_MANIFEST = "tests/fixtures/statistics_baseline_v1_6_0.json"
+
+def _replay_baseline_floor() -> int:
+    """Read the frozen engine's baseline floor without copying its literal.
+
+    mutation_check embeds the constant in check_baseline(timeout=max(...)).
+    Resolve that AST expression, and fail closed if the engine changes shape.
+    """
+    tree = ast.parse((_TOOLS_DIR / "mutation_check.py").read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "check_baseline":
+            continue
+        for keyword in node.keywords:
+            value = keyword.value
+            if (keyword.arg == "timeout" and isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Name) and value.func.id == "max"):
+                floors = [arg.value for arg in value.args
+                          if isinstance(arg, ast.Constant) and type(arg.value) is int]
+                if len(floors) == 1 and floors[0] > 0:
+                    return floors[0]
+    raise ValueError("cannot resolve replay baseline timeout floor from mutation_check.py")
+
+
+# Five transformations each run a baseline, mutant, and evidence process (15).
+# Historical classification and historical evidence add TWO processes (17).
+_REPLAY_BASELINE_RUNS = 5
+_REPLAY_PYTEST_RUNS = _REPLAY_BASELINE_RUNS * 3 + 2
+_REPLAY_BASELINE_FLOOR = _replay_baseline_floor()
+_REPLAY_DETECTOR_TIMEOUT = 120
+# Baselines reserve their real floor; other runs reserve at least one second.
+# One additional baseline-sized run is headroom for copying/reporting/cleanup.
+_REPLAY_MIN_OUTER_TIMEOUT = (
+    (_REPLAY_BASELINE_RUNS + 1) * _REPLAY_BASELINE_FLOOR
+    + (_REPLAY_PYTEST_RUNS - _REPLAY_BASELINE_RUNS)
+)
+
+
+def _replay_detector_timeout(outer: float, requested: int | None = None) -> int:
+    """Bound all runs, including baseline floors and historical evidence.
+
+    Cost is baselines * max(floor, inner) + other_runs * inner, plus
+    max(floor, inner) headroom. Solve both linear bounds before launching work.
+    """
+    requested = _REPLAY_DETECTOR_TIMEOUT if requested is None else int(requested)
+    if not math.isfinite(outer) or outer < _REPLAY_MIN_OUTER_TIMEOUT:
+        raise ValueError(
+            f"replay outer timeout {outer!r}s is below the {_REPLAY_MIN_OUTER_TIMEOUT}s "
+            f"minimum needed to bound {_REPLAY_PYTEST_RUNS} pytest runs"
+        )
+    if requested < 1:
+        raise ValueError(f"per-detector timeout {requested!r}s must be at least 1s")
+    other_runs = _REPLAY_PYTEST_RUNS - _REPLAY_BASELINE_RUNS
+    reserved = (_REPLAY_BASELINE_RUNS + 1) * _REPLAY_BASELINE_FLOOR
+    derived = min(int((outer - reserved) // other_runs),
+                  int(outer // (_REPLAY_PYTEST_RUNS + 1)))
+    return min(requested, derived)
+
+
+def _parse_replay_report(text: str) -> tuple[dict[str, int], bool]:
+    """Decode the replay tool's structured report; only a full proof is accepted.
+
+    A malformed, empty, error or partially-proved report is a refusal, never an
+    empty-but-green run: the outer child result alone cannot carry the contrast.
+    """
+    report = None
+    for line in text.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            candidate = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(candidate, dict) and candidate.get("tool") == "replay_check":
+            report = candidate
+    counts: dict[str, int] = {}
+    if report is not None:
+        try:
+            counts = {
+                key: int(report[key])
+                for key in ("families_total", "proved", "failed", "invalid")
+            }
+            counts["wrong_assertion"] = int(report.get("wrong_assertion", 0))
+        except (KeyError, TypeError, ValueError):
+            counts = {}
+    accepted = (
+        counts.get("families_total", 0) > 0
+        and counts.get("proved") == counts.get("families_total")
+        and counts.get("failed") == 0
+        and counts.get("invalid") == 0
+        and counts.get("wrong_assertion") == 0
+        and not (report or {}).get("error")
+    )
+    return counts, accepted
 
 
 def _source_state(source: Path, paths_from: str | None) -> dict[str, object]:
@@ -142,6 +237,8 @@ def _child(command: list[str], copy: Path, label: str, timeout: float) -> bool:
             nonempty = report["total"] > 0
         except (ValueError, KeyError, TypeError):
             nonempty = False
+    elif label == "replay":
+        counts, nonempty = _parse_replay_report(text)
     elif label == "stats-baseline":
         # The child prints the structured report on stdout and a human summary on
         # stderr; both land in this log, so decode the last report line. A
@@ -182,12 +279,24 @@ def _child(command: list[str], copy: Path, label: str, timeout: float) -> bool:
 
 
 def _run_profiles(args: argparse.Namespace) -> int:
-    if args.subcommand in {"slow", "nightly", "replay"}:
+    if args.subcommand in {"slow", "nightly"}:
         _emit_error("profile_not_available", profile=args.subcommand)
         return 1
     if args.repeat < 1 or not math.isfinite(args.timeout) or args.timeout <= 0:
         _emit_error("invalid_repeat_or_timeout")
         return 1
+    if args.subcommand == "replay":
+        try:
+            _replay_detector_timeout(args.timeout, getattr(args, "detector_timeout", None))
+        except ValueError as err:
+            _emit_error(
+                "invalid_replay_timeout",
+                detail=str(err),
+                timeout=args.timeout,
+                minimum=_REPLAY_MIN_OUTER_TIMEOUT,
+                pytest_runs=_REPLAY_PYTEST_RUNS,
+            )
+            return 1
     interpreter = shutil.which(args.python)
     if interpreter is None:
         _emit_error("interpreter_not_found", interpreter=args.python)
@@ -224,6 +333,23 @@ def _run_profiles(args: argparse.Namespace) -> int:
                                      "--source", ".", "--python", interpreter,
                                      "--table", "tests/mutations/auth_guards.py", "--json"],
                                     copy, "mutation", args.timeout)
+                elif profile == "replay":
+                    command = [
+                        interpreter, "-B", "tools/replay_check.py",
+                        "--source", ".", "--python", interpreter,
+                        "--table", "tests/mutations/auth_replay.py",
+                        "--cases", "tests/systemic/replay_cases.json",
+                        "--timeout", str(_replay_detector_timeout(
+                            args.timeout, getattr(args, "detector_timeout", None))),
+                        "--json",
+                    ]
+                    snapshot_path = getattr(args, "snapshot", None)
+                    if snapshot_path:
+                        # Resolve against the caller's cwd: the replay child runs in
+                        # the snapshot copy, where a relative evidence path would be
+                        # meaningless.
+                        command += ["--snapshot", str(Path(snapshot_path).resolve())]
+                    passed = _child(command, copy, "replay", args.timeout)
                 elif profile == "stats-baseline":
                     # Explicit manifest plus the snapshot copy: no git, no
                     # regeneration, nonzero on any unreviewed surface change.
@@ -291,6 +417,24 @@ def main(argv: list[str] | None = None) -> int:
         runner.add_argument("--paths-from", help="Explicit reviewed new suite paths (snapshot contract)")
         runner.add_argument("--repeat", type=int, default=1)
         runner.add_argument("--timeout", type=float, default=600, help="Seconds per child (default: 600)")
+        if profile == "replay":
+            runner.add_argument(
+                "--snapshot",
+                default=None,
+                help=(
+                    "Pre-reviewed snapshot-manifest directory of historical production "
+                    "bytes; refused unless its verified aggregate is reviewed"
+                ),
+            )
+            runner.add_argument(
+                "--detector-timeout",
+                type=int,
+                default=_REPLAY_DETECTOR_TIMEOUT,
+                help=(
+                    "Per-detector replay bound in seconds; clamped strictly below the "
+                    "outer --timeout so the inner timeout fires first"
+                ),
+            )
 
     try:
         args = parser.parse_args(argv)

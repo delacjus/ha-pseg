@@ -1,0 +1,195 @@
+{
+  "version": 2,
+  "tool": "replay_check",
+  "description": "P2-11 A/B/C/D family replay declaration. The R4 dirty-freeze bytes were not recovered in P1, so the required proof is four independently detected family faults, never a claim of exact historical replay (and never commit 2285845 substituted for dirty freeze 3eca1d2e...). Every declared reach names the assertion literal inside its mapped detector that proves that reach; a family is proved only when all of its transformations are detected there.",
+  "historical": {
+    "status": "not_recovered",
+    "freeze_label": "R4 dirty freeze 3eca1d2e...",
+    "substitute_commit_refused": "2285845d61c67454200e2b504231f910fdea7bef",
+    "substitute_tree_digest_refused": "ec22013d910c74b866cb9d0114b7145741e8aab7b4479ed0c4dc88d660cb306a",
+    "reason": "Matching dirty bytes were not recovered in P1. A --snapshot input is accepted only when its verified snapshot-manifest aggregate is listed in reviewed_manifests and its head/tree digest is not the rejected 2285845 substitute; the empty list records that no P1 manifest of those historical bytes has been reviewed.",
+    "reviewed_manifests": []
+  },
+  "families": [
+    {
+      "family": "A",
+      "title": "per-hop / ChartData dispatch fence",
+      "invariants": [
+        "I1"
+      ],
+      "findings": [
+        "R4-F2",
+        "R5-A"
+      ],
+      "transformations": [
+        {
+          "mutation_label": "replay-A-chartdata-dispatch-fence",
+          "filename": "pseg_client.py",
+          "source_row": "32-structural-session-send-owner-guard",
+          "detector_nodes": [
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_stage_transition_handoff]"
+          ],
+          "reaches": [
+            {
+              "reach": "redirect_and_chartdata_hops",
+              "assertion": "retired generation {generation} dispatched",
+              "message": "retired generation",
+              "statement": {
+                "file": "tests/support/boundaries.py",
+                "lineno": 1043,
+                "end_lineno": 1046
+              }
+            },
+            {
+              "reach": "retired_generation",
+              "assertion": "retired generation {generation} dispatched",
+              "message": "retired generation",
+              "statement": {
+                "file": "tests/support/boundaries.py",
+                "lineno": 1043,
+                "end_lineno": 1046
+              }
+            }
+          ],
+          "expect": "assertion_failure"
+        }
+      ]
+    },
+    {
+      "family": "B",
+      "title": "two-poll cookie poison",
+      "invariants": [
+        "I3"
+      ],
+      "findings": [
+        "R4-F1"
+      ],
+      "transformations": [
+        {
+          "mutation_label": "replay-B-two-poll-cookie-poison",
+          "filename": "pseg_client.py",
+          "source_row": "23-optional-hourly-jar-quarantine",
+          "detector_nodes": [
+            "tests/systemic/test_response_corpus.py::test_post_proof_poison_is_caught_only_by_the_follow_on"
+          ],
+          "reaches": [
+            {
+              "reach": "second_poll",
+              "assertion": "f\"{case.case_id}: oracle violations \"",
+              "message": "oracle violations",
+              "statement": {
+                "file": "tests/systemic/response_cases.py",
+                "lineno": 985,
+                "end_lineno": 988
+              }
+            },
+            {
+              "reach": "cold_restart",
+              "assertion": "f\"{case.case_id}: oracle violations \"",
+              "message": "oracle violations",
+              "statement": {
+                "file": "tests/systemic/response_cases.py",
+                "lineno": 985,
+                "end_lineno": 988
+              }
+            },
+            {
+              "reach": "follow_on_only_poison",
+              "assertion": "f\"{case.case_id}: oracle violations \"",
+              "message": "oracle violations",
+              "statement": {
+                "file": "tests/systemic/response_cases.py",
+                "lineno": 985,
+                "end_lineno": 988
+              }
+            }
+          ],
+          "expect": "assertion_failure"
+        }
+      ]
+    },
+    {
+      "family": "C",
+      "title": "invalid-200 / root validation",
+      "invariants": [
+        "I10"
+      ],
+      "findings": [
+        "R5-C"
+      ],
+      "transformations": [
+        {
+          "mutation_label": "replay-C-invalid-200-root-validation",
+          "filename": "pseg_client.py",
+          "source_row": "37-hourly-root-dict-validation",
+          "detector_nodes": [
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-root]"
+          ],
+          "reaches": [
+            {
+              "reach": "root_200_typed_failure",
+              "assertion": "untyped parser cause"
+            }
+          ],
+          "expect": "assertion_failure"
+        },
+        {
+          "mutation_label": "replay-C-invalid-200-quarantine",
+          "filename": "pseg_client.py",
+          "source_row": "36-hourly-records-validation-before-confirm",
+          "detector_nodes": [
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-empty]"
+          ],
+          "reaches": [
+            {
+              "reach": "invalid_200_quarantined",
+              "assertion": "invalid chart changed physical cookies"
+            }
+          ],
+          "expect": "assertion_failure"
+        }
+      ]
+    },
+    {
+      "family": "D",
+      "title": "latest exit checkpoint",
+      "invariants": [
+        "I5"
+      ],
+      "findings": [
+        "R3-N1"
+      ],
+      "transformations": [
+        {
+          "mutation_label": "replay-D-latest-exit-checkpoint",
+          "filename": "coordinator.py",
+          "source_row": "15-confirmed-stop-handoff",
+          "detector_nodes": [
+            "tests/systemic/test_exit_checkpoint.py::test_fast_exit_checkpoint_control[after:fetch_energy_data::stop::no-renewal::MM_RememberMe]"
+          ],
+          "reaches": [
+            {
+              "reach": "two_eligible_checkpoints",
+              "assertion": "physical jar at exit",
+              "statement": {
+                "file": "tests/systemic/exit_cases.py",
+                "lineno": 658,
+                "end_lineno": 661
+              }
+            },
+            {
+              "reach": "latest_pair_at_exit",
+              "assertion": "physical jar at exit",
+              "statement": {
+                "file": "tests/systemic/exit_cases.py",
+                "lineno": 658,
+                "end_lineno": 661
+              }
+            }
+          ],
+          "expect": "assertion_failure"
+        }
+      ]
+    }
+  ]
+}
