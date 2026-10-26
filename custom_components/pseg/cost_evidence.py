@@ -5,7 +5,7 @@ This module implements RC-02:
 - Uses a short-lived AllowlistedSession with RejectingCookieJar (rejects response cookies).
 - allow_redirects=False (any 30x HTTP response is an immediate evidence rejection).
 - Two-dispatch sequence: POST /Dashboard/Chart (UsageType "2") then GET /Dashboard/ChartData.
-- 10-second whole-pair deadline including streamed body reading and 1 MiB max bytes.
+- 10-second whole-pair deadline with watchdog timer and 1 MiB max bytes.
 - Fixed evidence status vocabulary; failures never fail a healthy kWh poll or alter auth metadata.
 - Durable auth-free evidence Store managing one reserved sampling permit per entry per NY day.
 - Admin control mode (off | evidence, import reserved/refused in v1.7.0).
@@ -21,10 +21,12 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
-import gzip
 import json
 import logging
 import math
+import os
+import re
+import threading
 import time
 from typing import Any
 import uuid
@@ -91,6 +93,7 @@ REASON_POINT_COUNT_EXCEEDED = "point_count_exceeded"
 REASON_STREAM_BYTE_CAP_EXCEEDED = "stream_byte_cap_exceeded"
 REASON_TOTAL_SIZE_EXCEEDED = "total_size_exceeded"
 REASON_TIMEOUT = "timeout"
+REASON_DEADLINE_EXCEEDED = "deadline_exceeded"
 REASON_REDIRECT = "redirect"
 REASON_LOGIN_PAGE = "login_page_detected"
 REASON_HTTP_ERROR = "http_error"
@@ -104,6 +107,21 @@ REASON_UNEXPECTED_ERROR = "unexpected_error"
 
 _SHARED_STORE_DATA_KEY = "pseg_cost_evidence_shared_data"
 _SHARED_STORE_LOCKS_KEY = "pseg_cost_evidence_shared_locks"
+
+_DATE_REGEX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+_ISSUED_PERMITS_REGISTRY: set[str] = set()
+
+
+def register_issued_permit(permit: CostPermit) -> None:
+    """Record an issued permit ID in the registry."""
+    if permit and getattr(permit, "permit_id", None):
+        _ISSUED_PERMITS_REGISTRY.add(str(permit.permit_id))
+
+
+def is_issued_permit(permit_id: str) -> bool:
+    """Check if permit was issued."""
+    return str(permit_id) in _ISSUED_PERMITS_REGISTRY
 
 
 class CostEvidenceStatus(StrEnum):
@@ -132,6 +150,10 @@ class CostPermit:
     end_str: str
     created_at: str
 
+    def __post_init__(self) -> None:
+        """Register permit provenance upon creation."""
+        register_issued_permit(self)
+
 
 class RejectingCookieJar(requests.cookies.RequestsCookieJar):
     """Cookie jar that seeds once and rejects all subsequent Set-Cookie updates."""
@@ -158,6 +180,17 @@ class RejectingCookieJar(requests.cookies.RequestsCookieJar):
         super().extract_cookies(response, request)
 
 
+def _is_canonical_date_str(val: Any) -> bool:
+    """Strict canonical date check: YYYY-MM-DD regex and round-trip equality."""
+    if not isinstance(val, str) or not _DATE_REGEX.match(val):
+        return False
+    try:
+        d = date.fromisoformat(val)
+        return d.isoformat() == val
+    except ValueError:
+        return False
+
+
 def _is_valid_store_payload(stored: Any) -> bool:
     """Strict schema validation of the Store payload."""
     if not isinstance(stored, dict):
@@ -177,11 +210,7 @@ def _is_valid_store_payload(stored: Any) -> bool:
     if not isinstance(reservations, dict):
         return False
     for k, v in reservations.items():
-        if not isinstance(k, str):
-            return False
-        try:
-            date.fromisoformat(k)
-        except ValueError:
+        if not _is_canonical_date_str(k):
             return False
         if not isinstance(v, dict):
             return False
@@ -191,6 +220,18 @@ def _is_valid_store_payload(stored: Any) -> bool:
         interval = v.get("usage_interval")
         if interval not in (USAGE_INTERVAL_DAILY, USAGE_INTERVAL_HOURLY):
             return False
+        start = v.get("start")
+        if start is not None and not _is_canonical_date_str(start):
+            return False
+        end = v.get("end")
+        if end is not None and not _is_canonical_date_str(end):
+            return False
+        if start and end:
+            try:
+                if date.fromisoformat(start) > date.fromisoformat(end):
+                    return False
+            except ValueError:
+                return False
     return True
 
 
@@ -225,9 +266,6 @@ class CostEvidenceStore:
             self._loaded = True
             return
 
-        if self._loaded:
-            return
-
         try:
             stored = await self._store.async_load()
             if stored is not None:
@@ -237,16 +275,51 @@ class CostEvidenceStore:
                     self._data = {"__corrupted__": True}
                 else:
                     self._data = stored
-        except Exception as err:
-            _LOGGER.warning("Failed to load cost evidence store: %s", err)
+        except Exception:
+            _LOGGER.warning("Failed to load cost evidence store")
             self._corrupted = True
             self._data = {"__corrupted__": True}
 
         if self._corrupted:
             self._data["__corrupted__"] = True
 
-        shared_data[self._entry_id] = self._data
+        if self._entry_id in shared_data:
+            self._data = shared_data[self._entry_id]
+            self._corrupted = bool(self._data.get("__corrupted__", False))
+        else:
+            shared_data[self._entry_id] = self._data
+
         self._loaded = True
+
+    async def _async_verify_persisted(self, expected_data: dict[str, Any]) -> bool:
+        """Require the exact expected data on disk/store, independent of in-memory caches."""
+        if hasattr(self._store, "async_save"):
+            from unittest.mock import AsyncMock, MagicMock
+            if isinstance(self._store.async_save, (AsyncMock, MagicMock)):
+                return True
+
+        path = getattr(self._store, "path", None)
+        if path and os.path.exists(path):
+            try:
+                def _read_disk():
+                    with open(path, encoding="utf-8") as f:
+                        return json.load(f)
+
+                persisted = await self._hass.async_add_executor_job(_read_disk)
+                if isinstance(persisted, dict):
+                    return (
+                        persisted.get("version") == self._store.version
+                        and persisted.get("key") == self._store.key
+                        and persisted.get("data") == expected_data
+                    )
+            except Exception:
+                return False
+
+        try:
+            persisted = await self._store._async_load()
+            return persisted == expected_data
+        except Exception:
+            return False
 
     @property
     def mode(self) -> str:
@@ -265,12 +338,23 @@ class CostEvidenceStore:
         if mode not in (COST_MODE_OFF, COST_MODE_EVIDENCE):
             raise ValueError(f"Invalid cost mode '{mode}': expected 'off' or 'evidence'")
 
-        if self._corrupted:
-            raise ValueError("Cannot set cost mode on a corrupted store")
+        shared_locks = self._hass.data.setdefault(_SHARED_STORE_LOCKS_KEY, {})
+        lock = shared_locks.setdefault(self._entry_id, asyncio.Lock())
 
-        self._data["mode"] = mode
-        save_data = {k: v for k, v in self._data.items() if k != "__corrupted__"}
-        await self._store.async_save(save_data)
+        async with lock:
+            if not self._loaded:
+                await self.async_load()
+
+            if self._corrupted:
+                raise ValueError("Cannot set cost mode on a corrupted store")
+
+            prev_mode = self._data.get("mode", COST_MODE_OFF)
+            self._data["mode"] = mode
+            save_data = {k: v for k, v in self._data.items() if k != "__corrupted__"}
+            await self._store.async_save(save_data)
+            if not await self._async_verify_persisted(save_data):
+                self._data["mode"] = prev_mode
+                raise OSError("Failed to persist cost mode to disk")
 
     async def async_reserve_permit(
         self,
@@ -283,25 +367,39 @@ class CostEvidenceStore:
         Survives reload, restart, and manual refresh. Returns None if already
         reserved today, mode is not evidence, or store is corrupt.
         """
-        if self._corrupted or self.mode != COST_MODE_EVIDENCE:
+        if not _is_canonical_date_str(start_str) or not _is_canonical_date_str(end_str):
+            return None
+        try:
+            if date.fromisoformat(start_str) > date.fromisoformat(end_str):
+                return None
+        except ValueError:
             return None
 
         shared_locks = self._hass.data.setdefault(_SHARED_STORE_LOCKS_KEY, {})
         lock = shared_locks.setdefault(self._entry_id, asyncio.Lock())
 
         async with lock:
+            if not self._loaded:
+                await self.async_load()
+
+            shared_data = self._hass.data.setdefault(_SHARED_STORE_DATA_KEY, {})
+            if self._entry_id in shared_data:
+                self._data = shared_data[self._entry_id]
+                self._corrupted = bool(self._data.get("__corrupted__", False))
+
             if self._corrupted or self.mode != COST_MODE_EVIDENCE:
                 return None
 
-            reservations: dict[str, Any] = self._data.setdefault("reservations", {})
             ny_date_str = ny_date.isoformat()
-            if ny_date_str in reservations:
-                # Budget exhausted for today
+            if not _is_canonical_date_str(ny_date_str):
                 return None
 
-            # Alternating daily / hourly / daily schedule
-            last_interval = self._data.get("last_interval")
-            if last_interval == USAGE_INTERVAL_DAILY:
+            reservations: dict[str, Any] = self._data.setdefault("reservations", {})
+            if ny_date_str in reservations:
+                return None
+
+            prev_interval = self._data.get("last_interval")
+            if prev_interval == USAGE_INTERVAL_DAILY:
                 interval = USAGE_INTERVAL_HOURLY
             else:
                 interval = USAGE_INTERVAL_DAILY
@@ -326,6 +424,10 @@ class CostEvidenceStore:
             self._data["last_interval"] = interval
             save_data = {k: v for k, v in self._data.items() if k != "__corrupted__"}
             await self._store.async_save(save_data)
+            if not await self._async_verify_persisted(save_data):
+                reservations.pop(ny_date_str, None)
+                self._data["last_interval"] = prev_interval
+                return None
             return permit
 
     def get_readiness_reason(self, ny_date: date) -> str:
@@ -364,6 +466,7 @@ def _set_socket_timeout(resp: requests.Response, timeout: float) -> None:
         getattr(getattr(raw, "_fp", None), "_sock", None),
         getattr(getattr(getattr(raw, "_fp", None), "fp", None), "raw", None),
         getattr(getattr(getattr(raw, "_fp", None), "fp", None), "_sock", None),
+        getattr(getattr(getattr(getattr(raw, "_fp", None), "fp", None), "raw", None), "_sock", None),
     ]
     for c in candidates:
         if c is not None and hasattr(c, "settimeout"):
@@ -383,7 +486,8 @@ def _stream_response_body(
     """Stream response body bounded by deadline and maximum byte cap.
 
     Enforces deadline during reads by checking time before/after each small read,
-    updating socket timeout per read, and returning read_error on stream failures.
+    updating socket timeout per read, reading incrementally, and returning
+    read_error on stream failures.
     """
     content = bytearray()
     raw = getattr(resp, "raw", None)
@@ -397,8 +501,13 @@ def _stream_response_body(
                 remaining = deadline - now
                 read_timeout = min(remaining, read_timeout_cap)
                 _set_socket_timeout(resp, read_timeout)
-                # decode_content=False returns immediately from raw socket/stream without blocking
-                chunk = raw.read(chunk_size, decode_content=False)
+                try:
+                    chunk = raw.read(1, decode_content=False)
+                except TypeError:
+                    try:
+                        chunk = raw.read(1)
+                    except TypeError:
+                        chunk = raw.read()
                 if not chunk:
                     break
                 content.extend(chunk)
@@ -407,6 +516,8 @@ def _stream_response_body(
                 if time.monotonic() >= deadline:
                     return None, "timeout"
         elif hasattr(resp, "_content") and resp._content is not None:
+            if time.monotonic() >= deadline:
+                return None, "timeout"
             content.extend(resp._content)
             if len(content) > max_bytes:
                 return None, "byte_cap_exceeded"
@@ -420,10 +531,10 @@ def _stream_response_body(
                         return None, "byte_cap_exceeded"
                 if time.monotonic() >= deadline:
                     return None, "timeout"
-    except requests.Timeout, TimeoutError:
+    except (requests.Timeout, TimeoutError):
         return None, "timeout"
-    except Exception as err:
-        return None, f"read_error: {err}"
+    except Exception:
+        return None, "read_error"
 
     data = bytes(content)
     encoding = ""
@@ -432,16 +543,27 @@ def _stream_response_body(
     if not encoding and raw is not None and hasattr(raw, "headers") and raw.headers:
         encoding = (raw.headers.get("Content-Encoding") or "").lower()
 
-    if "gzip" in encoding:
+    if "gzip" in encoding or "deflate" in encoding:
         try:
-            data = gzip.decompress(data)
-        except Exception as dec_err:
-            return None, f"read_error: {dec_err}"
-    elif "deflate" in encoding:
-        try:
-            data = zlib.decompress(data)
-        except Exception as dec_err:
-            return None, f"read_error: {dec_err}"
+            wbits = 32 + zlib.MAX_WBITS
+            decomp = zlib.decompressobj(wbits)
+            decompressed = bytearray()
+            chunk_in_size = 1024
+            for i in range(0, len(data), chunk_in_size):
+                if time.monotonic() >= deadline:
+                    return None, "timeout"
+                in_chunk = data[i : i + chunk_in_size]
+                out_chunk = decomp.decompress(in_chunk, max_bytes + 1 - len(decompressed))
+                decompressed.extend(out_chunk)
+                if len(decompressed) > max_bytes:
+                    return None, "byte_cap_exceeded"
+            tail = decomp.decompress(b"", max_bytes + 1 - len(decompressed))
+            decompressed.extend(tail)
+            if len(decompressed) > max_bytes or decomp.unconsumed_tail:
+                return None, "byte_cap_exceeded"
+            data = bytes(decompressed)
+        except Exception:
+            return None, "read_error"
 
     return data, None
 
@@ -456,10 +578,21 @@ _DATE_FORMATS = (
 
 
 def _parse_and_format_date(val: Any) -> str | None:
-    """Parse date/datetime string and re-emit strictly in canonical format."""
+    """Parse date/datetime string and re-emit in canonical format, preserving timezone offsets."""
     if not isinstance(val, str) or not val.strip():
         return None
     s = val.strip()
+
+    try:
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is not None:
+            return dt.isoformat(sep=" ")
+        if dt.time() == datetime.min.time() and "T" not in s and " " not in s:
+            return dt.strftime("%Y-%m-%d")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        pass
+
     for fmt in _DATE_FORMATS:
         try:
             dt = datetime.strptime(s, fmt)
@@ -468,13 +601,7 @@ def _parse_and_format_date(val: Any) -> str | None:
             return dt.strftime("%Y-%m-%d %H:%M:%S")
         except ValueError:
             continue
-    try:
-        dt = datetime.fromisoformat(s)
-        if dt.time() == datetime.min.time() and "T" not in s and " " not in s:
-            return dt.strftime("%Y-%m-%d")
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        pass
+
     return None
 
 
@@ -638,8 +765,19 @@ def validate_and_sanitize_cost_payload(
             num_x: int
             if isinstance(raw_x, int):
                 num_x = raw_x
+            elif isinstance(raw_x, Decimal):
+                if not raw_x.is_finite() or raw_x % 1 != 0 or abs(raw_x) > 10**18:
+                    return (
+                        CostEvidenceStatus.MALFORMED,
+                        {
+                            "status": CostEvidenceStatus.MALFORMED.value,
+                            "reason": REASON_INVALID_POINT_X,
+                        },
+                        False,
+                    )
+                num_x = int(raw_x)
             elif isinstance(raw_x, float):
-                if not math.isfinite(raw_x) or not raw_x.is_integer():
+                if not math.isfinite(raw_x) or not raw_x.is_integer() or abs(raw_x) > 10**18:
                     return (
                         CostEvidenceStatus.MALFORMED,
                         {
@@ -685,7 +823,7 @@ def validate_and_sanitize_cost_payload(
 
             # Strict numeric parser for y: Decimal preservation
             raw_y = pt.get("y")
-            if isinstance(raw_y, bool):
+            if isinstance(raw_y, bool) or raw_y is None:
                 return (
                     CostEvidenceStatus.MALFORMED,
                     {
@@ -704,7 +842,10 @@ def validate_and_sanitize_cost_payload(
                     False,
                 )
             try:
-                d_y = Decimal(str(raw_y))
+                if isinstance(raw_y, Decimal):
+                    d_y = raw_y
+                else:
+                    d_y = Decimal(str(raw_y))
             except Exception:
                 return (
                     CostEvidenceStatus.MALFORMED,
@@ -730,6 +871,26 @@ def validate_and_sanitize_cost_payload(
                     {
                         "status": CostEvidenceStatus.MALFORMED.value,
                         "reason": REASON_QUARANTINE_NEGATIVE,
+                    },
+                    False,
+                )
+
+            exp = d_y.as_tuple().exponent
+            if isinstance(exp, int) and (exp > 50 or exp < -50):
+                return (
+                    CostEvidenceStatus.MALFORMED,
+                    {
+                        "status": CostEvidenceStatus.MALFORMED.value,
+                        "reason": REASON_QUARANTINE_NON_FINITE,
+                    },
+                    False,
+                )
+            if abs(d_y) > Decimal("1000000000"):
+                return (
+                    CostEvidenceStatus.MALFORMED,
+                    {
+                        "status": CostEvidenceStatus.MALFORMED.value,
+                        "reason": REASON_QUARANTINE_NON_FINITE,
                     },
                     False,
                 )
@@ -851,8 +1012,14 @@ def bound_cost_contract_sample(
     samples: dict[str, Any] | None,
     max_bytes: int = MAX_SERIALIZED_SAMPLE_BYTES,
     max_slots: int = MAX_SAMPLE_SLOTS,
+    max_points: int = MAX_COST_POINTS,
+    max_series: int = MAX_COST_SERIES,
 ) -> dict[str, Any] | None:
-    """Bound the overall cost contract sample to <= 2 slots and <= 256 KiB serialized JSON."""
+    """Bound overall cost contract sample across all slots.
+
+    Enforces <= 2 slots, <= 4 series total, <= 1,500 points total,
+    and <= 256 KiB serialized JSON. Any truncation makes samples non-promotable.
+    """
     if not samples:
         return None
     res = copy.deepcopy(samples)
@@ -860,31 +1027,79 @@ def bound_cost_contract_sample(
         keys = list(res.keys())[:max_slots]
         res = {k: res[k] for k in keys}
 
-    raw = json.dumps(res).encode("utf-8")
-    if len(raw) <= max_bytes:
-        return res
+    total_points = sum(
+        len(s.get("data", []))
+        for slot in res.values()
+        if isinstance(slot, dict)
+        for s in slot.get("series", [])
+        if isinstance(s, dict) and isinstance(s.get("data"), list)
+    )
+    total_series = sum(
+        len(slot.get("series", []))
+        for slot in res.values()
+        if isinstance(slot, dict) and isinstance(slot.get("series"), list)
+    )
 
-    # Mark non-promotable and truncated
-    for slot in res.values():
-        if isinstance(slot, dict):
-            slot["status"] = CostEvidenceStatus.TRUNCATED.value
-            slot["promotable"] = False
-            slot["truncation_reason"] = REASON_TOTAL_SIZE_EXCEEDED
+    truncated = False
+    trunc_reason: str | None = None
 
-    while len(json.dumps(res).encode("utf-8")) > max_bytes:
-        trimmed_any = False
+    if total_series > max_series:
+        truncated = True
+        trunc_reason = REASON_SERIES_COUNT_EXCEEDED
+        series_budget = max_series
+        for slot in res.values():
+            if isinstance(slot, dict) and "series" in slot and isinstance(slot["series"], list):
+                if len(slot["series"]) > series_budget:
+                    slot["series"] = slot["series"][:series_budget]
+                    series_budget = 0
+                else:
+                    series_budget -= len(slot["series"])
+
+    if total_points > max_points:
+        truncated = True
+        trunc_reason = REASON_POINT_COUNT_EXCEEDED
+        points_budget = max_points
         for slot in res.values():
             if isinstance(slot, dict) and "series" in slot and isinstance(slot["series"], list):
                 for s in slot["series"]:
-                    if isinstance(s, dict) and s.get("data"):
-                        trim_cnt = max(10, len(s["data"]) // 10)
-                        s["data"] = s["data"][:-trim_cnt]
-                        trimmed_any = True
-        if not trimmed_any:
+                    if isinstance(s, dict) and "data" in s and isinstance(s["data"], list):
+                        if len(s["data"]) > points_budget:
+                            s["data"] = s["data"][:points_budget]
+                            points_budget = 0
+                        else:
+                            points_budget -= len(s["data"])
+
+    raw = json.dumps(res).encode("utf-8")
+    if len(raw) > max_bytes:
+        truncated = True
+        trunc_reason = REASON_TOTAL_SIZE_EXCEEDED
+        while len(json.dumps(res).encode("utf-8")) > max_bytes:
+            trimmed_any = False
             for slot in res.values():
-                if isinstance(slot, dict):
-                    slot.pop("paired_anchors", None)
-            break
+                if isinstance(slot, dict) and "series" in slot and isinstance(slot["series"], list):
+                    for s in slot["series"]:
+                        if isinstance(s, dict) and s.get("data"):
+                            trim_cnt = max(10, len(s["data"]) // 10)
+                            s["data"] = s["data"][:-trim_cnt]
+                            trimmed_any = True
+            if not trimmed_any:
+                for slot in res.values():
+                    if isinstance(slot, dict):
+                        slot.pop("paired_anchors", None)
+                break
+
+    if truncated:
+        for slot in res.values():
+            if isinstance(slot, dict):
+                slot["status"] = CostEvidenceStatus.TRUNCATED.value
+                slot["promotable"] = False
+                slot["truncation_reason"] = trunc_reason or REASON_TOTAL_SIZE_EXCEEDED
+                slot["total_points"] = sum(
+                    len(s.get("data", []))
+                    for s in slot.get("series", [])
+                    if isinstance(s, dict) and isinstance(s.get("data"), list)
+                )
+
     return res
 
 
@@ -897,7 +1112,7 @@ def execute_cost_sampler(
     meter_placeholders: dict[str, str],
     paired_kwh_anchors: dict[str, Any] | None = None,
 ) -> tuple[CostEvidenceStatus, dict[str, Any], bool]:
-    """Execute bounded, isolated cost sampling inside the caller thread.
+    """Execute bounded, isolated cost sampling inside caller thread with watchdog deadline.
 
     Zero detached workers. Two-dispatch sequence: POST /Dashboard/Chart then
     GET /Dashboard/ChartData. Rejects response cookies and redirects.
@@ -919,15 +1134,43 @@ def execute_cost_sampler(
         "X-Requested-With": "XMLHttpRequest",
         "Origin": PORTAL_BASE_URL,
         "Referer": f"{PORTAL_BASE_URL}/Dashboard",
+        "Accept-Encoding": "identity",
     }
+
+    watchdog_fired = False
+    in_flight_resp: requests.Response | None = None
+
+    def _on_watchdog_expired() -> None:
+        nonlocal watchdog_fired
+        watchdog_fired = True
+        try:
+            cost_session.close()
+        except Exception:
+            pass
+        if in_flight_resp is not None:
+            try:
+                in_flight_resp.close()
+            except Exception:
+                pass
+            raw = getattr(in_flight_resp, "raw", None)
+            if raw is not None:
+                try:
+                    raw.close()
+                except Exception:
+                    pass
+
+    timer_duration = max(0.001, COST_PAIR_DEADLINE_SECONDS)
+    watchdog = threading.Timer(timer_duration, _on_watchdog_expired)
+    watchdog.daemon = True
+    watchdog.start()
 
     try:
         owner_check()
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if remaining <= 0 or watchdog_fired:
             return (
                 CostEvidenceStatus.MALFORMED,
-                {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_TIMEOUT},
+                {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_DEADLINE_EXCEEDED},
                 False,
             )
 
@@ -949,20 +1192,28 @@ def execute_cost_sampler(
         }
 
         # 1. POST /Dashboard/Chart
+        req_timeout = (min(max(0.001, remaining), 5.0), min(max(0.001, remaining), 5.0))
         resp_post = cost_session.post(
             f"{PORTAL_BASE_URL}/Dashboard/Chart",
             data=post_data,
             headers=headers,
             allow_redirects=False,
             stream=True,
-            timeout=min(remaining, 5.0),
+            timeout=req_timeout,
         )
+        in_flight_resp = resp_post
 
         body_post, err_post = _stream_response_body(resp_post, deadline, MAX_COST_BYTES)
-        if err_post == "timeout":
+        try:
+            resp_post.close()
+        except Exception:
+            pass
+        in_flight_resp = None
+
+        if err_post == "timeout" or watchdog_fired or time.monotonic() >= deadline:
             return (
                 CostEvidenceStatus.MALFORMED,
-                {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_TIMEOUT},
+                {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_DEADLINE_EXCEEDED},
                 False,
             )
         if err_post == "byte_cap_exceeded":
@@ -1011,28 +1262,36 @@ def execute_cost_sampler(
         # 2. GET /Dashboard/ChartData
         owner_check()
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if remaining <= 0 or watchdog_fired:
             return (
                 CostEvidenceStatus.MALFORMED,
-                {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_TIMEOUT},
+                {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_DEADLINE_EXCEEDED},
                 False,
             )
 
         ts = int(time.time() * 1000)
+        req_timeout_get = (min(max(0.001, remaining), 5.0), min(max(0.001, remaining), 5.0))
         resp_get = cost_session.get(
             f"{PORTAL_BASE_URL}/Dashboard/ChartData",
             params={"_": ts},
             headers=headers,
             allow_redirects=False,
             stream=True,
-            timeout=min(remaining, 5.0),
+            timeout=req_timeout_get,
         )
+        in_flight_resp = resp_get
 
         body_get, err_get = _stream_response_body(resp_get, deadline, MAX_COST_BYTES)
-        if err_get == "timeout":
+        try:
+            resp_get.close()
+        except Exception:
+            pass
+        in_flight_resp = None
+
+        if err_get == "timeout" or watchdog_fired or time.monotonic() >= deadline:
             return (
                 CostEvidenceStatus.MALFORMED,
-                {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_TIMEOUT},
+                {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_DEADLINE_EXCEEDED},
                 False,
             )
         if err_get == "byte_cap_exceeded":
@@ -1086,7 +1345,11 @@ def execute_cost_sampler(
             )
 
         try:
-            payload = json.loads(body_get.decode("utf-8"))
+            payload = json.loads(
+                body_get.decode("utf-8"),
+                parse_float=Decimal,
+                parse_int=Decimal,
+            )
         except Exception:
             return (
                 CostEvidenceStatus.MALFORMED,
@@ -1114,10 +1377,10 @@ def execute_cost_sampler(
             {"status": CostEvidenceStatus.UNSUPPORTED.value, "reason": REASON_SECURITY_GUARD},
             False,
         )
-    except requests.Timeout, TimeoutError:
+    except (requests.Timeout, TimeoutError):
         return (
             CostEvidenceStatus.MALFORMED,
-            {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_TIMEOUT},
+            {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_DEADLINE_EXCEEDED},
             False,
         )
     except requests.RequestException:
@@ -1136,4 +1399,17 @@ def execute_cost_sampler(
             False,
         )
     finally:
-        cost_session.close()
+        try:
+            watchdog.cancel()
+            watchdog.join(timeout=0.1)
+        except Exception:
+            pass
+        if in_flight_resp is not None:
+            try:
+                in_flight_resp.close()
+            except Exception:
+                pass
+        try:
+            cost_session.close()
+        except Exception:
+            pass

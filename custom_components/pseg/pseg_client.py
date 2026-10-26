@@ -2189,7 +2189,7 @@ class PsegClient:
         # Cost evidence leg (RC-02): executed after the normal daily+hourly kWh legs,
         # inside the same _locked client sequence, only for an attached current-owner
         # normal coordinator poll with proven daily identity and an immutable one-use permit.
-        from .cost_evidence import NY_TZ
+        from .cost_evidence import NY_TZ, is_issued_permit
 
         expected_ny_date = datetime.now(NY_TZ).date().isoformat()
         is_attached = (
@@ -2200,14 +2200,30 @@ class PsegClient:
                 or self._renewal_runtime._is_current(self._renewal_token)
             )
         )
+        valid_range = False
+        start_str = getattr(cost_permit, "start_str", None)
+        end_str = getattr(cost_permit, "end_str", None)
+        if isinstance(start_str, str) and isinstance(end_str, str):
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", start_str) and re.match(r"^\d{4}-\d{2}-\d{2}$", end_str):
+                try:
+                    d_start = date.fromisoformat(start_str)
+                    d_end = date.fromisoformat(end_str)
+                    if d_start.isoformat() == start_str and d_end.isoformat() == end_str and d_start <= d_end:
+                        valid_range = True
+                except ValueError:
+                    valid_range = False
+
+        permit_id = getattr(cost_permit, "permit_id", None)
         is_valid_permit = (
             cost_permit is not None
             and is_attached
+            and valid_range
             and getattr(cost_permit, "ny_date", None) == expected_ny_date
             and getattr(cost_permit, "usage_interval", None)
             in (USAGE_INTERVAL_DAILY, USAGE_INTERVAL_HOURLY)
-            and getattr(cost_permit, "permit_id", None)
-            and getattr(cost_permit, "permit_id", None) not in self._consumed_permits
+            and bool(permit_id)
+            and is_issued_permit(permit_id)
+            and permit_id not in self._consumed_permits
         )
 
         if is_valid_permit and result.get("identity_confirmed") is True:
@@ -2284,8 +2300,8 @@ class PsegClient:
                     }
                 except PsegTransientError:
                     raise
-                except Exception as err:
-                    _LOGGER.warning("PSE&G cost evidence sampling encountered an error: %s", err)
+                except Exception:
+                    _LOGGER.warning("PSE&G cost evidence sampling encountered an error")
                     result["cost_evidence"] = {"status": "malformed", "reason": "sampling_error"}
 
         # Sensor history remains the authoritative daily series; hourly rows are

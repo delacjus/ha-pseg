@@ -833,3 +833,33 @@ def test_session_owner_callback_enforces_final_send_protection() -> None:
     # In production: 2 explicit owner_check calls + 2 inside AllowlistedSession.send = 4
     # With drop_session_owner_callback mutant: AllowlistedSession() has no owner_check, so only 2 calls occur
     assert len(calls) == 4
+
+
+def test_watchdog_timer_is_started_and_cancelled() -> None:
+    """Design 1: Watchdog timer is started at pair start and cancelled in finally."""
+    seed_cookies = requests.cookies.RequestsCookieJar()
+    permit = _make_dummy_permit()
+
+    post_resp = requests.Response()
+    post_resp.status_code = 200
+    post_resp._content = b"ok"
+    get_resp = requests.Response()
+    get_resp.status_code = 200
+    get_resp._content = json.dumps(RAW_VALID_COST_PAYLOAD).encode()
+
+    with (
+        patch.object(requests.Session, "send", side_effect=[post_resp, get_resp]),
+        patch("custom_components.pseg.cost_evidence.threading.Timer") as mock_timer,
+    ):
+        mock_instance = mock_timer.return_value
+        status, sample, promotable = execute_cost_sampler(
+            seed_cookies=seed_cookies,
+            token="tok",
+            permit=permit,
+            owner_check=lambda: None,
+            authoritative_meters={"12345678"},
+            meter_placeholders={},
+        )
+        assert status == CostEvidenceStatus.OK
+        mock_instance.start.assert_called_once()
+        mock_instance.cancel.assert_called_once()
