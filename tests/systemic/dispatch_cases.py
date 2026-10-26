@@ -144,9 +144,7 @@ def slow_transition(flow: str, index: int) -> str:
 
 #: Per-flow operations kept out of the retirement sweep, with the reason recorded in
 #: :data:`tests.support.boundaries.EXCLUSIONS`.
-SWEEP_EXCLUSIONS: Mapping[str, tuple[str, ...]] = {
-    "S": ("keepalive",),
-}
+SWEEP_EXCLUSIONS: Mapping[str, tuple[str, ...]] = {}
 
 
 def sweepable_boundaries(flow: str) -> tuple[tuple[str, Boundary], ...]:

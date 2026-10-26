@@ -129,8 +129,9 @@ def test_slow_matrix_covers_every_swept_boundary_once() -> None:
     """The slow sweep covers every applicable boundary exactly once, all transitions."""
     from tests.systemic.dispatch_cases import SWEEP_EXCLUSIONS
 
-    assert SWEEP_EXCLUSIONS == {"S": ("keepalive",)}
-    assert "s_keepalive_sso" in EXCLUSIONS
+    # Okta-mode keepalive is swept since I2 encodes its SAML ACS relay.
+    assert SWEEP_EXCLUSIONS == {}
+    assert "s_keepalive_sso" not in EXCLUSIONS
     problems = sweep_coverage_problems()
     assert not problems, f"slow sweep coverage gaps: {problems}"
     tiers = case_tiers()

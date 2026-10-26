@@ -15,7 +15,7 @@ Verifies:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -379,6 +379,47 @@ def test_permitted_current_owner_redirect_policy() -> None:
     v_ka = oracle.evaluate_i2(keepalive_repost)
     assert len(v_ka) == 1
     assert v_ka[0].code == ViolationCode.I2
+
+
+def test_okta_keepalive_saml_acs_is_the_only_keepalive_exemption() -> None:
+    """Okta-mode keepalive may relay its SAML assertion to ACS; nothing else may.
+
+    PsegClient.keepalive() runs renew_sso() for an Okta-mode jar every 10 minutes,
+    posting Okta's SAMLResponse (never the saved password) to the portal ACS.
+    """
+
+    class _Registry(dict):
+        pass
+
+    def _client(local: bool) -> SimpleNamespace:
+        return SimpleNamespace(
+            is_local_mode=local,
+            _in_keepalive=True,
+            _security_step_latched=False,
+            _captcha_latched=False,
+            _renewal_admission=SimpleNamespace(terminal_reason=None),
+        )
+
+    registry = _Registry(gen_okta=_client(False), gen_local=_client(True))
+    oracle = Oracle()
+    oracle.attach_registry(registry)
+    acs = f"{PORTAL_BASE_URL}/Saml/okta-prod/Acs"
+
+    okta_acs = _make_dummy_dispatch(generation_id="gen_okta", method="POST", url=acs)
+    assert oracle.evaluate_i2(okta_acs) == []
+
+    local_acs = _make_dummy_dispatch(generation_id="gen_local", method="POST", url=acs)
+    assert [v.code for v in oracle.evaluate_i2(local_acs)] == [ViolationCode.I2]
+
+    okta_password = _make_dummy_dispatch(
+        generation_id="gen_okta", method="POST", url=f"{PORTAL_BASE_URL}/Home/Login"
+    )
+    assert [v.code for v in oracle.evaluate_i2(okta_password)] == [ViolationCode.I2]
+
+    okta_retired = _make_dummy_dispatch(
+        generation_id="gen_okta", method="POST", url=acs, is_after_retire=True
+    )
+    assert [v.code for v in oracle.evaluate_i2(okta_retired)] == [ViolationCode.I2]
 
 
 def test_i6_warm_cold_separate_instances() -> None:

@@ -85,6 +85,11 @@ class PermittedRedirectPolicy:
 
     allowed_statuses: tuple[int, ...] = (307, 308)
     forbid_keepalive: bool = True
+    # Okta (non-local) mode keepalive is a documented full SSO round trip every
+    # 10 minutes (PsegClient.keepalive -> renew_sso): it relays Okta's SAML
+    # assertion to the portal ACS endpoint but never posts the saved password.
+    # Only that ACS POST, by an Okta-mode owner, is exempt from forbid_keepalive.
+    permit_okta_keepalive_saml_acs: bool = True
     forbid_retired: bool = True
     forbid_terminal: bool = True
     forbid_latched: bool = True
@@ -490,8 +495,14 @@ class Oracle:
             )
         ) or dispatch.headers.get("X-Latched") == "true"
 
+        is_okta_keepalive_saml = (
+            p.permit_okta_keepalive_saml_acs
+            and "/Acs" in dispatch.url
+            and client is not None
+            and getattr(client, "is_local_mode", True) is False
+        )
         reasons: list[str] = []
-        if is_keepalive and p.forbid_keepalive:
+        if is_keepalive and p.forbid_keepalive and not is_okta_keepalive_saml:
             reasons.append("from_keepalive")
         if is_retired and p.forbid_retired:
             reasons.append("generation_retired")

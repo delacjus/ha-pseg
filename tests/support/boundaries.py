@@ -265,15 +265,6 @@ EXCLUSIONS: Mapping[str, str] = MappingProxyType(
             "pre-fence first-request case. The reload itself is exercised as a retirement "
             "transition on attached boundaries."
         ),
-        "s_keepalive_sso": (
-            "S-mode keepalive performs the documented 10-minute Okta SAML round trip, "
-            "which sends a POST to the ACS endpoint while the client is inside "
-            "keepalive(). P2-04's I2 forbids every credential POST from keepalive (even "
-            "the sanctioned SAML assertion), so any S keepalive trace raises I2 before a "
-            "fence assertion can run. This is a P2-04 I2 rule-vs-product conflict, not a "
-            "dispatch-fence failure: S keepalive is inventoried by the dry run but kept "
-            "out of the retirement sweep until P2-04 resolves the rule."
-        ),
         "handoff_l_r_s": (
             "Same-cookie human handoff retires and commits only when the handoff can "
             "prove a real renewal. L/S healthy same-cookie handoffs are refused by the "
