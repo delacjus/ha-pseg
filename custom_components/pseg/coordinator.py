@@ -1410,7 +1410,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     for row in consumption_stats
                 ],
                 cost_statistic_id: [
-                    [row["start"].isoformat(), row["state"], row["sum"]] for row in cost_stats
+                    [row["start"].isoformat(), row["state"], row["sum"]]
+                    for row in cost_stats
                 ],
             },
             "promoted": (
@@ -1443,7 +1444,10 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
         for day, check in promote.items():
             cost_total = round(
-                sum(round(record["kwh"] * price, STATISTICS_PRECISION) for record in check.records),
+                sum(
+                    round(record["kwh"] * price, STATISTICS_PRECISION)
+                    for record in check.records
+                ),
                 STATISTICS_PRECISION,
             )
             common = {

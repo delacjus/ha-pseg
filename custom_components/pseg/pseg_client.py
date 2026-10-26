@@ -2679,7 +2679,11 @@ class PsegClient:
                 ):
                     invalid += 1
                     continue
-                if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(x):
+                if (
+                    isinstance(x, bool)
+                    or not isinstance(x, (int, float))
+                    or not math.isfinite(x)
+                ):
                     invalid += 1
                     continue
                 timestamp = float(x)
@@ -2722,13 +2726,16 @@ class PsegClient:
                     point_reason = "dst_ambiguous"
                 elif start_aware is not None and end_aware is not None:
                     start_check = (
-                        abs((start_aware.astimezone(UTC) - start).total_seconds())
+                        abs(
+                            (start_aware.astimezone(UTC) - start).total_seconds()
+                        )
                         <= LABEL_TOLERANCE_SECONDS
                     )
                     end_check = (
                         abs(
                             (
-                                end_aware.astimezone(UTC) - (start + timedelta(hours=1))
+                                end_aware.astimezone(UTC)
+                                - (start + timedelta(hours=1))
                             ).total_seconds()
                         )
                         <= LABEL_TOLERANCE_SECONDS
