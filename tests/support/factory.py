@@ -1,18 +1,122 @@
-"""Client generation factory and registry.
+"""Client generation factory, registry and exit-boundary catalog.
 
 Instruments client construction across package and config flow so that each
 created client instance receives a distinct generation ID and is automatically
 bound to a per-generation ScriptedPortal adapter view.
+
+The P2-01 client contract also requires the before/after method gates to form a
+named boundary catalog. The P2-07 inventory showed this factory had no boundary
+catalog at all (only client construction), so :data:`EXIT_BOUNDARY_CATALOG`
+completes it below: every persistence-relevant exit method of the client, with
+the phase, the runner that reaches it and the lifecycle operation that does.
+Test adapters wrap those names instead of hard-coding production attributes.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import importlib
 import sys
 import threading
 from typing import Any
 
 from .portal import ScriptedPortal
+
+
+@dataclass(frozen=True, slots=True)
+class ExitBoundary:
+    """One named before/after method gate at a client persistence exit."""
+
+    name: str
+    """Isolated production method name (never spelled out by the cases)."""
+
+    phase: str
+    """``before`` the method body runs, or ``after`` it returns/raises."""
+
+    runner: str
+    """``executor`` when production calls it off the event loop, else ``loop``."""
+
+    operation: str
+    """Lifecycle operation that reaches this boundary: poll/keepalive/backfill."""
+
+    description: str = ""
+
+    @property
+    def boundary_id(self) -> str:
+        """Stable gate/case identifier, e.g. ``after:keepalive``."""
+        return f"{self.phase}:{self.name}"
+
+
+#: Methods whose before/after gates bound every client persistence exit.
+EXIT_BOUNDARY_METHODS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "fetch_energy_data",
+        "executor",
+        "poll",
+        "Daily+hourly fetch: confirms/publishes the validated whole-jar checkpoint.",
+    ),
+    (
+        "keepalive",
+        "executor",
+        "keepalive",
+        "GET-only keepalive: confirms a rotated jar without the poll's export.",
+    ),
+    (
+        "fetch_history_range",
+        "executor",
+        "backfill",
+        "History chunks: each validated chunk confirms/publishes a jar.",
+    ),
+    (
+        "export_cookies_and_auth_reason",
+        "executor",
+        "poll",
+        "Cookie/auth export queued by the coordinator's persistence handoff.",
+    ),
+    (
+        "confirmed_cookies",
+        "loop",
+        "poll",
+        "Confirmed-jar accessor compared against the live export.",
+    ),
+    (
+        "pending_confirmed_snapshot",
+        "loop",
+        "poll",
+        "Pending immutable checkpoint read by every failure/stop handoff.",
+    ),
+)
+
+#: The complete before/after exit-boundary catalog (12 named gates).
+EXIT_BOUNDARY_CATALOG: tuple[ExitBoundary, ...] = tuple(
+    ExitBoundary(
+        name=name, phase=phase, runner=runner, operation=operation, description=description
+    )
+    for name, runner, operation, description in EXIT_BOUNDARY_METHODS
+    for phase in ("before", "after")
+)
+
+#: Declared-but-not-applicable gate variants, with the reason recorded per phase.
+EXIT_BOUNDARY_GATE_EXCLUSIONS: dict[str, str] = {
+    "export_cookies": (
+        "export_cookies (the plain cookie export) is only reached by the unattached "
+        "human config-flow commit, not by the authenticated persistence handoff; the "
+        "authenticated exit exports through export_cookies_and_auth_reason."
+    ),
+}
+
+
+def exit_boundary(name: str, phase: str) -> ExitBoundary:
+    """Return the catalog entry for one method/phase pair."""
+    for boundary in EXIT_BOUNDARY_CATALOG:
+        if boundary.name == name and boundary.phase == phase:
+            return boundary
+    raise KeyError(f"{phase}:{name}")
+
+
+def exit_boundary_ids() -> tuple[str, ...]:
+    """Return every catalog gate identifier in declaration order."""
+    return tuple(boundary.boundary_id for boundary in EXIT_BOUNDARY_CATALOG)
 
 
 class ClientRegistry:
