@@ -52,9 +52,12 @@ from tests.stats_suite.fault_cases import (
     get_case,
 )
 from tests.support.stats_faults import (
+    AFTER_JOURNAL_DISCARD,
+    AFTER_JOURNAL_SAVE,
     AFTER_STORE_LOAD,
     BARRIER_INVENTORY,
     BEFORE_JOURNAL_COMMIT,
+    BEFORE_JOURNAL_DISCARD,
     BEFORE_RECORDER_COMMIT,
     BEFORE_STORE_LOAD,
     RECORDER_COMMIT_CONSUMPTION,
@@ -73,7 +76,6 @@ from tests.support.stats_model import (
     assert_chained_nondecreasing,
     compare_both_series,
     ny_day_hours_utc,
-    ny_day_start_utc,
 )
 
 CONSUMPTION_ID = "pseg:m1_energy_consumption"
@@ -183,12 +185,12 @@ def _check_slow_matrix(request: pytest.FixtureRequest) -> None:
 
 
 def test_matrix_enumeration_and_barrier_descriptors_completeness() -> None:
-    """Verify all 238 combinations are declared with explicit reasons for impossible cases."""
+    """Verify all 252 combinations are declared with explicit reasons for impossible cases."""
     audit = audit_fault_matrix()
-    assert audit["total_cases"] == 238
-    assert audit["applicable_count"] == 82
-    assert audit["impossible_count"] == 156
-    assert audit["barriers_covered"] == 34
+    assert audit["total_cases"] == 252
+    assert audit["applicable_count"] == 85
+    assert audit["impossible_count"] == 167
+    assert audit["barriers_covered"] == 36
     assert len(audit["fault_kinds"]) == 7
 
     # Ensure all barriers in BARRIER_INVENTORY are fully covered
@@ -231,7 +233,7 @@ async def test_fast_tier_pending_journal_control(
         baseline = _daily_with(_recs("2026-10-01", 2, kwh=10.0), "2026-10-01", 24.0)
         hourly = _hourly("2026-10-01")
 
-        with pytest.raises((OSError, PsegStatisticsError)):
+        with pytest.raises(RuntimeError, match="Statistics provenance commit is not durable"):
             await coord.async_record_statistics(
                 baseline,
                 meter_id="m1",
@@ -719,7 +721,7 @@ async def test_canonical_aware_25_hour_recovery_no_reparsing(
         # Fault once at STORE_WRITE_COMMIT
         harness.fail_once(STORE_WRITE_COMMIT, OSError("Store commit failure on 25h promotion"))
 
-        with pytest.raises((OSError, PsegStatisticsError)):
+        with pytest.raises(RuntimeError, match="Statistics provenance commit is not durable"):
             await coord.async_record_statistics(
                 fall_daily,
                 meter_id="m1",
@@ -834,6 +836,83 @@ async def test_historical_rows_before_fixture_remain_unchanged(
 # =============================================================================
 
 
+async def _assert_matrix_intermediate(
+    case, substrate, hass, initial_day, initial_hourly, baseline, hourly
+):
+    """Independent fault-phase contract: old / partial / verified / provenance committed."""
+    barrier, kind = case.barrier, case.fault_kind
+    old = ReferenceStatisticsModel()
+    old.record_daily(initial_day)
+    old.promote_hourly("2026-09-30", initial_hourly)
+    complete = ReferenceStatisticsModel()
+    complete.record_daily(initial_day + baseline)
+    complete.promote_hourly("2026-09-30", initial_hourly)
+    complete.promote_hourly("2026-10-01", hourly)
+    ids = (CONSUMPTION_ID, COST_ID)
+    expected = {sid: old.expected_rows_as_tuples(sid) for sid in ids}
+    pending, promoted = False, False
+    discard = barrier in (BEFORE_JOURNAL_DISCARD, AFTER_JOURNAL_DISCARD)
+    recovery = barrier.startswith(("before_recovery_", "after_recovery_"))
+    early = barrier in (
+        BEFORE_STORE_LOAD,
+        AFTER_STORE_LOAD,
+        "before_recover_pending",
+        "after_recover_pending",
+        "before_baseline_reads",
+        "after_baseline_reads",
+        "before_journal_save",
+        "store_write_pending",
+    )
+    if discard:
+        pending = barrier == BEFORE_JOURNAL_DISCARD and kind != FAULT_KIND_PAUSE
+    elif kind == FAULT_KIND_PAUSE:
+        promoted = True
+        expected = {sid: complete.expected_rows_as_tuples(sid) for sid in ids}
+    elif recovery:
+        pending = True
+        if barrier in ("before_recovery_commit", "before_recovery_replay"):
+            if barrier == "before_recovery_commit" or kind == FAULT_KIND_RETIRED_STALE:
+                expected = {sid: complete.expected_rows_as_tuples(sid) for sid in ids}
+            if barrier == "before_recovery_commit" and kind == FAULT_KIND_RETIRED_STALE:
+                pending, promoted = False, True
+    elif early:
+        pass
+    elif barrier == "after_journal_save" and kind == FAULT_KIND_RETIRED_STALE:
+        pass  # Production durably discards the journal before any recorder import.
+    else:
+        pending = True
+        if barrier not in (STORE_READBACK, RECORDER_IMPORT_CONSUMPTION, RECORDER_IMPORT_COST):
+            expected = {sid: complete.expected_rows_as_tuples(sid) for sid in ids}
+            if barrier in (RECORDER_COMMIT_CONSUMPTION, RECORDER_COMMIT_COST):
+                failed = CONSUMPTION_ID if barrier == RECORDER_COMMIT_CONSUMPTION else COST_ID
+                expected[failed] = old.expected_rows_as_tuples(failed)
+
+    disk = substrate.read_store_json()["data"]
+    assert bool(disk["pending"]) is pending, (
+        f"{case.fault_id}: intermediate physical pending must be {pending}; journal cleared early"
+    )
+    for sid in ids:
+        assert set(disk["promoted"][sid]) == (
+            {"2026-09-30", "2026-10-01"} if promoted else {"2026-09-30"}
+        ), f"{case.fault_id}: premature or missing physical promotion for {sid}"
+    if pending:
+        assert len(disk["pending"]) == 1
+        mutation = next(iter(disk["pending"].values()))
+        for sid in ids:
+            assert set(mutation["promoted"][sid]) == {"2026-10-01"}
+            rows = [
+                (datetime.fromisoformat(st), state, total)
+                for st, state, total in mutation["series"][sid]
+            ]
+            assert rows == complete.expected_rows_as_tuples(sid)[24:]
+    compare_both_series(
+        actual_consumption=await substrate.query_recorder_rows(hass, CONSUMPTION_ID),
+        actual_cost=await substrate.query_recorder_rows(hass, COST_ID),
+        expected_consumption=expected[CONSUMPTION_ID],
+        expected_cost=expected[COST_ID],
+    )
+
+
 # Every applicable row in the declared matrix; nothing is hand-picked.
 MATRIX_SAMPLE_CASES = [c.fault_id for c in APPLICABLE_CASES]
 
@@ -896,88 +975,66 @@ async def test_full_matrix_applicable_fault_convergence(
         if barrier in (BEFORE_STORE_LOAD, STORE_READBACK, AFTER_STORE_LOAD):
             coord._stats_state._loaded = False
 
-        if is_recovery_barrier:
-            # Seed a pending journal mutation on disk first (before configuring fault)
-            sample_mutation = {
-                "created_at": datetime.now(UTC).isoformat(),
-                "first_start": ny_day_start_utc(date(2026, 10, 1)).isoformat(),
-                "series": {
-                    CONSUMPTION_ID: [
-                        [st.isoformat(), 1.0, float(i + 1)]
-                        for i, st in enumerate(ny_day_hours_utc(date(2026, 10, 1)))
-                    ],
-                    COST_ID: [
-                        [st.isoformat(), 0.25, float(round((i + 1) * 0.25, 4))]
-                        for i, st in enumerate(ny_day_hours_utc(date(2026, 10, 1)))
-                    ],
-                },
-            }
-            await coord._stats_state.async_begin(sample_mutation)
-            await coord._stats_state.async_wait_durable()
-            _apply_fault()
-            try:
-                if kind == FAULT_KIND_PAUSE:
-                    # A paused recovery barrier never returns on its own: hold it,
-                    # prove the pause was reached, then release it.
-                    task = asyncio.create_task(coord._async_recover_pending())
-                    for _ in range(100):
-                        await asyncio.sleep(0.005)
-                        if harness.hits(barrier) >= 1:
-                            break
+        async def attempt(operation):
+            if kind == FAULT_KIND_PAUSE:
+                task = asyncio.create_task(operation, name="test_matrix_pause")
+                try:
+                    await harness.wait_until_reached(barrier)
+                    assert not task.done(), f"Pause {barrier} did not suspend the operation"
                     harness.resume(barrier)
-                    await asyncio.wait_for(task, timeout=5.0)
-                else:
-                    await coord._async_recover_pending()
-            except (
-                OSError,
-                SQLAlchemyError,
-                TimeoutError,
-                asyncio.CancelledError,
-                PsegStatisticsError,
-            ):
-                pass
-        elif kind == FAULT_KIND_PAUSE:
+                    # No exception swallowing: resumed work must actually complete.
+                    await asyncio.wait_for(task, timeout=10.0)
+                    assert not task.cancelled(), f"Resumed operation {barrier} was cancelled"
+                finally:
+                    harness.resume(barrier)
+                    if not task.done():
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+            else:
+                try:
+                    await operation
+                except (
+                    OSError,
+                    SQLAlchemyError,
+                    TimeoutError,
+                    asyncio.CancelledError,
+                    PsegStatisticsError,
+                ):
+                    pass
+                except RuntimeError as err:
+                    assert barrier == STORE_WRITE_COMMIT
+                    assert str(err) == "Statistics provenance commit is not durable"
+
+        if is_recovery_barrier:
+            # Journal the actual intended mutation, with no imports, before faulting recovery.
+            harness.fail_once(AFTER_JOURNAL_SAVE, OSError("seed pending recovery journal"))
+            with pytest.raises(PsegStatisticsError, match="seed pending"):
+                await coord.async_record_statistics(
+                    baseline, meter_id="m1", hourly_records=hourly, hourly_granularity="hourly"
+                )
             _apply_fault()
-            task = asyncio.create_task(
+            await attempt(coord._async_recover_pending())
+        else:
+            if barrier in (BEFORE_JOURNAL_DISCARD, AFTER_JOURNAL_DISCARD):
+                harness.retire_once(AFTER_JOURNAL_SAVE)
+            _apply_fault()
+            await attempt(
                 coord.async_record_statistics(
                     baseline, meter_id="m1", hourly_records=hourly, hourly_granularity="hourly"
                 )
             )
-            for _ in range(100):
-                await asyncio.sleep(0.005)
-                if harness.hits(barrier) >= 1:
-                    break
-            harness.resume(barrier)
-            try:
-                await asyncio.wait_for(task, timeout=5.0)
-            except Exception:
-                pass
-        else:
-            _apply_fault()
-            try:
-                await coord.async_record_statistics(
-                    baseline,
-                    meter_id="m1",
-                    hourly_records=hourly,
-                    hourly_granularity="hourly",
-                )
-            except (
-                OSError,
-                SQLAlchemyError,
-                TimeoutError,
-                asyncio.CancelledError,
-                PsegStatisticsError,
-            ):
-                pass
 
         await async_wait_recording_done(hass)
-
-        # Assert fault fired
-        fired_or_hit = harness.fired(barrier) or harness.hits(barrier)
-        assert fired_or_hit >= 1, (
-            f"Fault {case.fault_id} at barrier {barrier} was never reached or fired!"
+        fired = harness.fired(barrier)
+        assert fired == 1, (
+            f"Fault {case.fault_id} must fire exactly once (fired={fired}, hits={harness.hits(barrier)})"
         )
-        _record_trigger(case.fault_id, barrier, fired_or_hit)
+        _record_trigger(case.fault_id, barrier, fired)
+
+        # Assert physical disk and BOTH SQLite series BEFORE cold reconstruction/healing.
+        await _assert_matrix_intermediate(
+            case, substrate, hass, initial_day, initial_hourly, baseline, hourly
+        )
 
         # Cold reconstruct
         harness.uninstall()

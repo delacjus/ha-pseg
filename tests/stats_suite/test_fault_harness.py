@@ -26,6 +26,7 @@ from pytest_homeassistant_custom_component.components.recorder.common import (
     async_wait_recording_done,
 )
 
+from custom_components.pseg import coordinator as coord_mod
 from custom_components.pseg.coordinator import (
     PsegDataUpdateCoordinator,
     PsegStatisticsError,
@@ -33,11 +34,16 @@ from custom_components.pseg.coordinator import (
 from custom_components.pseg.statistics_hourly import expected_hour_starts
 from tests.support.stats_faults import (
     BARRIER_INVENTORY,
+    BEFORE_BASELINE_READS,
     BEFORE_JOURNAL_SAVE,
     BEFORE_RECORDER_COMMIT,
+    RECORDER_COMMIT_CONSUMPTION,
+    RECORDER_COMMIT_COST,
     RECORDER_READBACK_CONSUMPTION,
     RECORDER_READBACK_COST,
     STORE_READBACK,
+    STORE_WRITE_COMMIT,
+    STORE_WRITE_PENDING,
     PhysicalDurabilitySubstrate,
     StatsFaultHarness,
     audit_barrier_inventory,
@@ -122,7 +128,7 @@ def coord(hass: HomeAssistant, substrate: PhysicalDurabilitySubstrate) -> PsegDa
 def test_barrier_inventory_enumeration_and_both_series() -> None:
     """Verify that the named semantic barrier inventory enumerates both series completely."""
     audit = audit_barrier_inventory()
-    assert audit["total_barriers"] == 34
+    assert audit["total_barriers"] == 36
     assert audit["categories"] == [
         "awaited_recording",
         "awaited_recovery",
@@ -312,7 +318,9 @@ async def test_model_comparison_reads_disk_not_warm_memory(
 # -----------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("one_shot", [False, True])
 async def test_fault_controls_pause_and_resume(
+    one_shot: bool,
     hass: HomeAssistant,
     substrate: PhysicalDurabilitySubstrate,
     coord: PsegDataUpdateCoordinator,
@@ -322,17 +330,14 @@ async def test_fault_controls_pause_and_resume(
     harness.install(coord)
 
     try:
-        harness.pause(BEFORE_RECORDER_COMMIT)
+        control = harness.pause_once if one_shot else harness.pause
+        control(BEFORE_RECORDER_COMMIT)
         task = asyncio.create_task(
             coord.async_record_statistics(_recs("2026-10-01", 1), meter_id="m1"),
             name="test_pause_task",
         )
 
-        # Allow execution to reach the barrier
-        for _ in range(100):
-            await asyncio.sleep(0.02)
-            if harness.hits(BEFORE_RECORDER_COMMIT) >= 1:
-                break
+        await harness.wait_until_reached(BEFORE_RECORDER_COMMIT)
 
         assert harness.hits(BEFORE_RECORDER_COMMIT) == 1
         assert not task.done(), "Task should be paused at BEFORE_RECORDER_COMMIT"
@@ -421,7 +426,7 @@ async def test_stalled_barrier_times_out_and_cleans_up(
 
         start_time = asyncio.get_running_loop().time()
         with pytest.raises((TimeoutError, PsegStatisticsError), match="stalled and timed out"):
-            await coord.async_record_statistics(_recs("2026-10-01", 1), meter_id="m1")
+            await coord._stats_state._async_verify_persisted(coord._stats_state._data)
         elapsed = asyncio.get_running_loop().time() - start_time
 
         assert elapsed < 10.0, f"Stalled barrier took {elapsed}s, exceeded 10.0s bound!"
@@ -481,5 +486,133 @@ async def test_per_series_fault_injection_cost_failure_retains_journal(
         assert harness.hits(RECORDER_READBACK_CONSUMPTION) >= 1
         assert harness.hits(RECORDER_READBACK_COST) == 1
 
+    finally:
+        await harness.cleanup()
+
+
+async def test_one_shot_pause_timeout_releases_waiter() -> None:
+    """An unreleased one-shot pause fails explicitly and unregisters its waiter."""
+    harness = StatsFaultHarness()
+    harness.pause_once(BEFORE_RECORDER_COMMIT)
+    action = harness._actions[BEFORE_RECORDER_COMMIT]
+    action.timeout = 0.03  # Deliberate timeout sentinel, not an ordering sleep.
+    try:
+        with pytest.raises(
+            TimeoutError, match="Barrier before_recorder_commit stalled and timed out"
+        ):
+            await harness._dispatch(BEFORE_RECORDER_COMMIT)
+        assert action.event.is_set()
+        assert not any(harness._waiters.values())
+        assert harness.fired(BEFORE_RECORDER_COMMIT) == 1
+    finally:
+        await harness.cleanup()
+
+
+@pytest.mark.parametrize(
+    "barrier",
+    [
+        STORE_WRITE_PENDING,
+        STORE_READBACK,
+        STORE_WRITE_COMMIT,
+        BEFORE_BASELINE_READS,
+        RECORDER_COMMIT_CONSUMPTION,
+        RECORDER_COMMIT_COST,
+    ],
+)
+async def test_labels_reach_physical_boundaries(barrier, hass, substrate, coord, monkeypatch):
+    """Observe real disk/DB at each contested seam, independently of label counts."""
+    await coord.async_record_statistics(_recs("2026-10-01", 1), meter_id="m1")
+    await async_wait_recording_done(hass)
+    old_bytes = substrate.read_store_bytes()
+    old_rows = {
+        sid: await substrate.query_recorder_rows(hass, sid) for sid in (CONSUMPTION_ID, COST_ID)
+    }
+    baseline_calls = []
+
+    def observe_baseline(name, original):
+        async def observed(hass_arg, statistic_id, start):
+            baseline_calls.append((name, statistic_id))
+            return await original(hass_arg, statistic_id, start)
+
+        return observed
+
+    for name in ("_async_get_last_stat_before", "_async_get_stats_from"):
+        monkeypatch.setattr(coord_mod, name, observe_baseline(name, getattr(coord_mod, name)))
+    harness = StatsFaultHarness(coord, substrate)
+    harness.install(coord)
+    task = None
+    try:
+        harness.pause_once(barrier)
+        task = asyncio.create_task(
+            coord.async_record_statistics(_recs("2026-10-02", 1), meter_id="m1"),
+            name="test_boundary_operation",
+        )
+        await harness.wait_until_reached(barrier)
+        assert not task.done()
+        disk = substrate.read_store_json()["data"]
+        if barrier == BEFORE_BASELINE_READS:
+            assert baseline_calls == [], "baseline gate follows an unguarded prior-sum await"
+            assert harness.hits(BEFORE_JOURNAL_SAVE) == 0
+            assert not coord._stats_state.has_pending()
+            assert substrate.read_store_bytes() == old_bytes
+        elif barrier == STORE_WRITE_PENDING:
+            assert coord._stats_state.has_pending(), "pending write gate precedes mutation creation"
+            assert substrate.read_store_bytes() == old_bytes, (
+                "pending write gate follows physical write"
+            )
+        elif barrier == STORE_READBACK:
+            assert disk["pending"], "readback gate must follow physical pending save"
+            assert coord._stats_state._saved_revision < coord._stats_state._revision
+        elif barrier == STORE_WRITE_COMMIT:
+            assert disk["pending"], "commit write must leave old physical journal until write"
+            assert not coord._stats_state.has_pending(), (
+                "commit write gate precedes memory transition"
+            )
+        else:
+            assert disk["pending"]
+            consumption = await substrate.query_recorder_rows(hass, CONSUMPTION_ID)
+            cost = await substrate.query_recorder_rows(hass, COST_ID)
+            assert cost == old_rows[COST_ID], "cost committed before its own transaction gate"
+            if barrier == RECORDER_COMMIT_CONSUMPTION:
+                assert consumption == old_rows[CONSUMPTION_ID]
+            else:
+                assert len(consumption) == 2, "cost gate precedes consumption transaction commit"
+                assert consumption[-1][2] == 20.0
+        harness.resume(barrier)
+        await asyncio.wait_for(task, timeout=10)
+        await async_wait_recording_done(hass)
+        assert harness.fired(barrier) == 1
+        # Four awaited baseline reads, including both prior-sum reads.
+        assert harness.hits(BEFORE_BASELINE_READS) == 4
+        assert baseline_calls == [
+            ("_async_get_last_stat_before", CONSUMPTION_ID),
+            ("_async_get_last_stat_before", COST_ID),
+            ("_async_get_stats_from", CONSUMPTION_ID),
+            ("_async_get_stats_from", COST_ID),
+        ]
+        assert not substrate.read_store_json()["data"]["pending"]
+        assert len(await substrate.query_recorder_rows(hass, CONSUMPTION_ID)) == 2
+        assert len(await substrate.query_recorder_rows(hass, COST_ID)) == 2
+    finally:
+        harness.resume(barrier)
+        if task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await harness.cleanup()
+
+
+async def test_physical_readback_stall_refuses_recorder_writes(hass, substrate, coord):
+    """The production save must refuse to import when its real readback stalls."""
+    harness = StatsFaultHarness(coord, substrate)
+    harness.install(coord)
+    try:
+        harness.hold(STORE_READBACK, timeout=0.03)
+        with pytest.raises(PsegStatisticsError, match="Statistics journal is not durable"):
+            await coord.async_record_statistics(_recs("2026-10-01", 1), meter_id="m1")
+        assert harness.fired(STORE_READBACK) == 1
+        assert substrate.read_store_json()["data"]["pending"]
+        assert not substrate.read_store_json()["data"]["promoted"]
+        assert await substrate.query_recorder_rows(hass, CONSUMPTION_ID) == []
+        assert await substrate.query_recorder_rows(hass, COST_ID) == []
     finally:
         await harness.cleanup()

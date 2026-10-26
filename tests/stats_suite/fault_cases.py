@@ -1,6 +1,6 @@
 """Declared fault cases and applicability matrix for PSE&G statistics durability tests.
 
-Enumerates all 34 named semantic barriers against 7 fault kinds:
+Enumerates all 36 named semantic barriers against 7 fault kinds:
 (write_error, read_error, sqlalchemy_error, timeout, cancellation, retired_stale, pause).
 Every impossible combination contains an explicit, verified domain reason explaining why
 the seam cannot physically encounter or exhibit that specific fault kind.
@@ -285,8 +285,8 @@ def audit_fault_matrix() -> dict[str, Any]:
     """Audit the completeness, uniqueness, and consistency of declared fault cases."""
     assert len(FAULT_MATRIX) == len(BARRIER_INVENTORY) * len(ALL_FAULT_KINDS)
     assert len(_CASES_BY_ID) == len(FAULT_MATRIX), "Duplicate fault_id found in matrix"
-    assert len(APPLICABLE_CASES) == 82
-    assert len(IMPOSSIBLE_CASES) == 156
+    assert len(APPLICABLE_CASES) == 85
+    assert len(IMPOSSIBLE_CASES) == 167
 
     for case in IMPOSSIBLE_CASES:
         assert case.impossible_reason is not None, f"Missing impossible reason for {case.fault_id}"
