@@ -13,7 +13,7 @@ Includes a built-in Lovelace card with 7-day and 14-day history views and kWh / 
 
 ## About This Fork (`delacjus/ha-pseg`)
 
-This project (`delacjus/ha-pseg`, current release **1.6.1**) is an independent fork of `sidprax/ha-pseg`. It hardens the integration for security, authentication reliability, and long-term statistics integrity:
+This project (`delacjus/ha-pseg`, current release **1.7.0**) is an independent fork of `sidprax/ha-pseg`. It hardens the integration for security, authentication reliability, and long-term statistics integrity:
 
 - **Direct local MyMeter sign-in**: Home Assistant signs into MyMeter directly. There is no companion add-on, and credentials are never sent over HTTP to a `localhost:8000` helper.
 - **Strict host allowlist**: Every HTTP request, redirect, and form submission is strictly restricted to `{mysmartenergy.nj.pseg.com, id.myaccount.pseg.com}`. When signing in with a MyMeter email and password, requests are narrowed to `mysmartenergy.nj.pseg.com` only, preventing any credentials or tokens from being sent to Okta.
@@ -46,6 +46,7 @@ This fork deliberately does **not** adopt:
 - **Manual Refresh**: Includes a refresh button (`button.pseg_refresh_data`) to trigger an immediate portal sync.
 - **Session Telemetry**: Monitors session lifespan and renewal status directly on the Connection Status sensor (`sensor.pseg_connection_status`).
 - **Built-in Lovelace Card**: Bundles `pseg-energy-card`, auto-registered and ready to add to any dashboard since 1.6.1.
+- **Portal cost evidence (opt-in, v1.7.0)**: A bounded, isolated capture of the PSE&G portal's dollar chart, exposed only through diagnostics and controlled by the admin action `pseg.set_cost_mode`, which is **off by default**. It imports nothing: costs are still estimated from your configured rate until real portal cost has been verified.
 
 ## Installation
 
@@ -61,7 +62,7 @@ Install `delacjus/ha-pseg` as a custom repository in HACS:
    ```
 4. Set the **Category** to **Integration** and click **Add**.
 5. Find **PSE&G Energy (New Jersey)** in the integrations list.
-6. Click **Download**, select the latest release (**1.6.1** or newer), and click **Download**.
+6. Click **Download**, select the latest release (**1.7.0** or newer), and click **Download**.
 7. Restart Home Assistant.
 
 > **Note**: Do not search for or install the default upstream listing (`sidprax/ha-pseg`). This fork must be added as a custom repository using the URL above.
@@ -170,9 +171,17 @@ The Energy Dashboard will reflect your electricity consumption and estimated cos
 ### Cost Estimation and Roadmap
 
 - **Estimated Cost Today**: The current cost entity (`sensor.pseg_electricity_cost`) and statistics series (`pseg:<meter_id>_energy_cost`) calculate costs as an estimate: `kWh × configured rate` (set in integration Options, defaulting to $0.247/kWh).
-- **Roadmap (Real PSE&G Cost — Not Yet Released)**:
-  - **Release 1.7.0 (Planned)**: Portal-reported dollar evidence capture, disabled by default and controlled via a new `pseg.set_cost_mode` action.
-  - **Release 1.8.0 (Planned)**: A separate actual-cost statistics series (`pseg:<meter_id>_energy_cost_actual`) with a dedicated toggle for the Energy Dashboard.
+- **Roadmap (Real PSE&G Cost)**:
+  - **Release 1.7.0**: Portal-reported dollar **evidence only**, off by default. Enabling `pseg.set_cost_mode` with `cost_mode: evidence` lets the integration sample the portal cost chart at most once per day and expose it as a bounded `cost_contract_sample` in diagnostics. Nothing is imported, no statistics change, and the Energy dashboard still shows your estimated cost.
+  - **Release 1.8.0 (Planned)**: A separate actual-cost statistics series (`pseg:<meter_id>_energy_cost_actual`) with a dedicated toggle for the Energy Dashboard. It ships only after the captured evidence has been reviewed.
+
+#### What v1.7.0 does not do
+
+- It does not write portal dollars into any statistic and does not switch your Energy dashboard to them.
+- It does not claim the portal total equals your bill. Charge coverage (delivery, fixed charges, taxes, credits) stays unverified until a reviewed bill comparison exists.
+- It does not collect data on its own: sampling happens during a normal scheduled poll, at most once per New York day, inside the existing locked request sequence. A diagnostics download triggers zero portal requests.
+
+See [Portal Cost Contract](docs/portal-cost.md) for the request seam, the bounded sample shape, the privacy limits and the evidence gates.
 
 ## Lovelace Card
 

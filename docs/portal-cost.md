@@ -209,3 +209,105 @@ They remain explicitly **UNKNOWN** until observed across live, verified samples:
    - *Unknown*: How does the portal represent the 23-hour spring and 25-hour fall ambiguous wall-clock hour
      for dollar series?
    - *Requirement*: Fall-back transitions (e.g., Nov 1) must be observed rather than synthesized.
+
+---
+
+## 8. v1.7.0 Release Scope — Evidence Only
+
+Release 1.7.0 is the first release that talks to the portal cost chart
+(`UsageType: "2"`). Its scope is deliberately narrow: **collect bounded evidence,
+change nothing else**. This section is the operator-facing summary; the request
+seam, status vocabulary, identity rules, numeric quarantine and sample bounds are
+defined in sections 2–6 above.
+
+### 8.1 What the release adds
+
+| Surface | Contract |
+|---|---|
+| Bounded sampler | At most **one cost request pair per entry per New York day** (one `POST /Dashboard/Chart` plus one `GET /Dashboard/ChartData`), executed **after** the healthy daily and hourly kWh legs, inside the same `_locked` client sequence, on an ordinary current-owner coordinator poll only. |
+| Isolation | A short-lived `AllowlistedSession` seeded in memory from the authoritative jar, narrowed to the portal HTTPS host/port, `allow_redirects=False`, every response cookie rejected, at most 1 MiB streamed, whole-pair deadline enforced, closed on every exit. It cannot call `ensure_session`, note a confirmed generation, mark an auth failure or persist a checkpoint. |
+| Budget | Reserved durably in a separate auth-free evidence store **before** dispatch; one-use permit; alternates daily and hourly slots on successive days; reload/restart/manual refresh cannot reset or bypass it. Corrupt budget state skips sampling. |
+| Control | Admin action `pseg.set_cost_mode` with `cost_mode: off` (default) or `evidence`. `import` exists in the schema as reserved and is **refused** in 1.7.0. Mode changes do not reset budgets, sign in, refresh, reload or touch Energy. |
+| Diagnostics | Bounded `cost_contract_sample`: ≤ 4 meter series, ≤ 1,500 points, 2 slots, ≤ 256 KiB serialized. Any truncation marks the slot `truncated`/non-promotable. |
+| Statistics | **No change.** No `_energy_cost_actual` series, no Energy preference edit, no recorder write, no change to the version-2 statistics store or the legacy replay suffix routing. |
+
+### 8.2 What is collected (and what never is)
+
+Collected, per slot: sample version, capture time, request window/interval/type,
+a safe status and reason code, the unit token, matched series placeholders
+(`Meter #<placeholder>`), per-point `x`, `y` as canonical numeric **text** at the
+source precision, date labels from `hs.start`/`hs.end`, a point count and a
+dropped-field count. Plus, from the same poll, the **paired kWh anchors**: daily
+`{date, kwh}` and hourly `{start, kwh}` entries, their counts and a truncated
+SHA-256 digest of the sorted contributing meter ids.
+
+Never collected or retained: HTML, response headers, cookies, antiforgery
+tokens, arbitrary unknown key names or string values, extra point fields,
+exception text, meter serial numbers, account labels, or any bill content. A
+sample is bounded sanitization of data the poll already fetched — it is not a
+telemetry cache, it is not written to disk, and it is lost on restart by design
+(the reserved budget survives).
+
+Downloading diagnostics sends **zero** portal requests.
+
+### 8.3 Turning it on and off
+
+Default is `off`: no sampling, no extra traffic, no budget spent.
+
+```yaml
+action: pseg.set_cost_mode
+data:
+  cost_mode: evidence
+```
+
+Turn it off again when you have the captures you need:
+
+```yaml
+action: pseg.set_cost_mode
+data:
+  cost_mode: off
+```
+
+`off` stops new sampling and preserves everything already captured, including the
+budget state; it is not a reset and it does not authorise clearing anything.
+
+### 8.4 Reading the evidence
+
+The capture and offline review procedure — export diagnostics, build one snapshot
+per capture, wait at least 48 hours, run the checker, read the verdict, turn the
+mode off — is documented in
+`~/ai-tools/docs/pseg-cost-evidence-capture.md`. The checker
+(`~/ai-tools/scripts/pseg-cost-contract-check.py`) applies these gates and prints
+only verdicts, counts, ranges and fixed reason codes:
+
+- at least **7 overlapping closed days**;
+- a **repeated daily snapshot at least 48 hours later**, so a restated past day is
+  visible;
+- daily dollars vs the **configured-rate estimate** (absolute/relative delta,
+  effective rate) — informative, never proof of a richer tariff;
+- **matching meter sets and dates** against the kWh side;
+- **USD demonstrated**, not assumed;
+- **raw precision and the day-rounding quantum** derived from the artifact, with
+  equality at the published cent and at most one proven rounding quantum — never
+  a relative tolerance;
+- **zero / zero-kWh-nonzero-cost / credit days** counted, never estimated;
+- **hourly timestamp hypotheses** (New York wall-clock start vs true UTC vs
+  hour-end) scored against the anchors, plus **hourly dollars vs portal daily
+  dollars**;
+- **first-available delay** of cost relative to kWh.
+
+A missing gate is a **HOLD for that granularity**, never an estimated number. The
+tool reports `authorizes_import: false` on every run, and a synthetic artifact can
+never be counted as an observation.
+
+### 8.5 What v1.7.0 does not claim
+
+- It does not import portal cost and does not change what the Energy dashboard
+  shows; cost remains `kWh × configured rate` until 1.8.0.
+- It does not claim the portal total equals the bill. Charge coverage stays
+  unverified until a reviewed comparison against a user-supplied, redacted bill
+  over the exact service period exists (excluding prior balance, payments,
+  deposits and other fuels).
+- A passing evidence report is a candidate contract for the *observed* window; a
+  week does not prove the absence of later billing-period restatement, and the
+  real November DST fall-back encoding remains unobserved until it happens.
