@@ -431,6 +431,12 @@ BASELINE_FAST = {
         400,
         "729962938afdee0ed0447035fb56ac1ab1bdcdd646803432733a27261e8026a5",
     ),
+    # Reviewed fast additions integrated alongside P2-09: P3-07 (KB 5096c307)
+    # and P3-06 (KB d8c34961).
+    "tests/stats_suite/test_parser_mutation_catalog.py": (
+        15,
+        "c86c81602b0be04f399d7a64bec215aba2c6b56d79690dc120734d2575e0bc43",
+    ),
     "tests/stats_suite/test_reference_model.py": (
         13,
         "6e4f17709497e9952ce35c89d5b5324811995ad4a75fb55d7a02d8a4119315db",
@@ -438,6 +444,10 @@ BASELINE_FAST = {
     "tests/stats_suite/test_store_schema.py": (
         5,
         "4f9b9f66c72e518624aea50c282f094c4eea4df4b70c0f1fcd08b794c24fdb4d",
+    ),
+    "tests/stats_suite/test_writer_mutation_catalog.py": (
+        3,
+        "20014ee1a3c84640f2654a73534ee0ef52e233848de2d0c56a503975f6669e42",
     ),
     "tests/systemic/test_dispatch_fence.py": (
         22,
