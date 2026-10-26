@@ -27,10 +27,12 @@ This project (`delacjus/ha-pseg`, current release **1.7.0**) is an independent f
 From upstream `sidprax/ha-pseg`, this fork has adopted:
 - **Official PSE&G logos** (upstream 1.0.4): High-resolution `icon.png` and `logo.png` assets.
 - **Automatic card loading** (upstream 1.0.1): Automatically registers `pseg-energy-card` with Home Assistant dashboards upon startup.
+- **MyMeter invited-user setup steps** (upstream 1.1.0 README): How to create the direct MyMeter email login this fork signs in with (see Configuration).
 
 This fork deliberately does **not** adopt:
 - **Companion auth server**: Upstream transmits plaintext credentials over unencrypted HTTP to a local helper server. This fork communicates directly with PSE&G over encrypted HTTPS.
 - **Mixed cost statistic**: Upstream (1.0.2) mixes portal-reported dollars with a rate-based estimate inside one cost statistic, and derives a floating 7-day average rate. This fork keeps its cost statistic a stable configured-rate estimate until real portal cost has been verified, and will then add real cost as a **separate** series (see the cost roadmap below).
+- **Auth-type menu and pasted MyMeter cookies** (upstream 1.1.0): The new "Direct MyMeter" sign-in options either send your password to the companion add-on, or ask you to paste a browser `MM_SID` cookie. This fork already signs in to MyMeter directly with renewal, and its testing found browser-exported cookies often fail outside the browser.
 - **OptionsFlow update listeners** (upstream 1.0.3): The fork already uses `OptionsFlowWithReload` to reload configuration cleanly on save without update listener races.
 
 ## Features
@@ -81,6 +83,18 @@ Install `delacjus/ha-pseg` as a custom repository in HACS:
 2. Search for **PSE&G Energy (New Jersey)**.
 3. Enter your MyMeter **Email** and **Password** (the login credentials from `https://mysmartenergy.nj.pseg.com`).
 4. Click **Submit**.
+
+### Getting a MyMeter email login
+
+Most PSE&G customers only have the "Sign in Via My Account" (Okta) login, which this integration does not use. To get a direct MyMeter email and password, invite a second user to your own meter. These steps are adapted from upstream 1.1.0's README:
+
+1. Sign in to your PSE&G account at [pseg.com](https://www.pseg.com) and open **MySmartEnergy (MyMeter)**.
+2. In the top menu, click **Connect User / Share Access**.
+3. Enter an email address you control, such as a secondary address or an alias like `yourname+pseg@gmail.com`.
+4. Select your electric meter, choose access with **No end date**, and send the invitation.
+5. Open the invitation email, follow the link, and choose a password and security question.
+
+Use that invited email and password in step 3 above. Signing in this way never asks for an SMS or email code.
 
 Home Assistant stores your credentials and session cookies in the integration config entry and uses them to authenticate directly with MyMeter over HTTPS. The integration does not encrypt these stored values itself; protect access to your Home Assistant configuration and backups.
 
