@@ -6,8 +6,8 @@ import logging
 from pathlib import Path
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP, Platform
+from homeassistant.core import Event, HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.typing import ConfigType
@@ -192,6 +192,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator.start_keepalive()
     entry.async_on_unload(coordinator.stop_keepalive)
 
+    @callback
+    def _on_hass_stopping(_event: Event) -> None:
+        from .cost_evidence import fire_all_active_watchdogs
+
+        fire_all_active_watchdogs()
+
+    entry.async_on_unload(hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _on_hass_stopping))
+
     # No update listener: cookie persistence updates entry.data on every rotation and
     # must not reload. Options reload via OptionsFlowWithReload; reauth/reconfigure via
     # async_update_reload_and_abort.
@@ -204,6 +212,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a PSE&G config entry (keepalive is cancelled via async_on_unload)."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
+        from .cost_evidence import cleanup_entry_evidence
+
+        cleanup_entry_evidence(hass, entry.entry_id)
         hass.data[DOMAIN].pop(entry.entry_id, None)
 
     return unload_ok

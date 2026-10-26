@@ -2750,7 +2750,12 @@ def test_cost_auth_rejected_never_marks_auth_failure() -> None:
     """Contract: HTTP 401 or auth_rejected in cost sampler never calls _mark_auth_failure."""
     client = PsegClient(portal_cookies="MM_SID=synthetic")
     client.set_expected_meter_ids(["12345678"])
-    from custom_components.pseg.cost_evidence import NY_TZ, CostEvidenceStatus, CostPermit
+    from custom_components.pseg.cost_evidence import (
+        NY_TZ,
+        CostEvidenceStatus,
+        CostPermit,
+        register_issued_permit,
+    )
     from custom_components.pseg.renewal_admission import RenewalEntryRuntime
 
     runtime = RenewalEntryRuntime("test-entry")
@@ -2771,6 +2776,7 @@ def test_cost_auth_rejected_never_marks_auth_failure() -> None:
     hourly = {"Data": {"series": []}}
     ny_today = datetime.now(NY_TZ).date().isoformat()
     permit = CostPermit("p1", "test-entry", ny_today, "6", "2026-10-11", "2026-10-25", "ts")
+    register_issued_permit(permit)
 
     with (
         patch.object(client, "_get_verification_token", return_value="tok"),

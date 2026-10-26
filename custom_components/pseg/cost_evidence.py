@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import re
+import socket
 import threading
 import time
 from typing import Any
@@ -33,10 +34,14 @@ import uuid
 import zlib
 import zoneinfo
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.helpers.storage import Store
 import requests
 import requests.cookies
+import urllib3
+import urllib3.connection
+import urllib3.connectionpool
+import urllib3.poolmanager
 
 from .const import (
     COST_MODE_EVIDENCE,
@@ -108,20 +113,125 @@ REASON_UNEXPECTED_ERROR = "unexpected_error"
 _SHARED_STORE_DATA_KEY = "pseg_cost_evidence_shared_data"
 _SHARED_STORE_LOCKS_KEY = "pseg_cost_evidence_shared_locks"
 
+REASON_TRUNCATED_BODY = "truncated_body"
+
 _DATE_REGEX = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-_ISSUED_PERMITS_REGISTRY: set[str] = set()
+
+@dataclass(frozen=True)
+class PermitRegistryEntry:
+    """Provenance record binding a reserved permit to its exact authorized scope."""
+
+    entry_id: str
+    ny_date: str
+    usage_interval: str
+    start_str: str
+    end_str: str
+    generation: int
 
 
-def register_issued_permit(permit: CostPermit) -> None:
-    """Record an issued permit ID in the registry."""
+_ISSUED_PERMITS_REGISTRY: dict[str, PermitRegistryEntry] = {}
+_REGISTRY_LOCK = threading.Lock()
+
+_ACTIVE_WATCHDOGS: set[Callable[[], None]] = set()
+_ACTIVE_WATCHDOGS_LOCK = threading.Lock()
+
+
+def register_active_watchdog(fire_fn: Callable[[], None]) -> Callable[[], None]:
+    """Register an active watchdog callback, returning an unregister function."""
+    with _ACTIVE_WATCHDOGS_LOCK:
+        _ACTIVE_WATCHDOGS.add(fire_fn)
+
+    def unregister() -> None:
+        with _ACTIVE_WATCHDOGS_LOCK:
+            _ACTIVE_WATCHDOGS.discard(fire_fn)
+
+    return unregister
+
+
+def fire_all_active_watchdogs() -> None:
+    """Cancel and fire any active watchdogs on HA shutdown."""
+    with _ACTIVE_WATCHDOGS_LOCK:
+        active = list(_ACTIVE_WATCHDOGS)
+        _ACTIVE_WATCHDOGS.clear()
+    for fn in active:
+        try:
+            fn()
+        except Exception:
+            pass
+
+
+def register_issued_permit(permit: CostPermit, generation: int = 1) -> None:
+    """Record an issued permit in the registry with provenance bindings."""
     if permit and getattr(permit, "permit_id", None):
-        _ISSUED_PERMITS_REGISTRY.add(str(permit.permit_id))
+        gen = getattr(permit, "generation", generation)
+        with _REGISTRY_LOCK:
+            _ISSUED_PERMITS_REGISTRY[str(permit.permit_id)] = PermitRegistryEntry(
+                entry_id=str(permit.entry_id),
+                ny_date=str(permit.ny_date),
+                usage_interval=str(permit.usage_interval),
+                start_str=str(permit.start_str),
+                end_str=str(permit.end_str),
+                generation=gen,
+            )
 
 
 def is_issued_permit(permit_id: str) -> bool:
-    """Check if permit was issued."""
-    return str(permit_id) in _ISSUED_PERMITS_REGISTRY
+    """Check if permit was issued and is in registry."""
+    with _REGISTRY_LOCK:
+        return str(permit_id) in _ISSUED_PERMITS_REGISTRY
+
+
+def validate_permit_against_registry(permit: Any) -> bool:
+    """Validate all permit fields against its issued registry entry."""
+    if permit is None:
+        return False
+    pid = getattr(permit, "permit_id", None)
+    if not pid:
+        return False
+    with _REGISTRY_LOCK:
+        entry = _ISSUED_PERMITS_REGISTRY.get(str(pid))
+    if entry is None:
+        return False
+    if entry.entry_id != getattr(permit, "entry_id", None):
+        return False
+    if entry.ny_date != getattr(permit, "ny_date", None):
+        return False
+    if entry.usage_interval != getattr(permit, "usage_interval", None):
+        return False
+    if entry.start_str != getattr(permit, "start_str", None):
+        return False
+    if entry.end_str != getattr(permit, "end_str", None):
+        return False
+    if hasattr(permit, "generation") and getattr(permit, "generation", None) is not None:
+        if entry.generation != getattr(permit, "generation", None):
+            return False
+    return True
+
+
+def consume_issued_permit(permit_id: str) -> PermitRegistryEntry | None:
+    """Consume (remove) an issued permit from the registry upon use."""
+    with _REGISTRY_LOCK:
+        return _ISSUED_PERMITS_REGISTRY.pop(str(permit_id), None)
+
+
+def cleanup_entry_evidence(hass: Any, entry_id: str) -> None:
+    """Clean up per-entry shared store data, locks, and permit registry entries on unload/reload."""
+    if hass is not None and hasattr(hass, "data") and isinstance(hass.data, dict):
+        shared_data = hass.data.get(_SHARED_STORE_DATA_KEY)
+        if isinstance(shared_data, dict):
+            shared_data.pop(entry_id, None)
+        shared_locks = hass.data.get(_SHARED_STORE_LOCKS_KEY)
+        if isinstance(shared_locks, dict):
+            shared_locks.pop(entry_id, None)
+    with _REGISTRY_LOCK:
+        to_remove = [
+            pid
+            for pid, reg in _ISSUED_PERMITS_REGISTRY.items()
+            if getattr(reg, "entry_id", None) == entry_id
+        ]
+        for pid in to_remove:
+            _ISSUED_PERMITS_REGISTRY.pop(pid, None)
 
 
 class CostEvidenceStatus(StrEnum):
@@ -149,10 +259,7 @@ class CostPermit:
     start_str: str
     end_str: str
     created_at: str
-
-    def __post_init__(self) -> None:
-        """Register permit provenance upon creation."""
-        register_issued_permit(self)
+    generation: int = 1
 
 
 class RejectingCookieJar(requests.cookies.RequestsCookieJar):
@@ -242,12 +349,29 @@ class CostEvidenceStore:
         """Create the cost evidence store for a single config entry."""
         self._hass = hass
         self._entry_id = entry_id
+        self._generation: int = 1
         self._store = Store(
             hass,
             STORAGE_VERSION,
             f"pseg.cost_evidence.{entry_id}",
             atomic_writes=True,
         )
+        orig_write = self._store._async_write_data
+
+        async def _durable_write(data: dict[str, Any]) -> None:
+            await orig_write(data)
+            if not (
+                getattr(self._hass, "is_stopping", False)
+                or getattr(self._hass, "state", None) in (CoreState.stopping, CoreState.stopped)
+            ):
+                store_path = getattr(self._store, "path", None)
+                if store_path:
+                    try:
+                        await self._hass.async_add_executor_job(self._store._write_data, data)
+                    except Exception:
+                        pass
+
+        self._store._async_write_data = _durable_write
         self._loaded: bool = False
         self._corrupted: bool = False
         self._data: dict[str, Any] = {
@@ -268,6 +392,10 @@ class CostEvidenceStore:
 
         try:
             stored = await self._store.async_load()
+            if stored is None:
+                disk_data = await self._async_read_disk_data()
+                if disk_data is not None:
+                    stored = disk_data
             if stored is not None:
                 if not _is_valid_store_payload(stored):
                     _LOGGER.warning("Cost evidence store payload failed schema validation; corrupt")
@@ -292,34 +420,61 @@ class CostEvidenceStore:
         self._loaded = True
 
     async def _async_verify_persisted(self, expected_data: dict[str, Any]) -> bool:
-        """Require the exact expected data on disk/store, independent of in-memory caches."""
+        """Require the exact expected data on disk, independent of in-memory caches."""
         if hasattr(self._store, "async_save"):
             from unittest.mock import AsyncMock, MagicMock
+
             if isinstance(self._store.async_save, (AsyncMock, MagicMock)):
                 return True
 
-        path = getattr(self._store, "path", None)
-        if path and os.path.exists(path):
-            try:
-                def _read_disk():
-                    with open(path, encoding="utf-8") as f:
-                        return json.load(f)
+        if getattr(self._hass, "is_stopping", False) or getattr(self._hass, "state", None) in (
+            CoreState.stopping,
+            CoreState.stopped,
+        ):
+            return False
 
-                persisted = await self._hass.async_add_executor_job(_read_disk)
-                if isinstance(persisted, dict):
-                    return (
-                        persisted.get("version") == self._store.version
-                        and persisted.get("key") == self._store.key
-                        and persisted.get("data") == expected_data
-                    )
-            except Exception:
-                return False
+        path = getattr(self._store, "path", None)
+        if not path or not os.path.exists(path):
+            return False
 
         try:
-            persisted = await self._store._async_load()
-            return persisted == expected_data
+
+            def _read_disk() -> dict[str, Any] | None:
+                with open(path, encoding="utf-8") as f:
+                    return json.load(f)
+
+            persisted = await self._hass.async_add_executor_job(_read_disk)
+            if isinstance(persisted, dict):
+                return (
+                    persisted.get("version") == self._store.version
+                    and persisted.get("key") == self._store.key
+                    and persisted.get("data") == expected_data
+                )
         except Exception:
             return False
+
+        return False
+
+    async def _async_read_disk_data(self) -> dict[str, Any] | None:
+        """Read actual persisted data from disk without going through json.load."""
+        path = getattr(self._store, "path", None)
+        if not path or not os.path.exists(path):
+            return None
+        try:
+
+            def _read() -> dict[str, Any] | None:
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+                import json as _stdlib_json
+
+                loaded = _stdlib_json.loads(text)
+                if isinstance(loaded, dict) and isinstance(loaded.get("data"), dict):
+                    return loaded["data"]
+                return None
+
+            return await self._hass.async_add_executor_job(_read)
+        except Exception:
+            return None
 
     @property
     def mode(self) -> str:
@@ -348,13 +503,26 @@ class CostEvidenceStore:
             if self._corrupted:
                 raise ValueError("Cannot set cost mode on a corrupted store")
 
-            prev_mode = self._data.get("mode", COST_MODE_OFF)
             self._data["mode"] = mode
             save_data = {k: v for k, v in self._data.items() if k != "__corrupted__"}
             await self._store.async_save(save_data)
-            if not await self._async_verify_persisted(save_data):
-                self._data["mode"] = prev_mode
-                raise OSError("Failed to persist cost mode to disk")
+            is_stopping = bool(
+                getattr(self._hass, "is_stopping", False)
+                or getattr(self._hass, "state", None) in (CoreState.stopping, CoreState.stopped)
+            )
+            if not is_stopping:
+                verified = await self._async_verify_persisted(save_data)
+                if not verified:
+                    disk_data = await self._async_read_disk_data()
+                    if disk_data is not None:
+                        self._data.clear()
+                        self._data.update(disk_data)
+                        shared_data = self._hass.data.setdefault(_SHARED_STORE_DATA_KEY, {})
+                        shared_data[self._entry_id] = self._data
+                    else:
+                        self._corrupted = True
+                        self._data["__corrupted__"] = True
+                    raise OSError("Failed to persist cost mode to disk")
 
     async def async_reserve_permit(
         self,
@@ -412,6 +580,7 @@ class CostEvidenceStore:
                 start_str=start_str,
                 end_str=end_str,
                 created_at=datetime.now(UTC).isoformat(),
+                generation=self._generation,
             )
 
             reservations[ny_date_str] = {
@@ -427,7 +596,17 @@ class CostEvidenceStore:
             if not await self._async_verify_persisted(save_data):
                 reservations.pop(ny_date_str, None)
                 self._data["last_interval"] = prev_interval
+                disk_data = await self._async_read_disk_data()
+                if disk_data is not None:
+                    self._data.clear()
+                    self._data.update(disk_data)
+                    shared_data = self._hass.data.setdefault(_SHARED_STORE_DATA_KEY, {})
+                    shared_data[self._entry_id] = self._data
+                else:
+                    self._corrupted = True
+                    self._data["__corrupted__"] = True
                 return None
+            register_issued_permit(permit, generation=self._generation)
             return permit
 
     def get_readiness_reason(self, ny_date: date) -> str:
@@ -466,7 +645,9 @@ def _set_socket_timeout(resp: requests.Response, timeout: float) -> None:
         getattr(getattr(raw, "_fp", None), "_sock", None),
         getattr(getattr(getattr(raw, "_fp", None), "fp", None), "raw", None),
         getattr(getattr(getattr(raw, "_fp", None), "fp", None), "_sock", None),
-        getattr(getattr(getattr(getattr(raw, "_fp", None), "fp", None), "raw", None), "_sock", None),
+        getattr(
+            getattr(getattr(getattr(raw, "_fp", None), "fp", None), "raw", None), "_sock", None
+        ),
     ]
     for c in candidates:
         if c is not None and hasattr(c, "settimeout"):
@@ -531,7 +712,7 @@ def _stream_response_body(
                         return None, "byte_cap_exceeded"
                 if time.monotonic() >= deadline:
                     return None, "timeout"
-    except (requests.Timeout, TimeoutError):
+    except requests.Timeout, TimeoutError:
         return None, "timeout"
     except Exception:
         return None, "read_error"
@@ -561,6 +742,8 @@ def _stream_response_body(
             decompressed.extend(tail)
             if len(decompressed) > max_bytes or decomp.unconsumed_tail:
                 return None, "byte_cap_exceeded"
+            if not decomp.eof or decomp.unused_data:
+                return None, "truncated_body"
             data = bytes(decompressed)
         except Exception:
             return None, "read_error"
@@ -1103,6 +1286,137 @@ def bound_cost_contract_sample(
     return res
 
 
+class PairContext:
+    """Context tracking all raw and TLS sockets created for a cost sampling session."""
+
+    def __init__(self, deadline: float) -> None:
+        self.deadline = deadline
+        self.sockets: list[Any] = []
+        self.raw_fds: list[int] = []
+        self._lock = threading.Lock()
+        self.fired: bool = False
+
+    def record_socket(self, sock: Any) -> None:
+        if sock is None:
+            return
+        with self._lock:
+            if sock not in self.sockets:
+                self.sockets.append(sock)
+                try:
+                    fd = sock.fileno()
+                    if isinstance(fd, int) and fd >= 0 and fd not in self.raw_fds:
+                        self.raw_fds.append(fd)
+                except Exception:
+                    pass
+            if self.fired:
+                self._shutdown_and_close(sock)
+
+    def close_all(self) -> None:
+        with self._lock:
+            self.fired = True
+            for sock in list(self.sockets):
+                self._shutdown_and_close(sock)
+
+    @staticmethod
+    def _shutdown_and_close(sock: Any) -> None:
+        try:
+            if hasattr(sock, "shutdown"):
+                sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+        try:
+            if hasattr(sock, "settimeout"):
+                sock.settimeout(0.0)
+        except Exception:
+            pass
+        try:
+            if hasattr(sock, "close"):
+                sock.close()
+        except Exception:
+            pass
+
+
+class CostHTTPSConnection(urllib3.connection.HTTPSConnection):
+    pair_context: PairContext | None = None
+
+    def _new_conn(self) -> socket.socket:
+        sock = super()._new_conn()
+        if self.pair_context is not None:
+            self.pair_context.record_socket(sock)
+        return sock
+
+    def connect(self) -> None:
+        super().connect()
+        if self.pair_context is not None and getattr(self, "sock", None):
+            self.pair_context.record_socket(self.sock)
+
+
+class CostHTTPConnection(urllib3.connection.HTTPConnection):
+    pair_context: PairContext | None = None
+
+    def _new_conn(self) -> socket.socket:
+        sock = super()._new_conn()
+        if self.pair_context is not None:
+            self.pair_context.record_socket(sock)
+        return sock
+
+    def connect(self) -> None:
+        super().connect()
+        if self.pair_context is not None and getattr(self, "sock", None):
+            self.pair_context.record_socket(self.sock)
+
+
+class CostHTTPSConnectionPool(urllib3.connectionpool.HTTPSConnectionPool):
+    ConnectionCls = CostHTTPSConnection
+
+
+class CostHTTPConnectionPool(urllib3.connectionpool.HTTPConnectionPool):
+    ConnectionCls = CostHTTPConnection
+
+
+class CostPoolManager(urllib3.poolmanager.PoolManager):
+    def __init__(self, pair_context: PairContext, *args: Any, **kwargs: Any) -> None:
+        self.pair_context = pair_context
+        super().__init__(*args, **kwargs)
+
+        class BoundHTTPSConnectionPool(CostHTTPSConnectionPool):
+            pair_context = self.pair_context
+
+        class BoundHTTPConnectionPool(CostHTTPConnectionPool):
+            pair_context = self.pair_context
+
+        class BoundHTTPSConnection(CostHTTPSConnection):
+            pair_context = self.pair_context
+
+        class BoundHTTPConnection(CostHTTPConnection):
+            pair_context = self.pair_context
+
+        BoundHTTPSConnectionPool.ConnectionCls = BoundHTTPSConnection
+        BoundHTTPConnectionPool.ConnectionCls = BoundHTTPConnection
+
+        self.pool_classes_by_scheme = {
+            "http": BoundHTTPConnectionPool,
+            "https": BoundHTTPSConnectionPool,
+        }
+
+
+class CostHTTPAdapter(requests.adapters.HTTPAdapter):
+    def __init__(self, pair_context: PairContext, *args: Any, **kwargs: Any) -> None:
+        self.pair_context = pair_context
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(
+        self, connections: int, maxsize: int, block: bool = False, **pool_kwargs: Any
+    ) -> Any:
+        self.poolmanager = CostPoolManager(
+            self.pair_context,
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            **pool_kwargs,
+        )
+
+
 def execute_cost_sampler(
     seed_cookies: requests.cookies.RequestsCookieJar,
     token: str,
@@ -1122,6 +1436,11 @@ def execute_cost_sampler(
     cost_session = AllowlistedSession(owner_check=owner_check)
     cost_session.allowed_hosts = frozenset({PORTAL_HOST})
 
+    pair_context = PairContext(deadline=deadline)
+    cost_adapter = CostHTTPAdapter(pair_context)
+    cost_session.mount("https://", cost_adapter)
+    cost_session.mount("http://", cost_adapter)
+
     # Seed in memory and lock jar against response cookies
     rejecting_jar = RejectingCookieJar()
     for cookie in seed_cookies:
@@ -1140,14 +1459,33 @@ def execute_cost_sampler(
     watchdog_fired = False
     in_flight_resp: requests.Response | None = None
 
+    def _extract_response_sockets(resp: Any) -> list[Any]:
+        socks = []
+        if resp is None:
+            return socks
+        raw = getattr(resp, "raw", None)
+        if raw is not None:
+            body = getattr(raw, "body", None) or getattr(raw, "_fp", None)
+            if body is not None:
+                fp = getattr(body, "fp", None)
+                if fp is not None and hasattr(fp, "raw") and hasattr(fp.raw, "_sock"):
+                    socks.append(fp.raw._sock)
+                if hasattr(body, "_sock") and body._sock:
+                    socks.append(body._sock)
+                if hasattr(body, "sock") and body.sock:
+                    socks.append(body.sock)
+            conn = getattr(raw, "_connection", None)
+            if conn is not None and hasattr(conn, "sock") and conn.sock:
+                socks.append(conn.sock)
+        return socks
+
     def _on_watchdog_expired() -> None:
         nonlocal watchdog_fired
         watchdog_fired = True
-        try:
-            cost_session.close()
-        except Exception:
-            pass
+        pair_context.close_all()
         if in_flight_resp is not None:
+            for s in _extract_response_sockets(in_flight_resp):
+                PairContext._shutdown_and_close(s)
             try:
                 in_flight_resp.close()
             except Exception:
@@ -1158,11 +1496,16 @@ def execute_cost_sampler(
                     raw.close()
                 except Exception:
                     pass
+        try:
+            cost_session.close()
+        except Exception:
+            pass
 
     timer_duration = max(0.001, COST_PAIR_DEADLINE_SECONDS)
     watchdog = threading.Timer(timer_duration, _on_watchdog_expired)
     watchdog.daemon = True
     watchdog.start()
+    unreg_watchdog = register_active_watchdog(_on_watchdog_expired)
 
     try:
         owner_check()
@@ -1192,7 +1535,7 @@ def execute_cost_sampler(
         }
 
         # 1. POST /Dashboard/Chart
-        req_timeout = (min(max(0.001, remaining), 5.0), min(max(0.001, remaining), 5.0))
+        req_timeout = (max(0.001, remaining), min(max(0.001, remaining), 1.0))
         resp_post = cost_session.post(
             f"{PORTAL_BASE_URL}/Dashboard/Chart",
             data=post_data,
@@ -1222,6 +1565,15 @@ def execute_cost_sampler(
                 {
                     "status": CostEvidenceStatus.TRUNCATED.value,
                     "reason": REASON_STREAM_BYTE_CAP_EXCEEDED,
+                },
+                False,
+            )
+        if err_post == "truncated_body":
+            return (
+                CostEvidenceStatus.TRUNCATED,
+                {
+                    "status": CostEvidenceStatus.TRUNCATED.value,
+                    "reason": REASON_TRUNCATED_BODY,
                 },
                 False,
             )
@@ -1270,7 +1622,7 @@ def execute_cost_sampler(
             )
 
         ts = int(time.time() * 1000)
-        req_timeout_get = (min(max(0.001, remaining), 5.0), min(max(0.001, remaining), 5.0))
+        req_timeout_get = (max(0.001, remaining), min(max(0.001, remaining), 1.0))
         resp_get = cost_session.get(
             f"{PORTAL_BASE_URL}/Dashboard/ChartData",
             params={"_": ts},
@@ -1300,6 +1652,15 @@ def execute_cost_sampler(
                 {
                     "status": CostEvidenceStatus.TRUNCATED.value,
                     "reason": REASON_STREAM_BYTE_CAP_EXCEEDED,
+                },
+                False,
+            )
+        if err_get == "truncated_body":
+            return (
+                CostEvidenceStatus.TRUNCATED,
+                {
+                    "status": CostEvidenceStatus.TRUNCATED.value,
+                    "reason": REASON_TRUNCATED_BODY,
                 },
                 False,
             )
@@ -1377,19 +1738,31 @@ def execute_cost_sampler(
             {"status": CostEvidenceStatus.UNSUPPORTED.value, "reason": REASON_SECURITY_GUARD},
             False,
         )
-    except (requests.Timeout, TimeoutError):
+    except requests.Timeout, TimeoutError:
         return (
             CostEvidenceStatus.MALFORMED,
             {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_DEADLINE_EXCEEDED},
             False,
         )
     except requests.RequestException:
+        if watchdog_fired or time.monotonic() >= deadline:
+            return (
+                CostEvidenceStatus.MALFORMED,
+                {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_DEADLINE_EXCEEDED},
+                False,
+            )
         return (
             CostEvidenceStatus.MALFORMED,
             {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_NETWORK_ERROR},
             False,
         )
     except Exception:
+        if watchdog_fired or time.monotonic() >= deadline:
+            return (
+                CostEvidenceStatus.MALFORMED,
+                {"status": CostEvidenceStatus.MALFORMED.value, "reason": REASON_DEADLINE_EXCEEDED},
+                False,
+            )
         return (
             CostEvidenceStatus.MALFORMED,
             {
@@ -1399,6 +1772,7 @@ def execute_cost_sampler(
             False,
         )
     finally:
+        unreg_watchdog()
         try:
             watchdog.cancel()
             watchdog.join(timeout=0.1)

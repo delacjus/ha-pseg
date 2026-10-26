@@ -429,6 +429,7 @@ def _real_pseg_statistics_writes(tmp_path, hass_storage, monkeypatch):
 
     from homeassistant.helpers import storage
 
+    from custom_components.pseg.cost_evidence import CostEvidenceStore
     from custom_components.pseg.statistics_state import StatisticsStateStore
 
     original_init = StatisticsStateStore.__init__
@@ -436,18 +437,25 @@ def _real_pseg_statistics_writes(tmp_path, hass_storage, monkeypatch):
     def _init(self, hass, entry_id):
         original_init(self, hass, entry_id)
         safe_entry = str(entry_id).replace("/", "_")
-        self._store.__dict__["path"] = str(
-            _Path(tmp_path) / f"pseg-statistics-{safe_entry}.json"
-        )
+        self._store.__dict__["path"] = str(_Path(tmp_path) / f"pseg-statistics-{safe_entry}.json")
 
     monkeypatch.setattr(StatisticsStateStore, "__init__", _init)
+
+    original_cost_init = CostEvidenceStore.__init__
+
+    def _cost_init(self, hass, entry_id):
+        original_cost_init(self, hass, entry_id)
+        safe_entry = str(entry_id).replace("/", "_")
+        self._store.__dict__["path"] = str(
+            _Path(tmp_path) / f"pseg-cost-evidence-{safe_entry}.json"
+        )
+
+    monkeypatch.setattr(CostEvidenceStore, "__init__", _cost_init)
     original_write = storage.Store._async_write_data
 
     async def routed(store_obj, data):
         if store_obj.key.startswith("pseg.statistics."):
-            await store_obj.hass.async_add_executor_job(
-                store_obj._write_data, data
-            )
+            await store_obj.hass.async_add_executor_job(store_obj._write_data, data)
             return
         await original_write(store_obj, data)
 

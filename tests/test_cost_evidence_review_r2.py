@@ -27,7 +27,7 @@ from custom_components.pseg.renewal_admission import RenewalEntryRuntime
 
 
 def permit():
-    return ce.CostPermit(
+    p = ce.CostPermit(
         "r2",
         "review-entry",
         datetime.now(ce.NY_TZ).date().isoformat(),
@@ -36,6 +36,8 @@ def permit():
         "2026-10-25",
         datetime.now(UTC).isoformat(),
     )
+    ce.register_issued_permit(p)
+    return p
 
 
 def payload(points=None):

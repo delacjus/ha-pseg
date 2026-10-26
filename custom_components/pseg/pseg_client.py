@@ -1962,7 +1962,7 @@ class PsegClient:
                 if not chart_data:
                     self._raise_if_redirect(data, "history backfill")
                     self._restore_cookie_leg(chunk_leg)
-                    _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)
+                    _LOGGER.warning("No chart data returned for range %s to %s", chunk_start_str, chunk_end_str)  # fmt: skip
                     chunks.append((chunk_start_str, chunk_end_str, False))
                 else:
                     raw_series = chart_data.get("series", [])
@@ -2189,7 +2189,7 @@ class PsegClient:
         # Cost evidence leg (RC-02): executed after the normal daily+hourly kWh legs,
         # inside the same _locked client sequence, only for an attached current-owner
         # normal coordinator poll with proven daily identity and an immutable one-use permit.
-        from .cost_evidence import NY_TZ, is_issued_permit
+        from .cost_evidence import NY_TZ, consume_issued_permit, validate_permit_against_registry
 
         expected_ny_date = datetime.now(NY_TZ).date().isoformat()
         is_attached = (
@@ -2204,11 +2204,17 @@ class PsegClient:
         start_str = getattr(cost_permit, "start_str", None)
         end_str = getattr(cost_permit, "end_str", None)
         if isinstance(start_str, str) and isinstance(end_str, str):
-            if re.match(r"^\d{4}-\d{2}-\d{2}$", start_str) and re.match(r"^\d{4}-\d{2}-\d{2}$", end_str):
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", start_str) and re.match(
+                r"^\d{4}-\d{2}-\d{2}$", end_str
+            ):
                 try:
                     d_start = date.fromisoformat(start_str)
                     d_end = date.fromisoformat(end_str)
-                    if d_start.isoformat() == start_str and d_end.isoformat() == end_str and d_start <= d_end:
+                    if (
+                        d_start.isoformat() == start_str
+                        and d_end.isoformat() == end_str
+                        and d_start <= d_end
+                    ):
                         valid_range = True
                 except ValueError:
                     valid_range = False
@@ -2222,7 +2228,7 @@ class PsegClient:
             and getattr(cost_permit, "usage_interval", None)
             in (USAGE_INTERVAL_DAILY, USAGE_INTERVAL_HOURLY)
             and bool(permit_id)
-            and is_issued_permit(permit_id)
+            and validate_permit_against_registry(cost_permit)
             and permit_id not in self._consumed_permits
         )
 
@@ -2231,6 +2237,7 @@ class PsegClient:
             permit_id = getattr(cost_permit, "permit_id", None)
             if permit_id and permit_id not in self._consumed_permits:
                 self._consumed_permits.add(permit_id)
+                consume_issued_permit(permit_id)
                 try:
                     from decimal import Decimal
 
