@@ -72,6 +72,8 @@ MAX_COST_BYTES = 1024 * 1024  # 1 MiB streamed byte cap
 MAX_SERIALIZED_SAMPLE_BYTES = 256 * 1024  # 256 KiB serialized JSON bound
 MAX_SAMPLE_SLOTS = 2
 COST_PAIR_DEADLINE_SECONDS = 10.0
+# Per-phase cap so no single socket read/handshake can consume the whole budget.
+COST_SOCKET_PHASE_CAP_SECONDS = 1.0
 
 # Closed vocabulary for reasons (never format server strings or exception text)
 REASON_EMPTY_PAYLOAD = "empty_payload"
@@ -483,6 +485,29 @@ class CostEvidenceStore:
             return COST_MODE_OFF
         return str(self._data.get("mode", COST_MODE_OFF))
 
+    async def _async_reconcile_after_save_failure(self) -> None:
+        """Force in-memory state to match disk after a failed save, or fail closed.
+
+        A raised or cancelled store write may leave memory ahead of disk. Re-read
+        the persisted payload and adopt it exactly; if the payload cannot be read,
+        mark the store unusable so no permit or mode is ever assumed durable.
+        """
+        try:
+            disk_data = await self._async_read_disk_data()
+        except BaseException:
+            # A cancellation arriving during reconciliation must still fail
+            # closed rather than leave memory claiming state disk does not hold.
+            disk_data = None
+        if disk_data is not None:
+            self._data.clear()
+            self._data.update(disk_data)
+            shared_data = self._hass.data.setdefault(_SHARED_STORE_DATA_KEY, {})
+            shared_data[self._entry_id] = self._data
+            return
+        self._corrupted = True
+        self._data.clear()
+        self._data["__corrupted__"] = True
+
     async def async_set_mode(self, mode: str) -> None:
         """Update operator cost mode.
 
@@ -505,7 +530,13 @@ class CostEvidenceStore:
 
             self._data["mode"] = mode
             save_data = {k: v for k, v in self._data.items() if k != "__corrupted__"}
-            await self._store.async_save(save_data)
+            try:
+                await self._store.async_save(save_data)
+            except BaseException:
+                # Raised writes (including cancellation) must never leave memory
+                # claiming a mode the disk does not hold.
+                await self._async_reconcile_after_save_failure()
+                raise
             is_stopping = bool(
                 getattr(self._hass, "is_stopping", False)
                 or getattr(self._hass, "state", None) in (CoreState.stopping, CoreState.stopped)
@@ -513,15 +544,7 @@ class CostEvidenceStore:
             if not is_stopping:
                 verified = await self._async_verify_persisted(save_data)
                 if not verified:
-                    disk_data = await self._async_read_disk_data()
-                    if disk_data is not None:
-                        self._data.clear()
-                        self._data.update(disk_data)
-                        shared_data = self._hass.data.setdefault(_SHARED_STORE_DATA_KEY, {})
-                        shared_data[self._entry_id] = self._data
-                    else:
-                        self._corrupted = True
-                        self._data["__corrupted__"] = True
+                    await self._async_reconcile_after_save_failure()
                     raise OSError("Failed to persist cost mode to disk")
 
     async def async_reserve_permit(
@@ -592,19 +615,18 @@ class CostEvidenceStore:
             }
             self._data["last_interval"] = interval
             save_data = {k: v for k, v in self._data.items() if k != "__corrupted__"}
-            await self._store.async_save(save_data)
+            try:
+                await self._store.async_save(save_data)
+            except BaseException:
+                # A raised write (including cancellation) may have persisted
+                # nothing: re-read the disk so memory never claims a permit or
+                # interval the store does not hold, then surface the failure.
+                await self._async_reconcile_after_save_failure()
+                raise
             if not await self._async_verify_persisted(save_data):
                 reservations.pop(ny_date_str, None)
                 self._data["last_interval"] = prev_interval
-                disk_data = await self._async_read_disk_data()
-                if disk_data is not None:
-                    self._data.clear()
-                    self._data.update(disk_data)
-                    shared_data = self._hass.data.setdefault(_SHARED_STORE_DATA_KEY, {})
-                    shared_data[self._entry_id] = self._data
-                else:
-                    self._corrupted = True
-                    self._data["__corrupted__"] = True
+                await self._async_reconcile_after_save_failure()
                 return None
             register_issued_permit(permit, generation=self._generation)
             return permit
@@ -1287,35 +1309,94 @@ def bound_cost_contract_sample(
 
 
 class PairContext:
-    """Context tracking all raw and TLS sockets created for a cost sampling session."""
+    """Context tracking all raw and TLS sockets created for a cost sampling session.
+
+    TLS wrapping detaches the original socket object, so a duplicate of each real
+    connection's descriptor is retained. shutdown(SHUT_RDWR) on the duplicate
+    affects the shared connection and wakes a handshake or read blocked on the
+    wrapped SSL socket, which no longer exposes a usable descriptor itself.
+    """
 
     def __init__(self, deadline: float) -> None:
         self.deadline = deadline
         self.sockets: list[Any] = []
+        self.dups: list[socket.socket] = []
         self.raw_fds: list[int] = []
         self._lock = threading.Lock()
         self.fired: bool = False
+        self._released: bool = False
+
+    def remaining(self) -> float:
+        """Return the seconds left in the pair budget (never negative)."""
+        return max(0.0, self.deadline - time.monotonic())
 
     def record_socket(self, sock: Any) -> None:
         if sock is None:
             return
         with self._lock:
-            if sock not in self.sockets:
-                self.sockets.append(sock)
-                try:
-                    fd = sock.fileno()
-                    if isinstance(fd, int) and fd >= 0 and fd not in self.raw_fds:
-                        self.raw_fds.append(fd)
-                except Exception:
-                    pass
-            if self.fired:
+            if sock in self.sockets:
+                return
+            self.sockets.append(sock)
+            fd = -1
+            try:
+                fd = sock.fileno()
+            except Exception:
+                fd = -1
+            active = isinstance(fd, int) and fd >= 0
+            new_fd = False
+            if active and fd not in self.raw_fds:
+                self.raw_fds.append(fd)
+                new_fd = True
+            if self.fired or self._released:
                 self._shutdown_and_close(sock)
+                return
+            if not (active and new_fd):
+                return
+            # Duplicate while the descriptor is still live (before TLS wrapping).
+            try:
+                dup = sock.dup()
+            except Exception:
+                return
+            self.dups.append(dup)
 
     def close_all(self) -> None:
+        """Wake and release every tracked connection (pair deadline or HA stop)."""
         with self._lock:
             self.fired = True
-            for sock in list(self.sockets):
-                self._shutdown_and_close(sock)
+            dups = list(self.dups)
+            self.dups.clear()
+            socks = list(self.sockets)
+        for dup in dups:
+            self._shutdown_dup(dup)
+            self._close_quietly(dup)
+        for sock in socks:
+            self._shutdown_and_close(sock)
+
+    def release(self) -> None:
+        """Close any duplicate descriptors still held, exactly once."""
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+            dups = list(self.dups)
+            self.dups.clear()
+        for dup in dups:
+            self._shutdown_dup(dup)
+            self._close_quietly(dup)
+
+    @staticmethod
+    def _shutdown_dup(dup: Any) -> None:
+        try:
+            dup.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _close_quietly(sock: Any) -> None:
+        try:
+            sock.close()
+        except Exception:
+            pass
 
     @staticmethod
     def _shutdown_and_close(sock: Any) -> None:
@@ -1342,7 +1423,14 @@ class CostHTTPSConnection(urllib3.connection.HTTPSConnection):
     def _new_conn(self) -> socket.socket:
         sock = super()._new_conn()
         if self.pair_context is not None:
+            # Capture the live descriptor (and its duplicate) before TLS wrapping
+            # detaches this socket object, then bound the handshake by the budget.
             self.pair_context.record_socket(sock)
+            remaining = self.pair_context.remaining()
+            try:
+                sock.settimeout(max(0.001, min(remaining, COST_SOCKET_PHASE_CAP_SECONDS)))
+            except Exception:
+                pass
         return sock
 
     def connect(self) -> None:
@@ -1358,6 +1446,11 @@ class CostHTTPConnection(urllib3.connection.HTTPConnection):
         sock = super()._new_conn()
         if self.pair_context is not None:
             self.pair_context.record_socket(sock)
+            remaining = self.pair_context.remaining()
+            try:
+                sock.settimeout(max(0.001, min(remaining, COST_SOCKET_PHASE_CAP_SECONDS)))
+            except Exception:
+                pass
         return sock
 
     def connect(self) -> None:
@@ -1374,30 +1467,32 @@ class CostHTTPConnectionPool(urllib3.connectionpool.HTTPConnectionPool):
     ConnectionCls = CostHTTPConnection
 
 
+def _bound_pool_classes(pair_context: PairContext) -> dict[str, Any]:
+    """Build connection pools whose connections are bound to this pair context."""
+
+    class BoundHTTPSConnection(CostHTTPSConnection):
+        pass
+
+    class BoundHTTPConnection(CostHTTPConnection):
+        pass
+
+    BoundHTTPSConnection.pair_context = pair_context
+    BoundHTTPConnection.pair_context = pair_context
+
+    class BoundHTTPSConnectionPool(CostHTTPSConnectionPool):
+        ConnectionCls = BoundHTTPSConnection
+
+    class BoundHTTPConnectionPool(CostHTTPConnectionPool):
+        ConnectionCls = BoundHTTPConnection
+
+    return {"http": BoundHTTPConnectionPool, "https": BoundHTTPSConnectionPool}
+
+
 class CostPoolManager(urllib3.poolmanager.PoolManager):
     def __init__(self, pair_context: PairContext, *args: Any, **kwargs: Any) -> None:
         self.pair_context = pair_context
         super().__init__(*args, **kwargs)
-
-        class BoundHTTPSConnectionPool(CostHTTPSConnectionPool):
-            pair_context = self.pair_context
-
-        class BoundHTTPConnectionPool(CostHTTPConnectionPool):
-            pair_context = self.pair_context
-
-        class BoundHTTPSConnection(CostHTTPSConnection):
-            pair_context = self.pair_context
-
-        class BoundHTTPConnection(CostHTTPConnection):
-            pair_context = self.pair_context
-
-        BoundHTTPSConnectionPool.ConnectionCls = BoundHTTPSConnection
-        BoundHTTPConnectionPool.ConnectionCls = BoundHTTPConnection
-
-        self.pool_classes_by_scheme = {
-            "http": BoundHTTPConnectionPool,
-            "https": BoundHTTPSConnectionPool,
-        }
+        self.pool_classes_by_scheme = _bound_pool_classes(self.pair_context)
 
 
 class CostHTTPAdapter(requests.adapters.HTTPAdapter):
@@ -1415,6 +1510,17 @@ class CostHTTPAdapter(requests.adapters.HTTPAdapter):
             block=block,
             **pool_kwargs,
         )
+
+    def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any) -> Any:
+        """Bind proxy pools to the pair context too (defense in depth).
+
+        The temporary cost session disables proxies entirely, so this path must
+        never run during cost sampling; if a future caller re-enables it, the
+        deadline still sees every connection.
+        """
+        manager = super().proxy_manager_for(proxy, **proxy_kwargs)
+        manager.pool_classes_by_scheme = _bound_pool_classes(self.pair_context)
+        return manager
 
 
 def execute_cost_sampler(
@@ -1435,6 +1541,11 @@ def execute_cost_sampler(
 
     cost_session = AllowlistedSession(owner_check=owner_check)
     cost_session.allowed_hosts = frozenset({PORTAL_HOST})
+    # The cost sampler must never traverse a proxy: environment proxies are
+    # ignored and every request also passes proxies={} explicitly, so no
+    # ProxyManager path can exist for this temporary session.
+    cost_session.trust_env = False
+    cost_session.proxies = {}
 
     pair_context = PairContext(deadline=deadline)
     cost_adapter = CostHTTPAdapter(pair_context)
@@ -1542,6 +1653,7 @@ def execute_cost_sampler(
             headers=headers,
             allow_redirects=False,
             stream=True,
+            proxies={},
             timeout=req_timeout,
         )
         in_flight_resp = resp_post
@@ -1629,6 +1741,7 @@ def execute_cost_sampler(
             headers=headers,
             allow_redirects=False,
             stream=True,
+            proxies={},
             timeout=req_timeout_get,
         )
         in_flight_resp = resp_get
@@ -1787,3 +1900,6 @@ def execute_cost_sampler(
             cost_session.close()
         except Exception:
             pass
+        # Close every duplicated descriptor exactly once (close_all already
+        # released them when the pair deadline fired).
+        pair_context.release()
