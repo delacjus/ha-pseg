@@ -1,0 +1,405 @@
+{
+  "schema": 1,
+  "description": "Scoped v1.6.0 baseline for the PSE&G statistics writer/state/parser surfaces. Selected functions and module constants only: no whole-module or whole-file identity is claimed. Compare with tools/stats_baseline.py.",
+  "baseline": {
+    "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+    "parent": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb^",
+    "tag": "v1.6.0",
+    "subject": "Read hourly ChartData x as New York wall clock and fix CI",
+    "extracted_from": "verified local git history of this repository",
+    "extraction_command": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:<path> parsed with ast, digested by tools/stats_baseline.py normalization (development-time extractor)",
+    "runtime_requirements": "manifest plus explicit --source tree only; no .git access, no import or execution of the inspected modules, no baseline regeneration",
+    "groups": {
+      "writer_state": "statistics_state.py store/writer/journal surfaces and the coordinator mutation builder; expected byte-identical to v1.6.0",
+      "parser_v1_6_0": "hourly ChartData parser surfaces carrying the known v1.6.0 wall-clock change; recorded separately from writer/state surfaces"
+    }
+  },
+  "normalization": {
+    "encoding": "UTF-8 source text, decoded strictly",
+    "segment": "ast.get_source_segment(source, node, padded=False) for the named node",
+    "line_endings": "CRLF and lone CR become LF",
+    "trailing_whitespace": "each line rstripped",
+    "edges": "leading and trailing blank lines removed; no trailing newline",
+    "digest": "sha256 hex of the normalized segment UTF-8 bytes",
+    "assignment_surfaces": "module-level Assign/AnnAssign whose target is exactly the named constant",
+    "method_surfaces": "Class.method resolved inside the named module-level ClassDef body; indentation is part of the digest",
+    "scope": "declared surfaces only; other functions in the same files are not compared"
+  },
+  "surfaces": [
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "assignment",
+      "name": "STORAGE_VERSION",
+      "sha256": "c27f5e9efbff636a83e5f975615f09bef3d170f93c3e54d33e71582dafb3b022",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "STORAGE_VERSION",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "c27f5e9efbff636a83e5f975615f09bef3d170f93c3e54d33e71582dafb3b022"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "assignment",
+      "name": "_PROMOTED_KEYS",
+      "sha256": "8f8d1e1af9305c881bfb7f75b313ea258786e119895969be12b571ef5d9fe69e",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "_PROMOTED_KEYS",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "8f8d1e1af9305c881bfb7f75b313ea258786e119895969be12b571ef5d9fe69e"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "method",
+      "name": "StatisticsStateStore.__init__",
+      "sha256": "ec77c2d8b43b4d9db9cdbe6d8bbfdce6a352ecc0ba8d10da785185af6bcd02a8",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "StatisticsStateStore.__init__",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "ec77c2d8b43b4d9db9cdbe6d8bbfdce6a352ecc0ba8d10da785185af6bcd02a8"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "method",
+      "name": "StatisticsStateStore.async_load",
+      "sha256": "8db8e84001ed7783b1f28f7d0366986985ca6197082619ecedbfa33eb60c5fe6",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "StatisticsStateStore.async_load",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "8db8e84001ed7783b1f28f7d0366986985ca6197082619ecedbfa33eb60c5fe6"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "method",
+      "name": "StatisticsStateStore._async_verify_persisted",
+      "sha256": "e4dcde7602dd656fcefb5219c5149d30eba81290a329765bdf094c95f5b4e336",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "StatisticsStateStore._async_verify_persisted",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "e4dcde7602dd656fcefb5219c5149d30eba81290a329765bdf094c95f5b4e336"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "method",
+      "name": "StatisticsStateStore.async_wait_durable",
+      "sha256": "2fe97376bae81dd17305d1d44e5d74dbc2eaef8e00cefc7e2a71e8ee8a32e83b",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "StatisticsStateStore.async_wait_durable",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "2fe97376bae81dd17305d1d44e5d74dbc2eaef8e00cefc7e2a71e8ee8a32e83b"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "method",
+      "name": "StatisticsStateStore.async_begin",
+      "sha256": "56caa5d21a6f98857142c8c392e7fd72938e1967d9a005daad910961b652588d",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "StatisticsStateStore.async_begin",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "56caa5d21a6f98857142c8c392e7fd72938e1967d9a005daad910961b652588d"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "method",
+      "name": "StatisticsStateStore.async_commit",
+      "sha256": "eaca1bbe6d3f0031e781d9a008aa00af0d542705ee9c4d2c44d233b9dd1a4a7c",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "StatisticsStateStore.async_commit",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "eaca1bbe6d3f0031e781d9a008aa00af0d542705ee9c4d2c44d233b9dd1a4a7c"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "method",
+      "name": "StatisticsStateStore.async_discard",
+      "sha256": "81aab6840490ea1ff4c0aa03c3bcfae9e394bc69913df86739e6e46915e77ed7",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "StatisticsStateStore.async_discard",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "81aab6840490ea1ff4c0aa03c3bcfae9e394bc69913df86739e6e46915e77ed7"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "method",
+      "name": "StatisticsStateStore.pending_days",
+      "sha256": "4f7a7c0b5d43cbca2cefee39b2014cfaeb4cfca0385d14e23d2f459475895a17",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "StatisticsStateStore.pending_days",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "4f7a7c0b5d43cbca2cefee39b2014cfaeb4cfca0385d14e23d2f459475895a17"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "method",
+      "name": "StatisticsStateStore._trim_promoted",
+      "sha256": "9820de2352d0c69183710068602d283f6055187f0157c500da5e2d903a32d154",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "StatisticsStateStore._trim_promoted",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "9820de2352d0c69183710068602d283f6055187f0157c500da5e2d903a32d154"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/statistics_state.py",
+      "kind": "function",
+      "name": "_read_json_file",
+      "sha256": "b9bb9092679d1c6e96923f4b2015aa54d747557839d0dfcfbee6e69701679cd2",
+      "baseline_file_sha256": "62eeb3383520f4692c24f6e86adecef7f4431e8339d7d4e2c9d237eeede674bc",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_state.py",
+        "function": "_read_json_file",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_state.py",
+        "sha256": "b9bb9092679d1c6e96923f4b2015aa54d747557839d0dfcfbee6e69701679cd2"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/coordinator.py",
+      "kind": "method",
+      "name": "PsegDataUpdateCoordinator._build_mutation",
+      "sha256": "4b057dd893b935208c0f07e46a64482d8675172e18592f9688d91256472a8255",
+      "baseline_file_sha256": "471c11839f703afb8a88a9d39a6512ae0c30ffcadef3e5553b8c934e4fc59ceb",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/coordinator.py",
+        "function": "PsegDataUpdateCoordinator._build_mutation",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/coordinator.py",
+        "sha256": "4b057dd893b935208c0f07e46a64482d8675172e18592f9688d91256472a8255"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "writer_state",
+      "path": "custom_components/pseg/coordinator.py",
+      "kind": "method",
+      "name": "PsegDataUpdateCoordinator._promoted_entries",
+      "sha256": "7d56908307dd509e8cc7c65ecea983e9d270f8f4bb45d496830061e6dc098849",
+      "baseline_file_sha256": "471c11839f703afb8a88a9d39a6512ae0c30ffcadef3e5553b8c934e4fc59ceb",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/coordinator.py",
+        "function": "PsegDataUpdateCoordinator._promoted_entries",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/coordinator.py",
+        "sha256": "7d56908307dd509e8cc7c65ecea983e9d270f8f4bb45d496830061e6dc098849"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "parser_v1_6_0",
+      "path": "custom_components/pseg/statistics_hourly.py",
+      "kind": "assignment",
+      "name": "STATISTICS_INCOMPLETE_REASONS",
+      "sha256": "a0ea760bb1a68c86619de37e0421ca9dbc3b5a4b4d66ccc8d6cf7fe40ef8e542",
+      "baseline_file_sha256": "f8c027efc757c1174707119e2e9a22c4eb5e2606f8a3992bd8ae2bd107458e0e",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_hourly.py",
+        "function": "STATISTICS_INCOMPLETE_REASONS",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_hourly.py",
+        "sha256": "a0ea760bb1a68c86619de37e0421ca9dbc3b5a4b4d66ccc8d6cf7fe40ef8e542"
+      },
+      "v1_6_0_change": {
+        "change": "modified",
+        "old_sha256": "b9f6e98db80654ef9e8755abbb1655af041bfb0209fc3fb32e2a07803d7441eb",
+        "new_sha256": "a0ea760bb1a68c86619de37e0421ca9dbc3b5a4b4d66ccc8d6cf7fe40ef8e542",
+        "evidence": "Adds the 'dst_ambiguous' reason so an ambiguous fall-back hour day keeps its daily row instead of promoting a wrongly interpreted hourly series.",
+        "reviewer": "Codex review R2 SHIP on 00ba6b3 (commit message records R1 FIX: over-broad label gate)"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "parser_v1_6_0",
+      "path": "custom_components/pseg/statistics_hourly.py",
+      "kind": "function",
+      "name": "label_matches_ny_time",
+      "sha256": "689d70ab77abe038577917394435e2f212656a39d937cd3e151ab2b9839406c5",
+      "baseline_file_sha256": "f8c027efc757c1174707119e2e9a22c4eb5e2606f8a3992bd8ae2bd107458e0e",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_hourly.py",
+        "function": "label_matches_ny_time",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_hourly.py",
+        "sha256": "689d70ab77abe038577917394435e2f212656a39d937cd3e151ab2b9839406c5"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "parser_v1_6_0",
+      "path": "custom_components/pseg/statistics_hourly.py",
+      "kind": "function",
+      "name": "ny_wall_ms_to_utc",
+      "sha256": "52165740b80f3b35a4db3c1aef3489f2e5bb785fd65b65241f8cec1968f3b240",
+      "baseline_file_sha256": "f8c027efc757c1174707119e2e9a22c4eb5e2606f8a3992bd8ae2bd107458e0e",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_hourly.py",
+        "function": "ny_wall_ms_to_utc",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_hourly.py",
+        "sha256": "52165740b80f3b35a4db3c1aef3489f2e5bb785fd65b65241f8cec1968f3b240"
+      },
+      "v1_6_0_change": {
+        "change": "added",
+        "old_sha256": null,
+        "new_sha256": "52165740b80f3b35a4db3c1aef3489f2e5bb785fd65b65241f8cec1968f3b240",
+        "evidence": "New helper returning (utc_dt, ok|dst_ambiguous|dst_nonexistent); the pre-v1.6.0 code converted x with datetime.fromtimestamp(..., tz=UTC) and had no wall-clock conversion at all, so this surface has no pre-v1.6.0 preimage.",
+        "reviewer": "Codex review R2 SHIP on 00ba6b3 (commit message records R1 FIX: over-broad label gate)"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "parser_v1_6_0",
+      "path": "custom_components/pseg/statistics_hourly.py",
+      "kind": "function",
+      "name": "parse_date_only_label",
+      "sha256": "8e83ffcf69534634b5ec673ee864861babffb9c1e3fd09ee3aa6583079d77091",
+      "baseline_file_sha256": "f8c027efc757c1174707119e2e9a22c4eb5e2606f8a3992bd8ae2bd107458e0e",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/statistics_hourly.py",
+        "function": "parse_date_only_label",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/statistics_hourly.py",
+        "sha256": "8e83ffcf69534634b5ec673ee864861babffb9c1e3fd09ee3aa6583079d77091"
+      },
+      "v1_6_0_change": {
+        "change": "added",
+        "old_sha256": null,
+        "new_sha256": "8e83ffcf69534634b5ec673ee864861babffb9c1e3fd09ee3aa6583079d77091",
+        "evidence": "New strict MM/DD/YYYY parser used only for the two-endpoint date-only interval proof; whitespace-only tolerance, no other label shape accepted. No pre-v1.6.0 preimage.",
+        "reviewer": "Codex review R2 SHIP on 00ba6b3 (commit message records R1 FIX: over-broad label gate)"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "parser_v1_6_0",
+      "path": "custom_components/pseg/pseg_client.py",
+      "kind": "assignment",
+      "name": "HOURLY_X_CONTRACT",
+      "sha256": "3660db67d718718273abcc9e2dc5888362a25f3453b05a9ac909d425a040cc31",
+      "baseline_file_sha256": "2fc092a012dc41480b99dc667309c6ce75c58edcac74a20a4058a7ad6128cc41",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/pseg_client.py",
+        "function": "HOURLY_X_CONTRACT",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/pseg_client.py",
+        "sha256": "3660db67d718718273abcc9e2dc5888362a25f3453b05a9ac909d425a040cc31"
+      },
+      "v1_6_0_change": {
+        "change": "added",
+        "old_sha256": null,
+        "new_sha256": "3660db67d718718273abcc9e2dc5888362a25f3453b05a9ac909d425a040cc31",
+        "evidence": "New module constant naming the hourly x contract (ny_wall_clock_hour_start); no pre-v1.6.0 preimage.",
+        "reviewer": "Codex review R2 SHIP on 00ba6b3 (commit message records R1 FIX: over-broad label gate)"
+      },
+      "approved_deltas": []
+    },
+    {
+      "group": "parser_v1_6_0",
+      "path": "custom_components/pseg/pseg_client.py",
+      "kind": "method",
+      "name": "PsegClient._parse_hourly_chart",
+      "sha256": "8f2be174584fe6bd128ce165cfaf57b2d864ae5b358d151b39336cfdc5a506d4",
+      "baseline_file_sha256": "2fc092a012dc41480b99dc667309c6ce75c58edcac74a20a4058a7ad6128cc41",
+      "extraction": {
+        "commit": "00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb",
+        "tag": "v1.6.0",
+        "path": "custom_components/pseg/pseg_client.py",
+        "function": "PsegClient._parse_hourly_chart",
+        "source": "git show 00ba6b33bdf73e3d9524ae3b3307aa44c007f9eb:custom_components/pseg/pseg_client.py",
+        "sha256": "8f2be174584fe6bd128ce165cfaf57b2d864ae5b358d151b39336cfdc5a506d4"
+      },
+      "v1_6_0_change": {
+        "change": "modified",
+        "old_sha256": "74ced0290115048ab660bcf807e5f5e2d6b1ee9c932da54d0947700c114320d0",
+        "new_sha256": "8f2be174584fe6bd128ce165cfaf57b2d864ae5b358d151b39336cfdc5a506d4",
+        "evidence": "Hourly ChartData x is read as the America/New_York wall-clock hour start encoded as UTC epoch ms (ny_wall_ms_to_utc) instead of a true UTC instant; a fall-back ambiguous hour yields point_reason dst_ambiguous and the day stays daily; a spring-forward nonexistent hour is skipped; interval proof now needs BOTH hs labels to be strict MM/DD/YYYY naming the start NY date (end same or next day). Live evidence recorded in 00ba6b3: 0/288 mismatched hours against the 15-minute portal CSV and daily sums equal to the PSEG app totals on 9/9 days.",
+        "reviewer": "Codex review R2 SHIP on 00ba6b3 (commit message records R1 FIX: over-broad label gate)"
+      },
+      "approved_deltas": []
+    }
+  ]
+}

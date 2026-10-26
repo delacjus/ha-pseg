@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from tools import release_check
+from tools import release_check, stats_baseline
 
 
 @pytest.fixture
@@ -21,7 +21,9 @@ def source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         '[tool.ruff.lint]\nselect=["E", "F"]\nignore=["E501"]\n[tool.pytest.ini_options]\ntestpaths=["tests"]\n'
         'markers=["independent: probe", "slow: slow", "nightly: nightly", "quarantine: quarantine"]\n'
     )
-    (repo / "origin.py").write_text("VALUE = 42\n")
+    (repo / "origin.py").write_text(
+        "VALUE = 42\n\n\ndef helper(value):\n    return value + 1\n"
+    )
     (repo / "tests" / "test_origin.py").write_text(
         "from pathlib import Path\nimport os\nimport origin\nimport pytest\n\n"
         "@pytest.mark.independent\ndef test_origin():\n"
@@ -47,10 +49,32 @@ def source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Exercise the real copy engine, with a small catalog whose detector also
     # verifies that both release and mutation imports come from disposable copies.
     (repo / "tools").mkdir()
-    for name in ("mutation_check.py", "_snapshot.py"):
+    for name in ("mutation_check.py", "_snapshot.py", "stats_baseline.py"):
         (repo / "tools" / name).write_bytes(
             (Path(release_check.__file__).parent / name).read_bytes()
         )
+    # Scoped statistics baseline: one function and one constant of origin.py.
+    fixture_dir = repo / "tests" / "fixtures"
+    fixture_dir.mkdir()
+    surfaces = []
+    for kind, name in (("function", "helper"), ("assignment", "VALUE")):
+        digest, detail = stats_baseline.extract_digest(repo, "origin.py", kind, name)
+        assert detail == "ok"
+        surfaces.append({
+            "group": "writer_state",
+            "path": "origin.py",
+            "kind": kind,
+            "name": name,
+            "sha256": digest,
+            "baseline_file_sha256": stats_baseline.file_digest(repo, "origin.py"),
+            "approved_deltas": [],
+        })
+    (fixture_dir / "statistics_baseline_v1_6_0.json").write_text(json.dumps({
+        "schema": 1,
+        "baseline": {"commit": "0" * 40, "tag": "v1.6.0"},
+        "normalization": {"digest": "sha256"},
+        "surfaces": surfaces,
+    }))
     (repo / "custom_components" / "pseg").mkdir(parents=True)
     (repo / "custom_components" / "pseg" / "auth.py").write_text("VALUE = 42\n")
     (repo / "tests" / "test_mutant.py").write_text(
@@ -81,6 +105,14 @@ def run(source: Path, profile: str = "fast", *options: str) -> int:
 
 def records(capsys: pytest.CaptureFixture[str]) -> list[dict]:
     return [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.startswith("{")]
+
+
+def report_from(child: dict) -> dict:
+    """Return the structured stats-baseline report from a child log."""
+    for line in Path(child["log"]).read_text().splitlines():
+        if line.startswith("{"):
+            return json.loads(line)
+    raise AssertionError("child log has no structured report")
 
 
 def test_fast_isolated_imports_counts_no_source_writes(source: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -193,7 +225,7 @@ def test_source_change_detected(source: Path, monkeypatch: pytest.MonkeyPatch, c
     assert "source_changed_during_run" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("profile", ["slow", "nightly", "replay", "stats-baseline", "unknown"])
+@pytest.mark.parametrize("profile", ["slow", "nightly", "replay", "unknown"])
 def test_unavailable_profiles(source: Path, profile: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert run(source, profile) != 0
     assert capsys.readouterr().err
@@ -255,3 +287,70 @@ def test_mutation_failure_propagates(source: Path, capsys: pytest.CaptureFixture
     assert run(source, "mutation") == 1
     child = next(row for row in records(capsys) if row.get("child") == "mutation")
     assert json.loads(Path(child["log"]).read_text())["survived"] == 1
+
+
+def test_stats_baseline_profile_equal(source: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert run(source, "stats-baseline") == 0
+    result = records(capsys)
+    child = next(row for row in result if row.get("child") == "stats-baseline")
+    assert child["ok"] is True
+    assert child["counts"] == {
+        "surfaces_total": 2,
+        "equal": 2,
+        "approved_expected_delta": 0,
+        "unreviewed": 0,
+    }
+    report = report_from(child)
+    assert report["scope"] == "selected-surfaces-only"
+    assert report["blanket_module_or_file_identity_claimed"] is False
+    # The child runs against the snapshot copy, never the source worktree.
+    assert report["informational_file_digests"][0]["file_digest_changed"] is False
+    assert next(row for row in result if "source_unchanged" in row)["source_unchanged"]
+
+
+def test_stats_baseline_profile_refuses_unreviewed_change(
+    source: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (source / "origin.py").write_text(
+        "VALUE = 42\n\n\ndef helper(value):\n    return value + 2\n"
+    )
+    assert run(source, "stats-baseline") == 1
+    result = records(capsys)
+    child = next(row for row in result if row.get("child") == "stats-baseline")
+    assert child["ok"] is False
+    assert child["counts"]["unreviewed"] == 1
+    text = Path(child["log"]).read_text()
+    assert "unreviewed-change" in text
+    assert "origin.py" in text
+    assert next(row for row in result if "source_unchanged" in row)["source_unchanged"]
+
+
+def test_stats_baseline_profile_malformed_manifest_is_never_green(
+    source: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (source / "tests/fixtures/statistics_baseline_v1_6_0.json").write_text("{}")
+    assert run(source, "stats-baseline") == 1
+    child = next(row for row in records(capsys) if row.get("child") == "stats-baseline")
+    assert child["ok"] is False
+    assert child["empty_suite"] is True
+
+
+def test_stats_baseline_new_paths_from(
+    source: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A new, not-yet-committed manifest arrives through --paths-from only."""
+    manifest = "tests/fixtures/statistics_baseline_v1_6_0.json"
+    subprocess.run(
+        ["git", "-C", str(source), "rm", "--cached", "-q", manifest],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(source), "-c", "user.name=Test", "-c", "user.email=test@example.com",
+         "commit", "-q", "-m", "untrack fixture manifest"],
+        check=True, capture_output=True,
+    )
+    paths = tmp_path / "paths.txt"
+    paths.write_text(f"{manifest}\n", encoding="utf-8")
+    assert run(source, "stats-baseline", "--paths-from", str(paths)) == 0
+    child = next(row for row in records(capsys) if row.get("child") == "stats-baseline")
+    assert child["counts"]["equal"] == 2

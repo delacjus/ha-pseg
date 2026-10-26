@@ -47,6 +47,9 @@ _NODE_FILES = (
     "tests/test_captcha_extension.js",
 )
 
+# Scoped statistics-surface baseline; the child never regenerates it.
+_STATS_BASELINE_MANIFEST = "tests/fixtures/statistics_baseline_v1_6_0.json"
+
 
 def _source_state(source: Path, paths_from: str | None) -> dict[str, object]:
     manifest = freeze(source=source, paths_from=paths_from)
@@ -138,6 +141,31 @@ def _child(command: list[str], copy: Path, label: str, timeout: float) -> bool:
             nonempty = report["total"] > 0
         except (ValueError, KeyError, TypeError):
             nonempty = False
+    elif label == "stats-baseline":
+        # The child prints the structured report on stdout and a human summary on
+        # stderr; both land in this log, so decode the last report line. A
+        # malformed or empty report is a refusal, never an empty-but-green run.
+        report = None
+        for line in text.splitlines():
+            if not line.startswith("{"):
+                continue
+            try:
+                candidate = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(candidate, dict) and candidate.get("tool") == "stats_baseline":
+                report = candidate
+        counts = {}
+        if report is not None:
+            try:
+                counts = {
+                    key: int(report[key])
+                    for key in ("surfaces_total", "equal", "approved_expected_delta",
+                                "unreviewed")
+                }
+            except (KeyError, TypeError, ValueError):
+                counts = {}
+        nonempty = counts.get("surfaces_total", 0) > 0 and not (report or {}).get("error")
     else:
         nonempty = True  # Ruff is a lint check, not an expected test suite.
     ok = returncode == 0 and not timed_out and nonempty
@@ -153,7 +181,7 @@ def _child(command: list[str], copy: Path, label: str, timeout: float) -> bool:
 
 
 def _run_profiles(args: argparse.Namespace) -> int:
-    if args.subcommand in {"slow", "nightly", "replay", "stats-baseline"}:
+    if args.subcommand in {"slow", "nightly", "replay"}:
         _emit_error("profile_not_available", profile=args.subcommand)
         return 1
     if args.repeat < 1 or not math.isfinite(args.timeout) or args.timeout <= 0:
@@ -195,6 +223,13 @@ def _run_profiles(args: argparse.Namespace) -> int:
                                      "--source", ".", "--python", interpreter,
                                      "--table", "tests/mutations/auth_guards.py", "--json"],
                                     copy, "mutation", args.timeout)
+                elif profile == "stats-baseline":
+                    # Explicit manifest plus the snapshot copy: no git, no
+                    # regeneration, nonzero on any unreviewed surface change.
+                    passed = _child([interpreter, "-B", "tools/stats_baseline.py",
+                                     "--manifest", _STATS_BASELINE_MANIFEST,
+                                     "--source", "."],
+                                    copy, "stats-baseline", args.timeout)
                 else:
                     node = shutil.which("node")
                     if node is None:
