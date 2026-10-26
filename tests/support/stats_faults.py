@@ -640,6 +640,7 @@ class _BarrierAction:
     event: asyncio.Event = None  # type: ignore[assignment]
     timeout: float = DEFAULT_BARRIER_TIMEOUT
     hook: Callable[[Any], Any] | None = None
+    one_shot: bool = False
 
 
 class StatsFaultHarness:
@@ -653,18 +654,49 @@ class StatsFaultHarness:
         self,
         coord: PsegDataUpdateCoordinator | None = None,
         substrate: PhysicalDurabilitySubstrate | None = None,
+        series_order: str = "consumption_first",
     ) -> None:
         self.coord = coord
         self.substrate = substrate
+        self.series_order = series_order
         self._actions: dict[str, _BarrierAction] = {}
         self._hit_counts: dict[str, int] = {}
+        self._fired_counts: dict[str, int] = {}
         self._patches: list[Any] = []
         self._installed = False
         self._baseline_count = 0
+        self._buffered_stats: tuple[Any, Any, Any] | None = None
 
     def hits(self, barrier_name: str) -> int:
         """Return the number of times the named barrier was hit."""
         return self._hit_counts.get(barrier_name, 0)
+
+    def fired(self, barrier_name: str) -> int:
+        """Return the number of times an action at this barrier was actually fired."""
+        return self._fired_counts.get(barrier_name, 0)
+
+    def fail_once(self, barrier_name: str, exception: Exception) -> None:
+        """Inject an exception once when the barrier is reached, then pass through."""
+        assert barrier_name in BARRIER_INVENTORY, f"Unknown barrier name: {barrier_name}"
+        self._actions[barrier_name] = _BarrierAction(
+            kind="fail", exception=exception, one_shot=True
+        )
+
+    def cancel_once(self, barrier_name: str) -> None:
+        """Raise asyncio.CancelledError once at the barrier, then pass through."""
+        assert barrier_name in BARRIER_INVENTORY, f"Unknown barrier name: {barrier_name}"
+        self._actions[barrier_name] = _BarrierAction(kind="cancel", one_shot=True)
+
+    def retire_once(self, barrier_name: str) -> None:
+        """Retire the coordinator once at the barrier, then pass through."""
+        assert barrier_name in BARRIER_INVENTORY, f"Unknown barrier name: {barrier_name}"
+        self._actions[barrier_name] = _BarrierAction(kind="retire", one_shot=True)
+
+    def pause_once(self, barrier_name: str) -> None:
+        """Pause execution once at the barrier until resumed, then pass through."""
+        assert barrier_name in BARRIER_INVENTORY, f"Unknown barrier name: {barrier_name}"
+        event = asyncio.Event()
+        self._actions[barrier_name] = _BarrierAction(kind="pause", event=event, one_shot=True)
 
     def pause(self, barrier_name: str) -> None:
         """Pause execution when the barrier is reached until resumed."""
@@ -706,6 +738,10 @@ class StatsFaultHarness:
         action = self._actions.get(barrier_name)
         if not action:
             return
+
+        if action.one_shot:
+            self._actions.pop(barrier_name, None)
+        self._fired_counts[barrier_name] = self._fired_counts.get(barrier_name, 0) + 1
 
         if action.kind == "pause":
             await action.event.wait()
@@ -757,7 +793,9 @@ class StatsFaultHarness:
         async def hooked_commit(mutation_id):
             await self._dispatch(BEFORE_JOURNAL_COMMIT, mutation_id)
             await self._dispatch(STORE_WRITE_COMMIT, mutation_id)
+            await self._dispatch(BEFORE_RECOVERY_COMMIT, mutation_id)
             res = await orig_commit(mutation_id)
+            await self._dispatch(AFTER_RECOVERY_COMMIT, mutation_id)
             await self._dispatch(AFTER_JOURNAL_COMMIT, mutation_id)
             return res
 
@@ -816,21 +854,47 @@ class StatsFaultHarness:
             # Hook async_add_external_statistics (per-series imports)
             orig_add_stats = coord_mod.async_add_external_statistics
 
+            def _sync_import_barrier(barrier: str, meta: Any, st: Any) -> None:
+                self._hit_counts[barrier] = self._hit_counts.get(barrier, 0) + 1
+                act = self._actions.get(barrier)
+                if act and act.kind == "fail":
+                    if act.one_shot:
+                        self._actions.pop(barrier, None)
+                    self._fired_counts[barrier] = self._fired_counts.get(barrier, 0) + 1
+                    assert act.exception is not None
+                    raise act.exception
+
             def hooked_add_stats(hass_arg, metadata, stats):
                 stat_id = metadata.get("statistic_id", "")
                 is_consumption = stat_id.endswith("_energy_consumption")
                 is_cost = stat_id.endswith("_energy_cost")
 
-                # Dispatch sync/schedule
-                loop = asyncio.get_running_loop()
-                loop.create_task(self._dispatch(BEFORE_RECORDER_IMPORT))
-                if is_consumption:
-                    loop.create_task(self._dispatch(RECORDER_IMPORT_CONSUMPTION, (metadata, stats)))
-                elif is_cost:
-                    loop.create_task(self._dispatch(RECORDER_IMPORT_COST, (metadata, stats)))
+                self._hit_counts[BEFORE_RECORDER_IMPORT] = (
+                    self._hit_counts.get(BEFORE_RECORDER_IMPORT, 0) + 1
+                )
 
+                if self.series_order == "cost_first" and is_consumption:
+                    # Buffer consumption and wait for cost to import first
+                    self._buffered_stats = (hass_arg, metadata, stats)
+                    return None
+
+                barrier = RECORDER_IMPORT_CONSUMPTION if is_consumption else RECORDER_IMPORT_COST
+                _sync_import_barrier(barrier, metadata, stats)
                 res = orig_add_stats(hass_arg, metadata, stats)
-                loop.create_task(self._dispatch(AFTER_RECORDER_IMPORT))
+                self._hit_counts[AFTER_RECORDER_IMPORT] = (
+                    self._hit_counts.get(AFTER_RECORDER_IMPORT, 0) + 1
+                )
+
+                if self.series_order == "cost_first" and is_cost and self._buffered_stats:
+                    # Flush buffered consumption second
+                    b_hass, b_meta, b_stats = self._buffered_stats
+                    self._buffered_stats = None
+                    _sync_import_barrier(RECORDER_IMPORT_CONSUMPTION, b_meta, b_stats)
+                    orig_add_stats(b_hass, b_meta, b_stats)
+                    self._hit_counts[AFTER_RECORDER_IMPORT] = (
+                        self._hit_counts.get(AFTER_RECORDER_IMPORT, 0) + 1
+                    )
+
                 return res
 
             p2 = patch.object(coord_mod, "async_add_external_statistics", hooked_add_stats)
