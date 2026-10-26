@@ -7,14 +7,17 @@ run_case enforcing the mandatory generated-case ending.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 import copy
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 import json
+import re
 import time
 from types import MappingProxyType
 from typing import Any
 
+from homeassistant.components.recorder.statistics import statistics_during_period
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
@@ -22,8 +25,12 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.components.recorder.common import (
+    async_wait_recording_done,
+)
 
 from custom_components.pseg.const import (
+    CONF_METER_ID,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
     CONF_RENEWAL_ADMISSION,
@@ -36,7 +43,7 @@ from custom_components.pseg.pseg_client import PsegClient
 
 from .clock import ClockDriver
 from .factory import ClientFactory
-from .portal import FrozenCookie, Reply, ScriptedPortal, _freeze_value
+from .portal import Dispatch, FrozenCookie, Reply, ScriptedPortal, _freeze_value
 
 
 def _unfreeze_for_json(obj: Any) -> Any:
@@ -212,6 +219,54 @@ class LifecycleDriver:
         self.portal = portal
         self.factory = factory or ClientFactory(portal)
         self.clock = clock or ClockDriver(hass, freezer=freezer)
+        self._observers: list[Callable[..., Any]] = []
+        self._caplog: Any | None = None
+        self.last_advance_timer_dispatches: int | None = None
+
+    def _retire_current_generation(self) -> None:
+        """Retire the current client generation on portal and observers."""
+        old_client = self.client
+        old_gen = old_client.generation_id if old_client is not None else None
+        if old_gen:
+            self.portal.retire(old_gen)
+            for obs in list(self._observers):
+                if hasattr(obs, "retire_generation"):
+                    obs.retire_generation(old_gen)
+
+    def attach_caplog(self, caplog: Any) -> None:
+        """Attach pytest caplog for privacy scanning across checkpoints."""
+        self._caplog = caplog
+        for obs in list(self._observers):
+            if hasattr(obs, "attach_caplog"):
+                obs.attach_caplog(caplog)
+
+    def add_observer(self, observer: Callable[..., Any]) -> None:
+        """Register a step-time observer."""
+        if observer not in self._observers:
+            self._observers.append(observer)
+            if self._caplog is not None and hasattr(observer, "attach_caplog"):
+                observer.attach_caplog(self._caplog)
+
+    def remove_observer(self, observer: Callable[..., Any]) -> None:
+        """Unregister a step-time observer."""
+        if observer in self._observers:
+            self._observers.remove(observer)
+
+    def observe_checkpoint(self, tag: str, snapshot: Snapshot | None = None) -> None:
+        """Invoke step-time observers for a declared lifecycle checkpoint."""
+        for obs in list(self._observers):
+            try:
+                obs(self, tag, snapshot)
+            except TypeError:
+                obs(self, tag)
+
+    @property
+    def dispatches(self) -> Sequence[Dispatch]:
+        """Dispatches associated with this lifecycle driver runtime."""
+        gen_id = self.client.generation_id if self.client else None
+        if gen_id and self.portal:
+            return tuple(d for d in self.portal.dispatches if d.generation_id == gen_id)
+        return tuple(self.portal.dispatches) if self.portal else ()
 
     @property
     def entry(self) -> MockConfigEntry:
@@ -275,22 +330,28 @@ class LifecycleDriver:
 
     async def advance(self, delta: Any) -> Any:
         """Advance simulated clock and flush resulting scheduled callbacks."""
-        return await self.clock.async_advance(delta)
+        prior = len(self.portal.dispatches)
+        res = await self.clock.async_advance(delta)
+        self.last_advance_timer_dispatches = len(self.portal.dispatches) - prior
+        return res
 
     async def reload(self) -> bool:
         """Reload the config entry via public Home Assistant reload."""
+        self._retire_current_generation()
         res = await self.hass.config_entries.async_reload(self.entry.entry_id)
         await self.hass.async_block_till_done()
         return res
 
     async def unload(self) -> bool:
         """Unload the config entry via public Home Assistant unload."""
+        self._retire_current_generation()
         res = await self.hass.config_entries.async_unload(self.entry.entry_id)
         await self.hass.async_block_till_done()
         return res
 
     async def stop(self) -> None:
         """Explicitly stop the coordinator keepalive and retire sessions."""
+        self._retire_current_generation()
         if self.coordinator is not None:
             self.coordinator.stop_keepalive()
         await self.hass.async_block_till_done()
@@ -301,6 +362,7 @@ class LifecycleDriver:
         In Home Assistant test environments, the config entries store is backed
         by the mock_storage dictionary in pytest_homeassistant_custom_component.
         """
+        self._retire_current_generation()
         # 1. Stop coordinator keepalive and unload entry
         if self.coordinator is not None:
             self.coordinator.stop_keepalive()
@@ -370,6 +432,7 @@ class LifecycleDriver:
         portal_cookies: str | None = None,
     ) -> dict[str, Any]:
         """Drive a human reauth flow with same or fresh cookies."""
+        self._retire_current_generation()
         result = await self.entry.start_reauth_flow(self.hass)
         flow_id = result["flow_id"]
         if same_cookies:
@@ -431,14 +494,32 @@ class LifecycleDriver:
     async def snapshot(self) -> Snapshot:
         """Capture an immutable snapshot of all observable surfaces."""
         entry_state = self.entry.state if self.entry is not None else None
-        entry_data = _freeze_value(dict(self.entry.data) if self.entry is not None else {})
 
-        raw_cookies = self.entry.data.get("cookies", []) if self.entry is not None else []
+        # Read physical persisted store (core.config_entries)
+        persisted_raw_entry = None
+        store = getattr(self.hass.config_entries, "_store", None)
+        if store is not None:
+            if getattr(store, "_delay_handle", None) is not None:
+                await store._async_callback_delayed_write()
+            store._data = None  # Invalidate in-memory cache so load reads underlying storage
+            raw_storage = await store.async_load()
+            if raw_storage and "entries" in raw_storage:
+                for item in raw_storage["entries"]:
+                    if item.get("entry_id") == self.entry.entry_id:
+                        persisted_raw_entry = item
+                        break
+
+        if persisted_raw_entry is not None:
+            raw_data = persisted_raw_entry.get("data", {})
+            raw_cookies = raw_data.get("cookies", [])
+            raw_admission = raw_data.get(CONF_RENEWAL_ADMISSION, {})
+        else:
+            raw_data = self.entry.data if self.entry is not None else {}
+            raw_cookies = raw_data.get("cookies", [])
+            raw_admission = raw_data.get(CONF_RENEWAL_ADMISSION, {})
+
+        entry_data = _freeze_value(dict(raw_data))
         persisted_jar = tuple(_freeze_value(c) for c in raw_cookies)
-
-        raw_admission = (
-            self.entry.data.get(CONF_RENEWAL_ADMISSION, {}) if self.entry is not None else {}
-        )
         renewal_admission = _freeze_value(dict(raw_admission))
 
         flows = tuple(
@@ -467,22 +548,52 @@ class LifecycleDriver:
                 states[state.entity_id] = _freeze_value(state.as_dict())
         sensors = _freeze_value(states)
 
+        # 3. Read REAL pending journal from statistics Store
         coord = self.coordinator
-        journal: dict[str, Any] = {}
-        if coord is not None and hasattr(coord, "async_statistics_summary"):
-            try:
-                journal = await coord.async_statistics_summary()
-            except Exception as err:
-                journal = {"error": type(err).__name__, "message": str(err)}
-        frozen_journal = _freeze_value(dict(journal) if hasattr(journal, "items") else journal)
+        journal_data: dict[str, Any] = {}
+        if coord is not None and hasattr(coord, "_stats_state"):
+            pending = getattr(coord._stats_state, "_data", {}).get("pending", {})
+            journal_data["pending"] = copy.deepcopy(pending)
+            journal_data["has_pending"] = coord._stats_state.has_pending()
+            journal_data["pending_recovery"] = coord._stats_state.has_pending()
+        frozen_journal = _freeze_value(journal_data)
 
-        rows: tuple[Any, ...] = ()
+        # 4. Read REAL recorder rows for BOTH consumption and cost series AND promoted days
+        rows_dict: dict[str, Any] = {}
         if coord is not None and hasattr(coord, "_stats_state"):
             promoted = getattr(coord._stats_state, "_data", {}).get("promoted", {})
-            rows = tuple(
-                (k, _freeze_value(dict(v) if hasattr(v, "items") else v))
-                for k, v in promoted.items()
+            for k, v in promoted.items():
+                rows_dict[k] = _freeze_value(dict(v) if hasattr(v, "items") else v)
+
+        meter_id = self.entry.data.get(CONF_METER_ID, "12345678") if self.entry else "12345678"
+        clean_meter = re.sub(r"[^a-z0-9_]+", "_", str(meter_id).lower()).strip("_") or "meter"
+        cons_id = f"{DOMAIN}:{clean_meter}_energy_consumption"
+        cost_id = f"{DOMAIN}:{clean_meter}_energy_cost"
+        target_ids = {cons_id, cost_id}
+
+        try:
+            await async_wait_recording_done(self.hass)
+            rec_result = await self.hass.async_add_executor_job(
+                statistics_during_period,
+                self.hass,
+                datetime(2020, 1, 1, tzinfo=UTC),
+                None,
+                target_ids,
+                "hour",
+                None,
+                {"sum", "state"},
             )
+            rows_dict["consumption"] = tuple(
+                (r["start"], r.get("state"), r.get("sum")) for r in rec_result.get(cons_id, [])
+            )
+            rows_dict["cost"] = tuple(
+                (r["start"], r.get("state"), r.get("sum")) for r in rec_result.get(cost_id, [])
+            )
+        except Exception:
+            rows_dict["consumption"] = ()
+            rows_dict["cost"] = ()
+
+        rows = tuple((k, _freeze_value(v)) for k, v in rows_dict.items())
 
         return Snapshot(
             entry_state=entry_state,
@@ -522,6 +633,9 @@ async def run_case(
     snapshots: list[Snapshot] = []
     primary_error: Exception | None = None
 
+    if oracle is not None:
+        driver.add_observer(oracle)
+
     snapshots.append(await driver.snapshot())
 
     try:
@@ -529,8 +643,7 @@ async def run_case(
             steps.append("case_body")
             await case_fn(driver)
             snapshots.append(await driver.snapshot())
-            if oracle is not None:
-                oracle(driver, "case_body")
+            driver.observe_checkpoint("case_body", snapshots[-1])
     except Exception as err:
         primary_error = err
         elapsed = time.perf_counter() - start_time
@@ -623,8 +736,7 @@ async def run_case(
         ending_steps.append(step_tag)
         steps.append(step_tag)
         snapshots.append(await driver.snapshot())
-        if oracle is not None:
-            oracle(driver, step_tag)
+        driver.observe_checkpoint(step_tag, snapshots[-1])
 
     # Step 1: ending_poll_1
     await _execute_and_verify_ending_poll("ending_poll_1")
@@ -646,8 +758,7 @@ async def run_case(
     ending_steps.append("ending_cold_restart")
     steps.append("ending_cold_restart")
     snapshots.append(await driver.snapshot())
-    if oracle is not None:
-        oracle(driver, "ending_cold_restart")
+    driver.observe_checkpoint("ending_cold_restart", snapshots[-1])
 
     # Step 4: ending_poll_3
     await _execute_and_verify_ending_poll("ending_poll_3")

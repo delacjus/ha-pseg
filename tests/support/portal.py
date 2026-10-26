@@ -8,7 +8,7 @@ decision-making or leaking sensitive data.
 from __future__ import annotations
 
 from collections import namedtuple
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import copy
 import dataclasses
 from dataclasses import dataclass, field
@@ -235,7 +235,9 @@ class Reply:
         metadata: Mapping[str, Any] | None = None,
     ) -> Reply:
         """Convenience constructor for a 200 OK canned response."""
-        rid = reply_id or f"SYNTH_REP_{hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:12]}"
+        rid = (
+            reply_id or f"SYNTH_REP_{hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:12]}"
+        )
         return cls(
             reply_id=rid,
             status_code=200,
@@ -264,7 +266,9 @@ class Reply:
         body = json.dumps(data)
         hdrs = dict(headers or {})
         hdrs.setdefault("Content-Type", "application/json")
-        rid = reply_id or f"SYNTH_REP_{hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:12]}"
+        rid = (
+            reply_id or f"SYNTH_REP_{hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:12]}"
+        )
         return cls(
             reply_id=rid,
             status_code=status_code,
@@ -293,7 +297,9 @@ class Reply:
         """Convenience constructor for a redirect canned response."""
         hdrs = dict(headers or {})
         hdrs["Location"] = location
-        rid = reply_id or f"SYNTH_REP_{hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:12]}"
+        rid = (
+            reply_id or f"SYNTH_REP_{hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:12]}"
+        )
         return cls(
             reply_id=rid,
             status_code=status_code,
@@ -383,9 +389,7 @@ class Gate:
         """Called by test to wait until boundary is reached."""
         wait_time = self.default_timeout if timeout is None else timeout
         if not self._arrived.wait(timeout=wait_time):
-            raise TimeoutError(
-                f"Gate '{self.name}' arrival timed out after {wait_time}s"
-            )
+            raise TimeoutError(f"Gate '{self.name}' arrival timed out after {wait_time}s")
 
     def drain(self) -> None:
         """Release all waiters and unhold, for clean teardown."""
@@ -431,7 +435,10 @@ class ScriptedPortal:
         self._recorded_i1_evidence: list[Dispatch] = []
         self._gates: dict[str, Gate] = {}
         self._retired: dict[str, tuple[float, int]] = {}
+        self._quarantined_cookies: set[tuple[str, str]] = set()
+        self._eligible_cookies: set[tuple[str, str]] = set()
         self._sequence_counter = 0
+        self._observers: list[Callable[[Dispatch], Any]] = []
         self._lock = threading.Lock()
 
     @staticmethod
@@ -439,6 +446,7 @@ class ScriptedPortal:
         """Wrap Session.rebuild_method to mark actual redirected PreparedRequest."""
         orig_rebuild = getattr(session, "rebuild_method", None)
         if callable(orig_rebuild) and not getattr(session, "_portal_redirect_wrapped", False):
+
             def mark_redirect(
                 prepared_request: requests.PreparedRequest,
                 response: requests.Response,
@@ -451,6 +459,29 @@ class ScriptedPortal:
 
             session.rebuild_method = mark_redirect
             session._portal_redirect_wrapped = True
+
+    def add_observer(self, observer: Callable[[Dispatch], Any]) -> None:
+        """Register an observer callback invoked on every attempted send before response."""
+        with self._lock:
+            if observer not in self._observers:
+                self._observers.append(observer)
+                target = getattr(observer, "__self__", observer)
+                if hasattr(target, "register_quarantined_cookie"):
+                    for k, v in self._quarantined_cookies:
+                        target.register_quarantined_cookie(k, v)
+                if hasattr(target, "register_eligible_cookie"):
+                    for k, v in self._eligible_cookies:
+                        target.register_eligible_cookie(k, v)
+                if hasattr(target, "retire_generation"):
+                    for t in self._retired:
+                        if t != "*":
+                            target.retire_generation(t)
+
+    def remove_observer(self, observer: Callable[[Dispatch], Any]) -> None:
+        """Unregister an observer callback."""
+        with self._lock:
+            if observer in self._observers:
+                self._observers.remove(observer)
 
     def mount_on(
         self,
@@ -544,6 +575,11 @@ class ScriptedPortal:
         target = generation_id or "*"
         with self._lock:
             self._retired[target] = (time.time(), self._sequence_counter)
+            observers = list(self._observers)
+        for obs in observers:
+            target = getattr(obs, "__self__", obs)
+            if hasattr(target, "retire_generation") and generation_id:
+                target.retire_generation(generation_id)
 
     def is_retired(self, generation_id: str) -> bool:
         with self._lock:
@@ -565,7 +601,9 @@ class ScriptedPortal:
 
     def dispatches_for(self, generation_id: str) -> list[Dispatch]:
         with self._lock:
-            return [self._copy_dispatch(d) for d in self._dispatches if d.generation_id == generation_id]
+            return [
+                self._copy_dispatch(d) for d in self._dispatches if d.generation_id == generation_id
+            ]
 
     def drain(self) -> None:
         """Drain and release all boundary gates for clean teardown."""
@@ -623,13 +661,9 @@ class ScriptedPortal:
         with self._lock:
             self._sequence_counter += 1
             seq = self._sequence_counter
-            is_after_retire = (
-                generation_id in self._retired or "*" in self._retired
-            )
+            is_after_retire = generation_id in self._retired or "*" in self._retired
 
-        is_redirect_hop, hop_cause = self._determine_redirect_hop(
-            request, generation_id, url
-        )
+        is_redirect_hop, hop_cause = self._determine_redirect_hop(request, generation_id, url)
 
         # Body digest: SHA-256 only; never retain plaintext body
         body_digest: str | None = None
@@ -674,6 +708,13 @@ class ScriptedPortal:
             self._dispatches.append(dispatch)
             if is_after_retire:
                 self._recorded_i1_evidence.append(dispatch)
+            observers = list(self._observers)
+
+        for obs in observers:
+            try:
+                obs(dispatch)
+            except TypeError:
+                obs(self, dispatch)
 
         try:
             # Check before_send boundary gates
@@ -681,6 +722,38 @@ class ScriptedPortal:
 
             # Match scripted reply (fails closed locally if unscripted)
             reply = self._match_reply(request.method or "GET", url)
+
+            # Metadata propagation to observers (quarantined vs eligible cookies)
+            if reply.valid is False or reply.cookie_eligible is False:
+                extracted_quarantined: list[tuple[str, str]] = []
+                for k, v in (reply.cookies or {}).items():
+                    extracted_quarantined.append((k, str(v)))
+                set_cookie = (reply.headers or {}).get("Set-Cookie")
+                if set_cookie:
+                    for part in set_cookie.split(";"):
+                        if "=" in part:
+                            ck, cv = part.strip().split("=", 1)
+                            extracted_quarantined.append((ck.strip(), cv.strip()))
+                with self._lock:
+                    self._quarantined_cookies.update(extracted_quarantined)
+                    obs_list = list(self._observers)
+                for obs in obs_list:
+                    target = getattr(obs, "__self__", obs)
+                    if hasattr(target, "register_quarantined_cookie"):
+                        for ck, cv in extracted_quarantined:
+                            target.register_quarantined_cookie(ck, cv)
+            elif reply.valid is True and reply.cookie_eligible is True:
+                extracted_eligible: list[tuple[str, str]] = []
+                for k, v in (reply.cookies or {}).items():
+                    extracted_eligible.append((k, str(v)))
+                with self._lock:
+                    self._eligible_cookies.update(extracted_eligible)
+                    obs_list = list(self._observers)
+                for obs in obs_list:
+                    target = getattr(obs, "__self__", obs)
+                    if hasattr(target, "register_eligible_cookie"):
+                        for ck, cv in extracted_eligible:
+                            target.register_eligible_cookie(ck, cv)
 
             # Convert Reply to real requests.Response
             resp = self._build_response(request, reply)
@@ -775,11 +848,7 @@ class ScriptedPortal:
             }
         )
 
-        body_bytes = (
-            reply.body.encode("utf-8")
-            if isinstance(reply.body, str)
-            else reply.body
-        )
+        body_bytes = reply.body.encode("utf-8") if isinstance(reply.body, str) else reply.body
 
         raw = _FakeRaw(body_bytes, headers_dict, status=reply.status_code, reason=resp.reason)
         resp.raw = raw
