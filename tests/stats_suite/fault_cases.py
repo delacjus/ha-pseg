@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
+
 from tests.support.stats_faults import BARRIER_INVENTORY
 
 FAULT_KIND_WRITE_ERROR = "write_error"
@@ -304,3 +306,251 @@ def audit_fault_matrix() -> dict[str, Any]:
         "barriers_covered": len(BARRIER_INVENTORY),
         "fault_kinds": list(ALL_FAULT_KINDS),
     }
+
+
+# Focused S5 detectors. Kept here because P3-06 permits detector additions only
+# in the case modules. The mutation catalog collects these exact nodes explicitly;
+# importing this data module does not install fixtures into other test modules.
+@pytest.fixture
+def recorder_db_url(tmp_path):
+    """Use the same physical SQLite path as PhysicalDurabilitySubstrate."""
+    return f"sqlite:///{tmp_path / 'fault_recorder.db'}"
+
+
+@pytest.fixture(autouse=True)
+def writer_recorder(recorder_mock, enable_custom_integrations):
+    """Start the real recorder before the coordinator's hass fixture."""
+    yield
+
+
+async def test_writer_refuses_a_dropped_physical_journal(hass, tmp_path):
+    """Acknowledged Store writes that lose journal bytes must not change DB rows."""
+    from unittest.mock import patch
+
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_wait_recording_done,
+    )
+
+    from custom_components.pseg.coordinator import PsegStatisticsError
+    from tests.stats_suite.reference_cases import make_daily_records
+    from tests.support.stats_faults import PhysicalDurabilitySubstrate
+    from tests.support.stats_model import CONSUMPTION_STATISTIC_ID, COST_STATISTIC_ID
+
+    substrate = PhysicalDurabilitySubstrate(tmp_path)
+    coord = substrate.create_coordinator(hass)
+    await coord.async_record_statistics(make_daily_records("2026-10-01", 1), meter_id="m1")
+    before = substrate.read_store_bytes()
+    ids = (CONSUMPTION_STATISTIC_ID, COST_STATISTIC_ID)
+    rows_before = [await substrate.query_recorder_rows(hass, sid) for sid in ids]
+    real_write = coord._stats_state._store._write_data
+    dropped = []
+
+    def drop_pending(wrapper):
+        if wrapper["data"]["pending"]:
+            dropped.append(True)
+            return
+        real_write(wrapper)
+
+    with patch.object(coord._stats_state._store, "_write_data", drop_pending):
+        try:
+            await coord.async_record_statistics(
+                make_daily_records("2026-10-01", 1, 20.0), meter_id="m1"
+            )
+        except PsegStatisticsError:
+            pass
+        await async_wait_recording_done(hass)
+        assert dropped, "Physical pending-write fault never fired"
+        assert substrate.read_store_bytes() == before, "Unverified journal changed disk provenance"
+        for sid, expected in zip(ids, rows_before, strict=True):
+            assert await substrate.query_recorder_rows(hass, sid) == expected, (
+                "Recorder changed without a physically durable journal"
+            )
+
+
+@pytest.mark.parametrize("day", ["2026-10-01", "2026-11-01"], ids=["normal", "fall25"])
+async def test_writer_partial_sql_failure_and_cold_replay(hass, tmp_path, day):
+    """Check intermediate disk state, then force exact replay after reopening DB."""
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    from homeassistant.components.recorder import statistics as recorder_stats
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_wait_recording_done,
+    )
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from custom_components.pseg.coordinator import PsegStatisticsError
+    from tests.stats_suite.reference_cases import make_canonical_hourly_records
+    from tests.support.stats_faults import PhysicalDurabilitySubstrate
+    from tests.support.stats_model import (
+        CONSUMPTION_STATISTIC_ID,
+        COST_STATISTIC_ID,
+        ReferenceStatisticsModel,
+        compare_both_series,
+    )
+
+    substrate = PhysicalDurabilitySubstrate(tmp_path)
+    coord = substrate.create_coordinator(hass)
+    hourly = make_canonical_hourly_records(day)
+    daily = [{"date": day, "kwh": float(len(hourly)), "cost": len(hourly) * 0.25}]
+    real_import = recorder_stats.import_statistics
+    fired = []
+
+    def fail_cost(instance, metadata, stats, table):
+        if metadata["statistic_id"] == COST_STATISTIC_ID:
+            fired.append(True)
+            raise SQLAlchemyError("Synthetic cost SQL failure at real recorder task")
+        return real_import(instance, metadata, stats, table)
+
+    with patch("homeassistant.util.dt.utcnow", return_value=datetime(2026, 11, 10, tzinfo=UTC)):
+        with patch.object(recorder_stats, "import_statistics", fail_cost):
+            try:
+                await coord.async_record_statistics(
+                    daily, meter_id="m1", hourly_records=hourly, hourly_granularity="hourly"
+                )
+            except PsegStatisticsError:
+                pass
+            await async_wait_recording_done(hass)
+
+        # These assertions precede recovery: a later healthy poll cannot conceal
+        # false completeness or premature clearing after a swallowed SQL error.
+        assert len(fired) == 1, "Real cost SQL fault must fire exactly once"
+        assert len(await substrate.query_recorder_rows(hass, CONSUMPTION_STATISTIC_ID)) == len(hourly)
+        assert await substrate.query_recorder_rows(hass, COST_STATISTIC_ID) == []
+        disk = substrate.read_store_json()["data"]
+        assert disk["pending"], "Intermediate physical journal cleared with cost DB empty"
+        assert not disk["promoted"], "Intermediate disk promotion falsely claims both series"
+
+        cold = await substrate.cold_reconstruct(coord, hass, reopen_db=True)
+        # Recover directly, without a new hourly poll that could repair a bad
+        # replay and hide canonical-start reinterpretation or omitted cost rows.
+        try:
+            await cold._async_recover_pending()
+        except PsegStatisticsError:
+            pass
+        await async_wait_recording_done(hass)
+        model = ReferenceStatisticsModel()
+        model.record_daily(daily)
+        model.promote_hourly(day, hourly)
+        compare_both_series(
+            await substrate.query_recorder_rows(hass, CONSUMPTION_STATISTIC_ID),
+            await substrate.query_recorder_rows(hass, COST_STATISTIC_ID),
+            model.expected_rows_as_tuples(CONSUMPTION_STATISTIC_ID),
+            model.expected_rows_as_tuples(COST_STATISTIC_ID),
+        )
+        assert not substrate.read_store_json()["data"]["pending"]
+        assert set(substrate.read_store_json()["data"]["promoted"]) == {
+            CONSUMPTION_STATISTIC_ID, COST_STATISTIC_ID,
+        }
+
+
+@pytest.mark.parametrize("control", ["pause", "retire"])
+async def test_writer_control_after_durable_journal(hass, tmp_path, control):
+    """Changing the live control during journal I/O must leave both DBs empty."""
+    from unittest.mock import patch
+
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_wait_recording_done,
+    )
+
+    from custom_components.pseg.const import CONF_STATISTICS_IMPORT_ENABLED
+    from tests.stats_suite.reference_cases import make_daily_records
+    from tests.support.stats_faults import PhysicalDurabilitySubstrate
+    from tests.support.stats_model import CONSUMPTION_STATISTIC_ID, COST_STATISTIC_ID
+
+    substrate = PhysicalDurabilitySubstrate(tmp_path)
+    coord = substrate.create_coordinator(hass)
+    real_begin = coord._stats_state.async_begin
+    observed = []
+
+    async def begin_then_control(mutation):
+        mutation_id = await real_begin(mutation)
+        assert substrate.read_store_json()["data"]["pending"], "Journal not physical at control change"
+        observed.append(True)
+        if control == "pause":
+            hass.config_entries.async_update_entry(
+                coord.config_entry, options={CONF_STATISTICS_IMPORT_ENABLED: False}
+            )
+        else:
+            coord.stop_keepalive()
+        return mutation_id
+
+    with patch.object(coord._stats_state, "async_begin", begin_then_control):
+        await coord.async_record_statistics(make_daily_records("2026-10-01", 1), meter_id="m1")
+    await async_wait_recording_done(hass)
+    assert observed == [True]
+    for sid in (CONSUMPTION_STATISTIC_ID, COST_STATISTIC_ID):
+        assert await substrate.query_recorder_rows(hass, sid) == [], (
+            f"Physical recorder mutated after {control} during journal I/O"
+        )
+    assert not substrate.read_store_json()["data"]["pending"]
+    assert not substrate.read_store_json()["data"]["promoted"]
+
+
+async def test_writer_verifies_only_after_physical_commit(hass, tmp_path):
+    """Hold real recorder imports until the production commit barrier is entered."""
+    import threading
+    from unittest.mock import patch
+
+    from homeassistant.components.recorder import get_instance
+    from homeassistant.components.recorder.tasks import RecorderTask
+    from pytest_homeassistant_custom_component.components.recorder.common import (
+        async_wait_recording_done,
+    )
+
+    from custom_components.pseg import coordinator as cm
+    from tests.stats_suite.reference_cases import make_daily_records
+    from tests.support.stats_faults import PhysicalDurabilitySubstrate
+    from tests.support.stats_model import CONSUMPTION_STATISTIC_ID, COST_STATISTIC_ID
+
+    substrate = PhysicalDurabilitySubstrate(tmp_path)
+    coord = substrate.create_coordinator(hass)
+    reached, release = threading.Event(), threading.Event()
+    real_add = cm.async_add_external_statistics
+    real_wait = cm._async_wait_for_recorder_commit
+    real_verify = coord._async_verify_mutation
+    queued, checked = [], []
+
+    class HoldRecorder(RecorderTask):
+        commit_before = False
+
+        def run(self, instance):
+            reached.set()
+            assert release.wait(10.0), "Bounded recorder gate was never released"
+
+    def queue_behind_gate(*args):
+        if not queued:
+            get_instance(hass).queue_task(HoldRecorder())
+        queued.append(True)
+        return real_add(*args)
+
+    async def release_at_commit(hass_arg):
+        assert await hass.async_add_executor_job(reached.wait, 10.0), "Recorder gate never reached"
+        release.set()
+        await real_wait(hass_arg)
+
+    async def physical_verify(mutation):
+        # Independent DB queries while the recorder queue is held must be empty
+        # if the production barrier was removed. Assert actual DB rows, not a
+        # mocked barrier-call flag or an in-memory completion indicator.
+        for sid, state in ((CONSUMPTION_STATISTIC_ID, 10.0), (COST_STATISTIC_ID, 2.5)):
+            rows = await substrate.query_recorder_rows(hass, sid)
+            assert len(rows) == 1 and rows[0][1:] == (state, state), (
+                "Verification reached before physical recorder commit"
+            )
+        assert substrate.read_store_json()["data"]["pending"]
+        checked.append(True)
+        return await real_verify(mutation)
+
+    try:
+        with (
+            patch.object(cm, "async_add_external_statistics", queue_behind_gate),
+            patch.object(cm, "_async_wait_for_recorder_commit", release_at_commit),
+            patch.object(coord, "_async_verify_mutation", physical_verify),
+        ):
+            await coord.async_record_statistics(make_daily_records("2026-10-01", 1), meter_id="m1")
+        assert queued == [True, True] and checked == [True]
+        assert not substrate.read_store_json()["data"]["pending"]
+    finally:
+        release.set()
+        await async_wait_recording_done(hass)
