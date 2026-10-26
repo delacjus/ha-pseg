@@ -504,6 +504,45 @@ def prepare_operation(portal: ScriptedPortal, operation: str) -> None:
         restore_healthy_dashboard(portal)
 
 
+# ---------------------------------------------------------------------------
+# Clearly named adapter preconditions (test-only seams)
+#
+# These helpers arrange a lifecycle state that production reaches without HTTP
+# (an in-flight reservation) or that another request could leave behind (an
+# unvalidated Set-Cookie, a partial jar). They never replace production parsing,
+# policy or persistence: the case asserts only the observable dispatch,
+# persistence or HA state.
+# ---------------------------------------------------------------------------
+
+
+def reserve_inflight_renewal(client: Any) -> None:
+    """Spend one shared admission slot without yielding to the event loop.
+
+    Models a renewal that is already inside the entry-scoped runtime, so durable
+    entry metadata still describes the pre-reservation state.
+    """
+    client._reserve_renewal_sequence()
+
+
+def model_unvalidated_live_jar(driver: LifecycleDriver, name: str, value: str) -> None:
+    """Apply a Set-Cookie no validated reply has confirmed (unvalidated live jar).
+
+    Models the response a *parallel* request leaves in the session jar between
+    confirmations. It is not a failed-reply quarantine: the oracle sees a plain
+    live-jar mutation, exactly as production does, and persistence must still
+    refuse to promote it.
+    """
+    driver.client.session.cookies.set(name, value, domain=PORTAL_HOST, path="/")
+
+
+def model_partial_live_jar(driver: LifecycleDriver, name: str = "MM_SID") -> None:
+    """Drop a session cookie from the live jar the way a failed renewal does."""
+    cookies = driver.client.session.cookies
+    for cookie in [c for c in cookies if c.name == name]:
+        cookies.clear(cookie.domain, cookie.path, cookie.name)
+
+
+
 def _portal_cookie(name: str, value: str, domain: str) -> dict[str, Any]:
     return {"name": name, "value": value, "domain": domain, "path": "/", "secure": True}
 
@@ -1416,12 +1455,15 @@ __all__ = [
     "dry_run_flow",
     "generated_boundaries",
     "install_auth_bounce",
+    "model_partial_live_jar",
+    "model_unvalidated_live_jar",
     "observed_boundaries",
     "observed_legs",
     "prepare_operation",
     "register_initial_jar",
     "register_scripted_eligibility",
     "replace_route",
+    "reserve_inflight_renewal",
     "restore_healthy_dashboard",
     "run_current_owner_307_control",
     "run_fence_case",

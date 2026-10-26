@@ -7,7 +7,10 @@ Independent probes run in fast: they are evidence, not claimed systemic kills.
 R8-N1 P5 is informational (no assertion), so only its legacy assertion is credited.
 R8-N3 is credited only to the legacy plain-dict provenance assertion, not the
 nearby promoted contributor probe, which does not assert that distinct invariant.
-Slow links name matching G1/G2/G3 scenarios; P2-10 owns new mutation mappings.
+Slow links name matching G1/G2/G3 scenarios. P2-10 adds exact fast systemic
+assertions and mutation mappings. Where no slow counterpart exists, the P2-09
+schema still requires explanatory systemic_gap text; systemic_status and the
+fingerprinted systemic_cases distinguish covered fast cases from pending gaps.
 R6-N2 aliases R6-F1: hourly known-meter validation plus corrected wording, with
 its fix-source lineage and exact hourly cookie-rejection assertion retained.
 R9-N1 credits cookie assertions only, excluding the informational bypass and
@@ -512,12 +515,20 @@ FINDINGS = (
             "tests/independent/auth_r1/test_independent_auth_r1.py::test_actual_entry_reload_does_not_overlap_old_and_new_renewal",
             "tests/test_auth_review_regressions.py::test_replacement_uses_live_reservation_instead_of_stale_persisted_copy",
             "tests/test_auth_review_regressions.py::test_retirement_between_reservation_and_immediate_dispatch_sends_nothing",
+            "tests/systemic/test_auth_systemic_catalog.py::test_replacement_inherits_the_inflight_entry_reservation",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_renewal_proof_read_unload]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_uncertain_midsequence_admission_refuses_publication",
         ),
         "slow_cases": (),
         "original_mutants": ("1-entry-shared-admission", "1-immediate-owner-check"),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_replacement_inherits_the_inflight_entry_reservation",
+            "tests/systemic/test_auth_systemic_catalog.py::test_uncertain_midsequence_admission_refuses_publication",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "actual entry reload does not overlap old and new renewal",
     },
     {
@@ -532,12 +543,17 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r1/test_independent_auth_r1.py::test_failed_first_refresh_persists_terminal_admission",
             "tests/test_auth_review_regressions.py::test_failed_first_refresh_persists_terminal_admission",
+            "tests/systemic/test_auth_systemic_catalog.py::test_failed_first_setup_preserves_spent_terminal_admission",
         ),
         "slow_cases": (),
         "original_mutants": ("2-independent-policy-handoff",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_failed_first_setup_preserves_spent_terminal_admission",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "failed first refresh persists terminal admission",
     },
     {
@@ -552,12 +568,17 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r1/test_independent_auth_r1.py::test_poll_failure_does_not_rearm_unconfirmed_rotation",
             "tests/test_auth_review_regressions.py::test_poll_failure_does_not_rearm_unconfirmed_rotation",
+            "tests/systemic/test_auth_systemic_catalog.py::test_renewal_requires_known_daily_proof_before_publication",
         ),
         "slow_cases": (),
         "original_mutants": ("3-poll-identity-proof",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_renewal_requires_known_daily_proof_before_publication",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "poll failure does not rearm unconfirmed rotation",
     },
     {
@@ -572,12 +593,17 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r1/test_independent_auth_r1.py::test_retired_keepalive_cannot_dismiss_replacement_auth_issue",
             "tests/test_auth_review_regressions.py::test_retired_keepalive_cannot_dismiss_replacement_auth_issue",
+            "tests/systemic/test_auth_systemic_catalog.py::test_retired_keepalive_cannot_dismiss_successor_issue_after_export_await",
         ),
         "slow_cases": (),
         "original_mutants": ("4-post-await-retirement",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_retired_keepalive_cannot_dismiss_successor_issue_after_export_await",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "retired keepalive cannot dismiss replacement auth issue",
     },
     {
@@ -601,12 +627,17 @@ FINDINGS = (
             "tests/test_auth_review_regressions.py::test_uncertain_metadata_refuses[raw1]",
             "tests/test_auth_review_regressions.py::test_uncertain_metadata_refuses[raw2]",
             "tests/test_auth_review_regressions.py::test_uncertain_metadata_refuses[broken]",
+            "tests/systemic/test_policy_properties.py::test_literal_metadata_table[None-True-uncertain]",
         ),
         "slow_cases": (),
         "original_mutants": ("6-present-corrupt-refusal",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_policy_properties.py::test_literal_metadata_table[None-True-uncertain]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "uncertain metadata refuses",
     },
     {
@@ -621,12 +652,17 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r1/test_independent_auth_r1.py::test_success_without_rotation_does_not_authorize_transient_retry",
             "tests/test_auth_review_regressions.py::test_success_without_rotation_does_not_authorize_transient_retry",
+            "tests/systemic/test_policy_properties.py::test_literal_spacing_and_rollback[1-False-899-exhausted]",
         ),
         "slow_cases": (),
         "original_mutants": ("7-transient-only-retry",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_policy_properties.py::test_literal_spacing_and_rollback[1-False-899-exhausted]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "success without rotation does not authorize transient retry",
     },
     {
@@ -641,12 +677,17 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r1/test_independent_auth_r1.py::test_probe_rotation_is_rolled_back_after_transient_renewal",
             "tests/test_auth_review_regressions.py::test_probe_rotation_is_rolled_back_after_transient_renewal",
+            "tests/systemic/test_auth_systemic_catalog.py::test_failed_renewal_preserves_preprobe_jar_and_spent_budget",
         ),
         "slow_cases": (),
         "original_mutants": ("5-pre-probe-confirmed-jar",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_failed_renewal_preserves_preprobe_jar_and_spent_budget",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "probe rotation is rolled back after transient renewal",
     },
     {
@@ -678,12 +719,19 @@ FINDINGS = (
             "tests/test_auth_review_r2_regressions.py::test_poll_keeps_the_verified_renewal_after_a_post_renewal_hiccup[True-second1]",
             "tests/test_auth_review_r2_regressions.py::test_poll_keeps_the_verified_renewal_after_a_post_renewal_hiccup[True-second2]",
             "tests/test_auth_review_r2_regressions.py::test_poll_keeps_the_verified_renewal_after_a_post_renewal_hiccup[True-second3]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[maintenance]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[notoken]",
         ),
         "slow_cases": (),
         "original_mutants": ("8-post-renewal-verified-keep", "9-post-renewal-token-keep"),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[maintenance]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[notoken]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "d1 poll keeps verified renewal after post renewal hiccup",
     },
     {
@@ -698,12 +746,17 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r2/test_independent_auth_r2.py::test_d2_runtime_poll_in_cooldown_is_auth_failure_and_kills_poll_schedule",
             "tests/test_auth_review_r2_regressions.py::test_poll_during_an_earned_retry_cooldown_keeps_the_schedule",
+            "tests/systemic/test_auth_systemic_catalog.py::test_loaded_admission_has_the_correct_public_outcome[cooldown]",
         ),
         "slow_cases": (),
         "original_mutants": ("10-cooldown-is-transient",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_loaded_admission_has_the_correct_public_outcome[cooldown]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "d2 runtime poll in cooldown is auth failure and kills poll schedule",
     },
     {
@@ -718,12 +771,17 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r2/test_independent_auth_r2.py::test_d3_uncertain_state_never_prompts_human",
             "tests/test_auth_review_r2_regressions.py::test_corrupt_budget_prompts_the_normal_reauth_flow",
+            "tests/systemic/test_auth_systemic_catalog.py::test_loaded_admission_has_the_correct_public_outcome[uncertain]",
         ),
         "slow_cases": (),
         "original_mutants": ("11-uncertain-fails-closed",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_loaded_admission_has_the_correct_public_outcome[uncertain]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "d3 uncertain state never prompts human",
     },
     {
@@ -739,12 +797,19 @@ FINDINGS = (
             "tests/independent/auth_r2/test_independent_auth_r2.py::test_d4_rotation_seen_on_plain_dashboard_rearms_next_renewal",
             "tests/test_auth_review_r2_regressions.py::test_confirmed_dashboard_slide_is_not_a_renewal_rotation",
             "tests/test_auth_review_r2_regressions.py::test_confirmed_slide_with_a_domain_copy_is_not_a_renewal_rotation",
+            "tests/systemic/test_auth_systemic_catalog.py::test_confirmed_remember_slide_is_not_a_second_renewal_generation[host]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_confirmed_remember_slide_is_not_a_second_renewal_generation[domain-copy]",
         ),
         "slow_cases": (),
         "original_mutants": ("12-confirmed-generation", "12-confirmed-generation-dedupe"),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_confirmed_remember_slide_is_not_a_second_renewal_generation[host]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_confirmed_remember_slide_is_not_a_second_renewal_generation[domain-copy]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "d4 rotation seen on plain dashboard rearms next renewal",
     },
     {
@@ -759,12 +824,15 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r2/test_independent_auth_r2_extra.py::test_e3_security_step_seen_by_poll_fallback_does_not_stop_keepalive_cookie_retry",
             "tests/test_auth_review_r3_regressions.py::test_poll_fallback_challenge_survives_reload_and_cold_process[security-security_step-PsegSecurityStepRequired]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_login_json_security_step_is_latched_and_durable",
         ),
         "slow_cases": (),
         "original_mutants": ("13-security-step-latch",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "ADAPTER-LEVEL row: the in-memory security-step latch has no separate public effect; the durable terminal admission recorded by the same call is what every automatic path consults and raises the same typed refusal. The row keeps its exact private-seam detector and is excluded from the systemic count.",
+        "systemic_status": "adapter-level",
+        "systemic_cases": (),
+        "systemic_gap_resolution": "P2-10 R1 fix: honestly reclassified; the public durable I8 detector (rows 20/21) remains systemic and the latch itself is asserted only at adapter level.",
         "evidence": "e3 security step seen by poll fallback does not stop keepalive cookie retry",
     },
     {
@@ -785,6 +853,11 @@ FINDINGS = (
             "tests/test_auth_review_r3_regressions.py::test_failed_response_poison_cookie_is_never_persisted_or_replayed",
             "tests/test_auth_review_r3_regressions.py::test_stale_owner_never_overwrites_a_human_replaced_jar",
             "tests/test_auth_review_r3_regressions.py::test_partial_confirmed_snapshot_is_never_persisted",
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[maintenance]",
+            "tests/systemic/test_exit_checkpoint.py::test_fast_exit_checkpoint_control[after:fetch_energy_data::stop::no-renewal::MM_RememberMe]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_handoff_refuses_unvalidated_or_partial_live_jar[immutable]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_old_checkpoint_cannot_overwrite_human_successor",
+            "tests/systemic/test_auth_systemic_catalog.py::test_handoff_refuses_unvalidated_or_partial_live_jar[partial]",
         ),
         "slow_cases": SLOW_R3_N1,
         "original_mutants": (
@@ -796,6 +869,15 @@ FINDINGS = (
         ),
         "new_mutant_need": "",
         "systemic_gap": "",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[maintenance]",
+            "tests/systemic/test_exit_checkpoint.py::test_fast_exit_checkpoint_control[after:fetch_energy_data::stop::no-renewal::MM_RememberMe]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_handoff_refuses_unvalidated_or_partial_live_jar[immutable]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_old_checkpoint_cannot_overwrite_human_successor",
+            "tests/systemic/test_auth_systemic_catalog.py::test_handoff_refuses_unvalidated_or_partial_live_jar[partial]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "p1 setup verified renewal then daily timeout loses jar",
     },
     {
@@ -810,12 +892,17 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r3/test_independent_auth_r3.py::test_p2_cooldown_without_earned_retry_is_a_fake_wait",
             "tests/test_auth_review_r3_regressions.py::test_settled_unchanged_success_is_exhausted_before_its_window_closes",
+            "tests/systemic/test_policy_properties.py::test_literal_spacing_and_rollback[1-False-899-exhausted]",
         ),
         "slow_cases": (),
         "original_mutants": ("19-settled-spent-is-exhausted",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_policy_properties.py::test_literal_spacing_and_rollback[1-False-899-exhausted]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "p2 cooldown without earned retry is a fake wait",
     },
     {
@@ -832,6 +919,8 @@ FINDINGS = (
             "tests/test_auth_review_r3_regressions.py::test_failed_startup_challenge_is_durable_metadata[captcha]",
             "tests/test_auth_review_r3_regressions.py::test_poll_fallback_challenge_survives_reload_and_cold_process[security-security_step-PsegSecurityStepRequired]",
             "tests/test_auth_review_r3_regressions.py::test_setup_with_spent_generation_is_an_auth_error_not_a_password_post",
+            "tests/systemic/test_auth_systemic_catalog.py::test_login_json_security_step_is_latched_and_durable",
+            "tests/systemic/test_auth_systemic_catalog.py::test_loaded_admission_has_the_correct_public_outcome[exhausted]",
         ),
         "slow_cases": (),
         "original_mutants": (
@@ -840,8 +929,13 @@ FINDINGS = (
             "22-exhausted-no-password-fallback",
         ),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_login_json_security_step_is_latched_and_durable",
+            "tests/systemic/test_auth_systemic_catalog.py::test_loaded_admission_has_the_correct_public_outcome[exhausted]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "p5 real security reply latches then reload limit",
     },
     {
@@ -888,6 +982,9 @@ FINDINGS = (
             "tests/test_auth_review_r4_regressions.py::test_optional_hourly_failed_response_cannot_replace_proof_jar[review_aux-500-/Dashboard/Chart]",
             "tests/test_auth_review_r4_regressions.py::test_optional_hourly_setup_200_cookie_is_rolled_back_when_chart_data_fails[empty_data]",
             "tests/test_auth_review_r4_regressions.py::test_persist_cookies_refuses_unconfirmed_live_jar_mutation_and_keeps_confirmed_snapshot",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-empty]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_hourly_stage_cookie_is_rolled_back_when_data_fails",
+            "tests/systemic/test_auth_systemic_catalog.py::test_handoff_refuses_unvalidated_or_partial_live_jar[unconfirmed]",
         ),
         "slow_cases": (),
         "original_mutants": (
@@ -896,8 +993,14 @@ FINDINGS = (
             "25-persist-confirmed-cookies-guard",
         ),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-empty]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_hourly_stage_cookie_is_rolled_back_when_data_fails",
+            "tests/systemic/test_auth_systemic_catalog.py::test_handoff_refuses_unvalidated_or_partial_live_jar[unconfirmed]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "optional hourly failed response cannot replace proof jar",
     },
     {
@@ -930,6 +1033,13 @@ FINDINGS = (
             "tests/test_auth_review_r4_regressions.py::test_real_unload_retires_saved_password_fallback[login_form-real_unload-False]",
             "tests/test_auth_review_r4_regressions.py::test_real_unload_retires_sso_fallback[dashboard-real_unload]",
             "tests/test_auth_review_r4_regressions.py::test_real_unload_retires_sso_fallback[saml_form-real_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_first_poll_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_renewal_proof_read_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_remember_me_proof_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_login_form_entry_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_login_post_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_sso_post_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_redirect_boundary_reload]",
         ),
         "slow_cases": SLOW_R4_F2,
         "original_mutants": (
@@ -942,6 +1052,17 @@ FINDINGS = (
         ),
         "new_mutant_need": "",
         "systemic_gap": "",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_first_poll_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_renewal_proof_read_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_remember_me_proof_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_login_form_entry_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_login_post_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_sso_post_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_redirect_boundary_reload]",
+        ),
+        "systemic_gap_resolution": "P2-10 R1 fix: each fallback-owner guard is now parked at its own stage, so the observed stale request is that stage's request (renewal GET, proof read, login form, login POST, SAML POST), never a shared ChartData stage transition. R2 measured truth: the preserved rows are compound (stage guard plus the structural Session.send guard), so these fast cases detect the compound row. For rows 28, 29 and 31 the stage guard is redundant defence-in-depth behind the identical _check_active_owner predicate at Session.send, and row 27's verify path also goes through can_dispatch; row 1 is mapped to the uncertain-admission catalog case, where can_dispatch is the only refusal.",
         "evidence": "real unload retires saved password fallback",
     },
     {
@@ -960,11 +1081,17 @@ FINDINGS = (
             "tests/independent/auth_r5/test_independent_auth_r5.py::test_saml_redirect_cannot_dispatch_new_post_after_retirement[real_unload]",
             "tests/independent/auth_r5/test_independent_auth_r5.py::test_saml_redirect_cannot_dispatch_new_post_after_retirement[human_same_cookies]",
             "tests/test_auth_review_r5_regressions.py::test_saml_redirect_cannot_dispatch_new_post_after_retirement[real_unload]",
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_stage_transition_handoff]",
         ),
         "slow_cases": SLOW_R5_A,
         "original_mutants": ("32-structural-session-send-owner-guard",),
         "new_mutant_need": "",
         "systemic_gap": "",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_stage_transition_handoff]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "saml redirect cannot dispatch new post after retirement",
     },
     {
@@ -1009,6 +1136,9 @@ FINDINGS = (
             "tests/test_auth_review_r5_regressions.py::test_postproof_failed_dashboard_cookie_cannot_be_promoted_by_next_poll[MM_SID-maint]",
             "tests/test_auth_review_r5_regressions.py::test_postproof_failed_dashboard_cookie_cannot_be_promoted_by_next_poll[MM_SID-notoken]",
             "tests/test_auth_review_r5_regressions.py::test_postproof_failed_dashboard_cookie_cannot_be_promoted_by_next_poll[MM_SID-500]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[maintenance]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[notoken]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[503]",
         ),
         "slow_cases": (),
         "original_mutants": (
@@ -1017,8 +1147,14 @@ FINDINGS = (
             "35-post-renewal-exception-leg-restore",
         ),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[maintenance]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[notoken]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[503]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "postproof failed dashboard cookie cannot be promoted by next poll",
     },
     {
@@ -1068,6 +1204,8 @@ FINDINGS = (
             "tests/independent/auth_r5/test_independent_auth_r5.py::test_invalid_hourly_200_does_not_replace_proven_whole_jar[review_aux-root_list]",
             "tests/test_auth_review_r5_regressions.py::test_invalid_hourly_200_does_not_replace_proven_whole_jar[MM_SID-empty_meter]",
             "tests/test_auth_review_r5_regressions.py::test_invalid_hourly_200_does_not_replace_proven_whole_jar[MM_SID-root_list]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-empty]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-root]",
         ),
         "slow_cases": SLOW_R5_C,
         "original_mutants": (
@@ -1076,6 +1214,12 @@ FINDINGS = (
         ),
         "new_mutant_need": "",
         "systemic_gap": "",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-empty]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-root]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "invalid hourly 200 does not replace proven whole jar",
     },
     {
@@ -1112,11 +1256,17 @@ FINDINGS = (
             "tests/independent/auth_r5/test_independent_auth_r5.py::test_latest_valid_hourly_jar_survives_cancel_or_stop[review_aux-real_unload-False]",
             "tests/independent/auth_r5/test_independent_auth_r5.py::test_latest_valid_hourly_jar_survives_cancel_or_stop[review_aux-real_unload-True]",
             "tests/test_auth_review_r5_regressions.py::test_latest_valid_hourly_jar_survives_cancel_or_stop[MM_SID-cancel_poll-True]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_checkpoint_ack_cannot_clear_a_newer_publication",
         ),
         "slow_cases": SLOW_R5_D,
         "original_mutants": ("38-latest-confirmed-checkpoint-publish",),
         "new_mutant_need": "",
         "systemic_gap": "",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_checkpoint_ack_cannot_clear_a_newer_publication",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "latest valid hourly jar survives cancel or stop",
     },
     {
@@ -1149,12 +1299,19 @@ FINDINGS = (
             "tests/independent/auth_r6/test_independent_auth_r6.py::test_daily_leg_must_validate_before_confirming_cookie[r6_aux-no_matching_meter]",
             "tests/test_auth_review_r5_regressions.py::test_daily_leg_requires_valid_meter_read_before_confirming_cookie[MM_SID-empty_meter-False]",
             "tests/test_auth_review_r5_regressions.py::test_daily_and_hourly_meter_swap_and_fresh_manual_flow_semantics",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-empty]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-foreign]",
         ),
         "slow_cases": (),
         "original_mutants": ("39-daily-validation-before-confirm",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-empty]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-foreign]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "daily and hourly legs validate known-meter records before confirming cookies; "
         "R6-N2 hourly parser meter_ids, foreign-hourly rollback and corrected wording alias R6-F1",
     },
@@ -1199,6 +1356,8 @@ FINDINGS = (
             "tests/independent/auth_r6/test_independent_auth_r6.py::test_backfill_chunk_cookie_never_promoted[r6_aux-edge_null_data]",
             "tests/test_auth_review_r5_regressions.py::test_valid_backfill_chunk_rotation_persisted_on_unload[MM_SID]",
             "tests/test_auth_review_r5_regressions.py::test_backfill_invalid_or_empty_chunk_cookie_is_quarantined[MM_SID-abort_null_data]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_valid_history_chunk_publishes_immutable_checkpoint",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[backfill-null]",
         ),
         "slow_cases": (),
         "original_mutants": (
@@ -1206,8 +1365,13 @@ FINDINGS = (
             "41-history-gap-abort-rollback",
         ),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_valid_history_chunk_publishes_immutable_checkpoint",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[backfill-null]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "backfill chunk cookie never promoted",
     },
     {
@@ -1222,12 +1386,17 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r6/test_independent_auth_r6_extra.py::test_owner_predicate_stays_true_during_own_cookie_write",
             "tests/test_auth_review_r5_regressions.py::test_owner_predicate_true_during_own_write_and_false_on_foreign_replace",
+            "tests/systemic/test_auth_systemic_catalog.py::test_owner_stays_active_inside_own_physical_assignment",
         ),
         "slow_cases": (),
         "original_mutants": ("42-own-save-owner-predicate",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_owner_stays_active_inside_own_physical_assignment",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "owner predicate stays true during own cookie write",
     },
     {
@@ -1242,12 +1411,17 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r7b/test_independent_auth_r7b.py::test_checkpoint_old_ack_preserves_new_publish",
             "tests/test_auth_review_r5_regressions.py::test_checkpoint_lock_synchronizes_publish_and_clear",
+            "tests/systemic/test_auth_systemic_catalog.py::test_checkpoint_ack_cannot_clear_a_newer_publication",
         ),
         "slow_cases": (),
         "original_mutants": ("43-atomic-checkpoint-compare-clear",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_checkpoint_ack_cannot_clear_a_newer_publication",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "checkpoint old ack preserves new publish",
     },
     {
@@ -1286,6 +1460,9 @@ FINDINGS = (
             "tests/test_auth_review_r5_regressions.py::test_r7b_malformed_nested_chart_shapes_quarantined_across_all_legs[MM_SID-meter_data_integer-backfill]",
             "tests/test_auth_review_r5_regressions.py::test_r7b_malformed_nested_chart_shapes_quarantined_across_all_legs[MM_SID-ajax_results_integer_with_valid_data-backfill]",
             "tests/test_auth_review_r5_regressions.py::test_r7b_malformed_nested_chart_shapes_quarantined_across_all_legs[MM_SID-ajax_results_integer_with_valid_data-daily]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[backfill-nested]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[backfill-ajax]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-ajax]",
         ),
         "slow_cases": (),
         "original_mutants": (
@@ -1294,8 +1471,14 @@ FINDINGS = (
             "49-live-chart-envelope-guard",
         ),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[backfill-nested]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[backfill-ajax]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-ajax]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "backfill parser fault quarantines every cookie",
     },
     {
@@ -1325,6 +1508,8 @@ FINDINGS = (
             "tests/independent/auth_r7b/test_independent_auth_r7b.py::test_empty_expected_meter_does_not_prove_unrelated_records[known_points1-renewal]",
             "tests/test_auth_review_r5_regressions.py::test_r7b_known_decoy_series_with_unknown_valid_records_rejected[known_empty_unknown_valid-daily]",
             "tests/test_auth_review_r5_regressions.py::test_r7b_records_without_per_meter_provenance_never_prove_identity",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-foreign]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_adapter_parser_provenance_and_empty_renewal_identity",
         ),
         "slow_cases": (),
         "original_mutants": (
@@ -1332,8 +1517,12 @@ FINDINGS = (
             "50-renewal-empty-expected-fail-closed",
         ),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-foreign]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "empty expected meter does not prove unrelated records",
     },
     {
@@ -1348,12 +1537,17 @@ FINDINGS = (
         "fast_cases": (
             "tests/independent/auth_r7b/test_independent_auth_r7b.py::test_rejected_daily_identity_cannot_teach_entry_new_account",
             "tests/test_auth_review_r5_regressions.py::test_r7b_proven_meter_learning_and_rejected_daily_isolation",
+            "tests/systemic/test_auth_systemic_catalog.py::test_rejected_daily_result_contains_no_foreign_readings",
         ),
         "slow_cases": (),
         "original_mutants": ("46-rejected-daily-quarantines-result",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_rejected_daily_result_contains_no_foreign_readings",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "rejected daily identity cannot teach entry new account",
     },
     {
@@ -1370,12 +1564,17 @@ FINDINGS = (
             "tests/independent/auth_r7b/test_independent_auth_r7b.py::test_own_write_failure_keeps_actual_baseline_coherent[False]",
             "tests/independent/auth_r7b/test_independent_auth_r7b.py::test_own_write_failure_keeps_actual_baseline_coherent[True]",
             "tests/test_auth_review_r5_regressions.py::test_r7b_write_cookie_handoff_reconciles_baseline_across_update_faults[True]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_handoff_callback_fault_preserves_physical_owner[after]",
         ),
         "slow_cases": (),
         "original_mutants": ("47-handoff-finally-baseline-reconcile",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_handoff_callback_fault_preserves_physical_owner[after]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "own write failure keeps actual baseline coherent",
     },
     {
@@ -1394,12 +1593,17 @@ FINDINGS = (
             "tests/independent/auth_r8/test_independent_auth_r8.py::test_p1_fresh_cookie_sign_in_with_lagging_daily_window[label_no_points]",
             "tests/independent/auth_r8/test_independent_auth_r8.py::test_p1_fresh_cookie_sign_in_with_lagging_daily_window[null_usage_points]",
             "tests/test_auth_review_r5_regressions.py::test_r8_fresh_cookie_setup_survives_lagging_daily_window[label_no_points]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_fresh_human_cookie_flow_has_its_own_account_proof[label-only]",
         ),
         "slow_cases": (),
         "original_mutants": ("51-human-label-identity-only",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_fresh_human_cookie_flow_has_its_own_account_proof[label-only]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "p1 fresh cookie sign in with lagging daily window",
     },
     {
@@ -1416,12 +1620,17 @@ FINDINGS = (
             "tests/independent/auth_r8/test_independent_auth_r8.py::test_p2_rejected_daily_real_refresh_keeps_previous_reading[unknown_meter_only_hourly_known_valid]",
             "tests/independent/auth_r8/test_independent_auth_r8.py::test_p2_rejected_daily_real_refresh_keeps_previous_reading[unknown_meter_only_hourly_unavailable]",
             "tests/test_auth_review_r5_regressions.py::test_r8_rejected_daily_real_refresh_keeps_previous_data",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-empty]",
         ),
         "slow_cases": (),
         "original_mutants": ("52-rejected-daily-typed-failure",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-empty]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "p2 rejected daily real refresh keeps previous reading",
     },
     {
@@ -1433,12 +1642,17 @@ FINDINGS = (
         "provenance_cases": (),
         "fast_cases": (
             "tests/test_auth_review_r5_regressions.py::test_r8_daily_successor_learned_when_hourly_omits_it",
+            "tests/systemic/test_auth_systemic_catalog.py::test_daily_successor_is_learned_when_hourly_omits_it",
         ),
         "slow_cases": (),
         "original_mutants": ("53-daily-hourly-contributor-union",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_daily_successor_is_learned_when_hourly_omits_it",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "p5 daily proven successor learning vs hourly overwrite",
     },
     {
@@ -1471,6 +1685,7 @@ FINDINGS = (
             "tests/independent/auth_r8/test_independent_auth_r8.py::test_p4_failed_leg_cookie_never_dispatched_or_persisted[daily_valid__hourly_unknown_only-MM_SID]",
             "tests/independent/auth_r8/test_independent_auth_r8.py::test_p4_failed_leg_cookie_never_dispatched_or_persisted[daily_valid__hourly_unknown_only-MM_RememberMe]",
             "tests/test_auth_review_r5_regressions.py::test_r8_nonlist_nonmeter_telemetry_keeps_metered_leg",
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-telemetry]",
         ),
         "slow_cases": (),
         "original_mutants": (
@@ -1478,8 +1693,12 @@ FINDINGS = (
             "56-anomaly-withholds-cookie-confirmation",
         ),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-telemetry]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "p4 failed leg cookie never dispatched or persisted",
     },
     {
@@ -1491,12 +1710,15 @@ FINDINGS = (
         "provenance_cases": (),
         "fast_cases": (
             "tests/test_auth_review_r5_regressions.py::test_r7b_records_without_per_meter_provenance_never_prove_identity",
+            "tests/systemic/test_auth_systemic_catalog.py::test_adapter_parser_provenance_and_empty_renewal_identity",
         ),
         "slow_cases": (),
         "original_mutants": ("55-parser-only-provenance",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "ADAPTER-LEVEL row: the parser always builds _MeterRecord, so no real lifecycle puts a plain dict/serialized copy in a provenance list; the guard has no observable dispatch, persistence or HA effect and keeps its exact private-seam detector outside the systemic count.",
+        "systemic_status": "adapter-level",
+        "systemic_cases": (),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "empty expected meter does not prove unrelated records",
     },
     {
@@ -1513,12 +1735,17 @@ FINDINGS = (
             "tests/independent/auth_r9/test_independent_auth_r9.py::test_q1_renewal_proof_shape_anomaly_cookie[renewal_proof_anomaly]",
             "tests/independent/auth_r9/test_independent_auth_r9.py::test_q1_renewal_proof_shape_anomaly_cookie[renewal_proof_clean_control]",
             "tests/test_auth_review_r5_regressions.py::test_r9_renewal_proof_anomaly_never_adopts_cookie[anomaly-MM_RememberMe]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_renewal_anomalous_proof_never_adopts_response_cookies",
         ),
         "slow_cases": (),
         "original_mutants": ("57-renewal-proof-anomaly-restore",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_renewal_anomalous_proof_never_adopts_response_cookies",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "q1 renewal proof shape anomaly cookie",
     },
     {
@@ -1535,12 +1762,17 @@ FINDINGS = (
             "tests/independent/auth_r9/test_independent_auth_r9.py::test_q3_label_identity_flow_cookie_acceptance[label_daily_cookie_hourly_unavailable]",
             "tests/independent/auth_r9/test_independent_auth_r9.py::test_q3_label_identity_flow_cookie_acceptance[label_daily_hourly_anomalous_valid_cookie]",
             "tests/test_auth_review_r5_regressions.py::test_r8_label_identity_read_never_confirms_response_cookies",
+            "tests/systemic/test_auth_systemic_catalog.py::test_fresh_human_cookie_flow_has_its_own_account_proof[label-only]",
         ),
         "slow_cases": (),
         "original_mutants": ("51-human-label-identity-only",),
         "new_mutant_need": "",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_fresh_human_cookie_flow_has_its_own_account_proof[label-only]",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "q3 label identity flow cookie acceptance",
     },
     {
@@ -1576,13 +1808,18 @@ FINDINGS = (
             "tests/independent/hourly_r5/test_independent_hourly_r5.py::test_hourly_auth_vs_transient_and_daily_authority[503-setup-okta]",
             "tests/independent/hourly_r5/test_independent_hourly_r5.py::test_hourly_auth_vs_transient_and_daily_authority[503-data-portal]",
             "tests/independent/hourly_r5/test_independent_hourly_r5.py::test_hourly_auth_vs_transient_and_daily_authority[503-data-okta]",
+            "tests/systemic/test_response_corpus.py::test_mandatory_auth_on_hourly_is_not_a_daily_fallback",
         ),
         "slow_cases": (),
         "original_mutants": (),
         "new_mutant_need": "New hourly-auth isolation mutant needed: bypass typed hourly auth loss and "
         "permit statistics/journal mutation; no original auth row models this.",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_response_corpus.py::test_mandatory_auth_on_hourly_is_not_a_daily_fallback",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "hourly auth vs transient and daily authority",
     },
     {
@@ -1602,13 +1839,18 @@ FINDINGS = (
             "tests/independent/hourly_r5/test_independent_hourly_r5.py::test_hourly_login_redirect_is_typed_auth_loss[setup-okta]",
             "tests/independent/hourly_r5/test_independent_hourly_r5.py::test_hourly_login_redirect_is_typed_auth_loss[data-portal]",
             "tests/independent/hourly_r5/test_independent_hourly_r5.py::test_hourly_login_redirect_is_typed_auth_loss[data-okta]",
+            "tests/systemic/test_auth_systemic_catalog.py::test_hourly_login_redirect_is_typed_auth_loss_with_statistics_isolation",
         ),
         "slow_cases": (),
         "original_mutants": (),
         "new_mutant_need": "New hourly-auth isolation mutant needed: bypass typed hourly auth loss and "
         "permit statistics/journal mutation; no original auth row models this.",
-        "systemic_gap": "No scenario-equivalent systemic detector yet; P2-10 must map a focused assertion "
-        "before claiming systemic closure.",
+        "systemic_gap": "No separate slow scenario linked; the focused fast systemic assertions in systemic_cases close the former P2-10 detector gap.",
+        "systemic_status": "covered",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_hourly_login_redirect_is_typed_auth_loss_with_statistics_isolation",
+        ),
+        "systemic_gap_resolution": "P2-10: exact systemic assertions linked and fingerprinted; mutation outcomes recorded externally.",
         "evidence": "hourly login redirect is typed auth loss",
     },
 )
@@ -1624,6 +1866,10 @@ KNOWN_GAPS = (
         "terminal/reload detector.",
         "new_mutant_need": "Neutralize Login JSON security-step latch after a real POST; require durable "
         "I8 across cold restart.",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_login_json_security_step_is_latched_and_durable",
+        ),
+        "resolution": "P2-10 focused Login POST JSON Data.SecretQuestionError detector proves the durable terminal admission and the cold zero-HTTP keepalive (systemic, rows 20/21). The in-memory latch flag itself is adapter-level. Generic HTML corpus builder remains explicitly model-only.",
     },
     {
         "id": "P2-07-POLICY-PERSIST",
@@ -1634,5 +1880,13 @@ KNOWN_GAPS = (
         "jar handoff and retain it after cold restart; P2-10 owns detector.",
         "new_mutant_need": "New coordinator._persist_auth_metadata no-op mutant plus "
         "failed-renewal/no-cookie-change cold detector.",
+        "systemic_cases": (
+            "tests/systemic/test_auth_systemic_catalog.py::test_failed_renewal_preserves_preprobe_jar_and_spent_budget",
+        ),
+        "resolution": "P2-10 real failed renewal, no jar handoff, physical spent budget and cold reconstruction close the public behaviour. The separate new-persist-auth-metadata-noop row (outside the historical sixty) is ADAPTER-LEVEL: the runtime's own scheduled persist callback masks the synchronous exit write, so its exact detector calls the exit write directly and is excluded from the systemic count.",
     },
 )
+
+
+# Historical carried gaps remain in the inventory; these are their focused
+# resolutions, separate from the original reason and future-fault description.
