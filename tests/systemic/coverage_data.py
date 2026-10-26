@@ -419,9 +419,10 @@ BASELINE_FAST = {
         44,
         "ce8615f8735e348d772ae13a4b4196feb5fd69dd156c12d5ffd4c202a72ce755",
     ),
+    # Gate C fix (KB 741a6cbf) added 9 reviewed boundary probes.
     "tests/stats_suite/test_fault_harness.py": (
-        8,
-        "994dfb547f1820de42d70b93c812325a080a78c008815aec38eed1b61cfb275e",
+        17,
+        "f9ed01ca9ff43632dd89f70ea98936389e69bfa5369e3c5b0af909e2b074d331",
     ),
     "tests/stats_suite/test_fault_points.py": (
         9,
