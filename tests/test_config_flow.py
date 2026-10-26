@@ -11,7 +11,7 @@ from homeassistant.config_entries import (
     ConfigEntryState,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 import requests
@@ -929,6 +929,39 @@ async def test_options_flow_rate_update(hass: HomeAssistant) -> None:
     )
     assert result2["type"] == FlowResultType.CREATE_ENTRY
     assert result2["data"][CONF_PRICE_PER_KWH] == 0.325
+
+
+@pytest.mark.parametrize("rate", ["nan", "inf", "-inf", "-0.25", "bad", None])
+async def test_options_flow_rejects_invalid_rate_and_allows_correction(hass, rate) -> None:
+    """Invalid input neither changes stored options nor triggers a reload."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, version=2, unique_id="11223344", data={},
+        options={CONF_PRICE_PER_KWH: 0.247},
+    )
+    entry.add_to_hass(hass)
+    with patch("homeassistant.config_entries.ConfigEntries.async_reload", return_value=True) as reload:
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        flow_id = result["flow_id"]
+        try:
+            result = await hass.config_entries.options.async_configure(
+                flow_id, user_input={CONF_PRICE_PER_KWH: rate}
+            )
+        except InvalidData as err:
+            # HA rejects malformed/negative values through the form schema;
+            # non-finite values that survive coercion are rejected by the step.
+            assert err.path == [CONF_PRICE_PER_KWH]
+        else:
+            assert result["type"] == FlowResultType.FORM
+            assert result["errors"] == {CONF_PRICE_PER_KWH: "invalid_price"}
+        assert entry.options[CONF_PRICE_PER_KWH] == 0.247
+        reload.assert_not_called()
+
+        result = await hass.config_entries.options.async_configure(
+            flow_id, user_input={CONF_PRICE_PER_KWH: "0"}
+        )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+        assert entry.options[CONF_PRICE_PER_KWH] == 0.0
+        await hass.async_block_till_done()
 
 
 @pytest.mark.parametrize(

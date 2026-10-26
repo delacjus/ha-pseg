@@ -38,6 +38,7 @@ TO_REDACT = {
     CONF_KNOWN_METER_IDS,
     "meter",
     "meter_ids",
+    "contributing_meter_ids",
     # Raw hourly/daily chart arrays: diagnostics reports only the small summary.
     "hourly_records",
     "daily_records",

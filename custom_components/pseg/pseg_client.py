@@ -2868,6 +2868,10 @@ class PsegClient:
                 _LOGGER.debug("Skipping duplicate meter series for meter %s", meter_id)
                 continue
             meter_ids.append(meter_id)
+            # Daily data has one reading per meter and local date. Repeated
+            # points must not inflate totals; conflicting repeats cannot safely
+            # be resolved by choosing either value or adding them together.
+            meter_days: dict[str, float] = {}
             for pt in raw_points or []:
                 if not isinstance(pt, dict):
                     continue
@@ -2882,7 +2886,13 @@ class PsegClient:
                 if isinstance(y, bool) or not isinstance(y, (int, float)) or not math.isfinite(y):
                     _LOGGER.debug("Skipping meter %s point with non-numeric usage", meter_id)
                     continue
-                totals[date_iso] = totals.get(date_iso, 0.0) + float(y)
+                usage = float(y)
+                if date_iso in meter_days:
+                    if meter_days[date_iso] != usage:
+                        raise PsegTransientError("Conflicting daily readings for one meter and date")
+                    continue
+                meter_days[date_iso] = usage
+                totals[date_iso] = totals.get(date_iso, 0.0) + usage
                 contributors = day_meters.setdefault(date_iso, [])
                 if meter_id not in contributors:
                     contributors.append(meter_id)

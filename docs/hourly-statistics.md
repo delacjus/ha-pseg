@@ -43,7 +43,7 @@ timezone and zero semantics are still unverified.
 
 ## Before you start
 
-1. Home Assistant 2024.1 or newer, HACS installed, and the PSE&G entry currently
+1. Home Assistant 2026.10.2 or newer, HACS installed, and the PSE&G entry currently
    **connected**.
 2. A recent Home Assistant backup. This integration does not create or restore
    recorder backups; keep using your own backup/export process.

@@ -695,6 +695,37 @@ def test_merge_deduplicates_meter_and_ignores_non_meter_series(
     assert "duplicate" in caplog.text.lower()
 
 
+@pytest.mark.parametrize("usage", [0.0, 10.0])
+def test_daily_duplicate_points_are_counted_once_per_meter(usage: float) -> None:
+    """Duplicates cannot inflate usage, but distinct meters still add together."""
+    parsed = PsegClient(price_per_kwh=0.25)._parse_chart_data({"Data": {"series": [
+        _meter("Meter #111", [("10/20/2026", usage), ("10/20/2026", usage)]),
+        _meter("Meter #222", [("10/20/2026", 3.0)]),
+    ]}})
+    assert parsed["latest_kwh"] == usage + 3.0
+    assert parsed["latest_cost"] == (usage + 3.0) * 0.25
+    assert parsed["contributing_meter_ids"] == ["111", "222"]
+
+
+@pytest.mark.parametrize("values", [(0.0, 10.0), (10.0, 0.0), (10.001, 10.002)])
+def test_conflicting_daily_points_abort_poll_and_backfill(values: tuple[float, float]) -> None:
+    """Do not choose a value, round away a conflict, or import a partial response."""
+    chart = {"Data": {"series": [
+        _meter("Meter #111", [("10/19/2026", 5.0), *[
+            ("10/20/2026", value) for value in values
+        ]]),
+    ]}}
+    client = PsegClient(portal_cookies="MM_SID=x")
+    with requests_mock.Mocker(session=client.session) as mock:
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart)
+        with pytest.raises(PsegTransientError, match="Conflicting daily readings"):
+            client.fetch_energy_data()
+        with pytest.raises(PsegTransientError, match="Conflicting daily readings"):
+            client.fetch_history_range("2026-10-19", "2026-10-20")
+
+
 def test_merge_skips_missing_usage_and_bad_date(caplog: pytest.LogCaptureFixture) -> None:
     """Invalid points must not create zero-kWh or empty-date statistics rows."""
     chart = {

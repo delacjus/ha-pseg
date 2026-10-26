@@ -169,7 +169,7 @@ def test_dirty_tracked_failure(source: Path, capsys: pytest.CaptureFixture[str])
 def test_node_preload_and_all_files(source: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert run(source, "node") == 0
     child = next(row for row in records(capsys) if row.get("child") == "node")
-    assert child["counts"]["tests"] == child["counts"]["pass"] == 3
+    assert child["counts"]["tests"] == child["counts"]["pass"] == len(release_check._NODE_FILES)
 
 
 def test_missing_node(source: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
