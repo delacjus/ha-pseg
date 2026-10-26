@@ -1079,6 +1079,59 @@ def run_case_evidence(case: ResponseCase, hass: HomeAssistant, caplog: Any = Non
     return run_ha_case(case, hass, caplog)
 
 
+async def run_focused_auth_case(
+    hass, body, *, flow="R", entry_data=None, terminal=False, setup=True
+):
+    """Run a focused P2-10 assertion with the real transport and shared ending.
+
+    Setup, physical entry persistence, generation registration and the cold
+    reconstruction are identical to G1/G3. The callback supplies the narrow
+    scenario; it does not replace client, coordinator or policy implementations.
+    A failed body still attempts the ending, preserving its primary exception.
+    """
+    portal = ScriptedPortal()
+    script_portal(portal)
+    factory = ClientFactory(portal, registry=ClientRegistry())
+    entry = create_flow_entry(hass, flow)
+    if entry_data:
+        hass.config_entries.async_update_entry(entry, data={**entry.data, **entry_data})
+    driver = LifecycleDriver(hass, entry, portal, factory=factory)
+    oracle = Oracle()
+    oracle.attach_portal(portal)
+    oracle.attach_registry(factory.registry)
+    register_initial_jar(oracle, entry)
+    register_scripted_eligibility(oracle, portal)
+    with factory:
+        try:
+            if setup:
+                assert await driver.setup(), "focused auth setup failed"
+            primary = None
+            try:
+                await body(driver, oracle)
+            except Exception as err:
+                primary = err
+            # Healthy replies become available without changing live/persisted
+            # cookies, admission or terminal latches.
+            script_portal(portal)
+            try:
+                if driver.entry.state is not ConfigEntryState.LOADED:
+                    assert await driver.reload(), "focused auth successor setup failed"
+                ending = await run_case(driver, terminal=terminal, oracle=oracle)
+                ending.assert_complete()
+                oracle.assert_clean()
+            except Exception:
+                if primary is None:
+                    raise
+            if primary is not None:
+                raise primary
+            return ending
+        finally:
+            if driver.coordinator is not None:
+                driver.coordinator.stop_keepalive()
+            for progress in hass.config_entries.flow.async_progress():
+                hass.config_entries.flow.async_abort(progress["flow_id"])
+
+
 __all__ = [
     "ALL_CASES",
     "COOKIE_NAMES",

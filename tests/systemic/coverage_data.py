@@ -25,6 +25,7 @@ NEW_MODULES = frozenset(
         "tests/systemic/test_policy_properties.py",
         "tests/systemic/test_findings_registry.py",
         "tests/systemic/test_coverage_meta.py",
+        "tests/systemic/test_auth_systemic_catalog.py",
     }
 )
 
@@ -450,8 +451,8 @@ BASELINE_FAST = {
         "20014ee1a3c84640f2654a73534ee0ef52e233848de2d0c56a503975f6669e42",
     ),
     "tests/systemic/test_dispatch_fence.py": (
-        22,
-        "12c3a9f3a4e9532d807c0f5fddaee6700d42235f4731ad3d668cf36558582d13",
+        27,
+        "b7f82cf146604a92223c38180487eae534b969069fbbee31c81b6b60c1ae89fb",
     ),
     "tests/systemic/test_exit_checkpoint.py": (
         18,
@@ -646,8 +647,8 @@ BASELINE_FAST = {
 
 GENERATED_INVENTORY = {
     "tests/systemic/test_dispatch_fence.py": (
-        92,
-        "06405d1f1fc693ec9de57ad343537c6f6eae7aa470eda5c615c5d75632d9936d",
+        97,
+        "e65ee3c8885d332a6945acca50810327caad5b2a33eeaa09aae95405db6d3ad2",
     ),
     "tests/systemic/test_exit_checkpoint.py": (
         180,
@@ -788,236 +789,235 @@ MANDATORY_FAST = (
 # Reviewed R1 correction: invariant + exact per-role parameter allowlists.
 # Order: provenance, fast, slow. These literals must not follow registry edits.
 REVIEWED_FINDING_EVIDENCE = {
-    'R1-1': (
-        'I1',
-        '4527c763932c068090f101a3a11abcb1c8f7b01a7ab381193c5fcac6c219c492',
-        '7451e305bc3d9f07c9b6962ed5a53a7731d0a704ab0ab281259aab5ff620be45',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R1-2': (
-        'I5',
-        '5493378be570e23d704f479ca5ff706c1d0dc40d84597a4988d74d5b2eb6723a',
-        '4fc5a92640f442f7e084aa9e6de7cdc94c20ac9d4a5766ebf09b60334f647764',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R1-3': (
-        'I7',
-        '5e6dffc75cff89362f5d005e4efcd3254ac60fe663dcf902e86c266624a1dc77',
-        '9821e2794d06527aeb94d6b6429ddfe0119f56865667e43aa738f93d1596197f',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R1-4': (
-        'I9',
-        '10928a64ede5a6b9ab96291e392dd6828062ff9f439592a197e27ea18acb25ec',
-        '4f3950bd5bd21ae42c8b453eff3e75eaaa7e7838201f611ae74cd78190e68d7c',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R1-5': (
-        'I7',
-        '82b5081d15dd9bc89be4e2bf297aebecfd557936f78f2ac27a57506281c95ca3',
-        'aae27b9820a4204132f9b88fba6ce7d07ed0c29b7dea77c04a1493d602468fcc',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R1-6': (
-        'I7',
-        'f52440cdc12a779f809df5fc972c1708d4994826e35274dc363029f401decec2',
-        'fea64f81970ae2dd364d9c9b9be8a9759030960b55642f69d01bd17f48999a13',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R1-7': (
-        'I3',
-        'd98e79a5ba07d975a3134252abe39a0e8cf2c1cfef5d5bcf60c9571079b9690d',
-        '077069b9b049429cf3453b85109bfcc8306d86731aefef8e2179c7bd58e0c127',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R2-1': (
-        'I5',
-        'ba55b2e605f63a35fe96115a05fd7376d28bc097e17fed00443c75feab4ca199',
-        'da6257b173ce2f23261a824e85c5109e90ee32b72e95b00c916ae0daeba695f6',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R2-2': (
-        'I9',
-        'd8fab5b50f8047e8555df867c122581ef708789430fcf2dc309669e173ae065e',
-        'f53ba4dc6f4c5b34a10385c259fdfeb24d919f96634068d7e25027a0130007d1',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R2-3': (
-        'I7',
-        '95ba96462717a8750c818b388b08d7f5246bb7984873d4d273405ef1fa232e85',
-        '5d74a5edc01b0dd9134e153e0963a7bca6fbd063655dc18604a7c9cb132f58e8',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R2-4': (
-        'I7',
-        '5b39f56d4736131134d77c50f406e84a17486d972aed20020774f96ac5d07fbd',
-        '7bf35123a190135e3759e64a2396289a250a6e9df2be23382b90a5eeedf8615f',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R2-5': (
-        'I8',
-        '94e55e522333ee47360f99f263451caaac168a0353c2bea91cd4ee908a7915c6',
-        '45ed4f693650541bed246feab1215c15ec22d1f03afe2ee114a05ca0f96f29cb',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R3-N1': (
-        'I5',
-        '481117eed77c62f0d1357f66897fad1146dd3af404bf705f81be7f05b7e77aff',
-        '2d1194aa7d951849da381db36df941961a62ee10257c6044262e1dd9d88a6059',
-        'c20e685ae9abefbcd413fe672d58d5f08958ae96349bd662aeec935adb76368c',
-    ),
-    'R3-N2': (
-        'I7',
-        'c6217334baeebc443a44bc1ecafaf0e04ae706689f9246525a8f7ec105f53300',
-        '8ce69679cbae4f8b09cbbbcc88ec974b55f50b69246b0bcde71e18a793cd1860',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R3-N3': (
-        'I8',
-        'ae83d775bbf18917c6ff33fbed91f286c282c8e715a3f12370d839c4f9bf527f',
-        '9d00529633d4bae9d98713bffb56db10c6d391ed7b4511699671b2a0fd37a617',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R4-F1': (
-        'I3',
-        '57a14dcce9656c92889548cd22a9f1d2c2444e284ca698037db6d12c079f9885',
-        '5a79a4592eb0ccaae26c1a97c301c4e8a8d4794d18b6f8a83f6ccd86a86140e5',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R4-F2': (
-        'I1',
-        '67a5ad4cec8a5bb0ec4ae029ce1f91c9ee663f05b6456693d637e253f397dafa',
-        '7f48338731beec0e7de57bd9a29e7e2ed4bb0b0490b2ef76ab7757dc31b1fb23',
-        '52ef77111b3347dbc21d27a0cf1c03213ce6dce8182ff0d9d9566341c3af2f77',
-    ),
-    'R5-A': (
-        'I1',
-        '4564e76e97d5b14cdeeb611f1eec971d4363c78fc73fdef8bd3077e909248d2e',
-        'c359d1d1786468a19cfb289102d1dfe83139306f5e865017a911c2a2a108b73c',
-        '52ef77111b3347dbc21d27a0cf1c03213ce6dce8182ff0d9d9566341c3af2f77',
-    ),
-    'R5-B': (
-        'I3',
-        '767087f47a566156e1a9beb9eda20ecebe5668a5e4aa8e4d1ed21d88780bc9c2',
-        '94e435a0b191bdb2fd9c5c632a646744591a3d63a57337b25fb203fb73ad6d55',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R5-C': (
-        'I10',
-        '8531120bb019d857eda03867cdd173abb8bcd9eae60f88dc1fdcf630eb7d94bd',
-        '167de3c8593bdde3f9d5071c959f113f827c84c7fcbde82fd47047a4cd7fc174',
-        '8bd8e360f67ab6503c4c48689f8aa10fe63a546b7a6b68c9a416828e7cf0a1c5',
-    ),
-    'R5-D': (
-        'I5',
-        'e25b42a1fbb348b1c932126e7a03f4c715a770097cb0661512717b52a3f62e99',
-        'a2c19f97e8adeda2bc3115427a729e07a723fe5db376eb5ddb75fdcc8ce05dd1',
-        'c20e685ae9abefbcd413fe672d58d5f08958ae96349bd662aeec935adb76368c',
-    ),
-    'R6-F1': (
-        'I4',
-        'ad101b8763f0d9a21c39d6ad058d5e26c4527fd8dfed625398e721e83ecc23c6',
-        '335cc06fec972d7d07244dd4099eb85467a436de16eb02f5c4024f902e8cfb3f',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R6-F2': (
-        'I5',
-        'eff71972884f6800d8b35bff619d5925b64ef320e9a28e771516b3d103acbcf5',
-        '6af0778691bc3ffeb35312e397537864d26c4cfa42650625d272bc11d7614df8',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R6-F3': (
-        'I1',
-        '5dac9db7ce70a0778a2190233d40fa3f9afa2ddf9b8bffd478925056152d2c93',
-        'a6587dbb27c456dc9dd5aae2675296ff7b134be43c2e9fc54020f9bb8fdac493',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R6-N1': (
-        'I5',
-        '3d232b9e49f044c8b09299a4dd2221cb8c041b8fabeecd1873449b17d6bad4e9',
-        '1b34301488f35effd6854e2a982e8df628b16ef79737fadf8ae3aefa0d7f7ed0',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R7B-1': (
-        'I3',
-        '7747c0d458a3fa3ed2f19d1dd1c91b98b98112389053c09231f1b1a20328dfae',
-        'e13ed7ec8c8b4cd92a9235e12efb0a0c4ab49e0b4a9d5c58a8509542ceb2cd38',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R7B-2': (
-        'I4',
-        '81000f115f241360ae890704952eb6d26af4794f9a8bf9fbd8ffadaedbf6a29f',
-        '83fe7f8e5d2886d8bffdfb7e4b52bd088a305f781851e664f08408ea7a17ee9c',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R7B-3': (
-        'I10',
-        '7769901530fa5089a4875b02bc99eb01599602155f1782403cca21a884e3005c',
-        '7d4171f9a18ca5290423f05bb95d242de5e2764291476005437d13aae701c5f7',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R7B-4': (
-        'I1',
-        'cfd040b6d55ad4de6e39aeacfcc5c6ee07738aa41ebfe80e3a078c1094c8a37e',
-        'ec342cdce1bbd1fb4b0ebd953c2d81e1e3cd19a751b9439365511a1b320dceb7',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R8-1': (
-        'I10',
-        '51828f43b8767ceb09a3f983aa4ff7b5ebdce742f832825e4feb8084e0c6e0ae',
-        '644fa2d3e4eb25a30180be12601ef6365e128624a75741375a0ac9665412cef7',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R8-2': (
-        'I10',
-        '25e8edbdc5b1f7f2c91036801e9844febb136cd92a916a4069887584172ff846',
-        '6087f4927f1f0657ef8306f02bb664c5c964e1d3c1b0283b7609ff3c543b379c',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R8-N1': (
-        'I10',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-        '6e27d6b87dc1db3ecbad6735fe22dad3908d06612de34d54a3a640db37fb05c0',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R8-N2': (
-        'I4',
-        '30f90f5560736751efccdd137a15fa801b1d8ea0c4b34d39ee4a27ae978e2823',
-        'bb10c1c573a3fd0ac443222fb1d108c3cfdef77b05b26819bfb1a78c858ce8f8',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R8-N3': (
-        'I4',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-        '2f296b5482fc7cfce5289b40f12269af6b5b79a0413fcd3c7e599a35966b2c61',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R9-1': (
-        'I7',
-        '0f5c0ab1cda08928807a5e39f51b24b701dc729d1c7bef8048c879c99bff2f54',
-        '7ace2a9f386d5f48d4f5fa8ed00b071e353b65501a754a3c3896ad6171ebe626',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
-    'R9-N1': (
-        'I4',
-        '38e1ae3a93f7ebeb0f3c107e55a22b5a91867a5379ff21f66b9ac0674ac40da7',
-        'cc15844b4d2d3b3f8a556297eed428785a38d5e5a9234049d238d609d7d27461',
-        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
-    ),
     'HOURLY-AUTH': (
         'I12',
         '465caa8da7b4dc6814871d4e4f5087784595e10adc039b8ca3a120d539060411',
-        '465caa8da7b4dc6814871d4e4f5087784595e10adc039b8ca3a120d539060411',
+        '440b407c3b305c85e22c0609e70840f7d1b0203a6b93108486a2a45fdb709b34',
         '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
     ),
     'HOURLY-REDIRECT': (
         'I12',
         'b017ee31b98399d990a28bf904c60b0b545c2213339b4df8d1f03a08e63a5fa2',
-        'b017ee31b98399d990a28bf904c60b0b545c2213339b4df8d1f03a08e63a5fa2',
+        'e31ebbb08ab6e07b31a554203f027b972ed76a901305d29af57daf3cbec827e7',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R1-1': (
+        'I1',
+        '4527c763932c068090f101a3a11abcb1c8f7b01a7ab381193c5fcac6c219c492',
+        'f0743dc7538e0bb5845e4c1336ff74a433fa75fc8b5aa67003b44eb4df489a89',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R1-2': (
+        'I5',
+        '5493378be570e23d704f479ca5ff706c1d0dc40d84597a4988d74d5b2eb6723a',
+        '9899036ba57f296c35a66f7249ad3aef276a1ab734dcf39af531c6b48c3756ba',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R1-3': (
+        'I7',
+        '5e6dffc75cff89362f5d005e4efcd3254ac60fe663dcf902e86c266624a1dc77',
+        '78f3ed6ce041331b91f76faca893e57bbcddba86b43853c80d38555c4865ebfb',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R1-4': (
+        'I9',
+        '10928a64ede5a6b9ab96291e392dd6828062ff9f439592a197e27ea18acb25ec',
+        '0b0c1ea980d10c7c4b379df55846f1af40ecbe94d6d34eff9db6e84ebb006fba',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R1-5': (
+        'I7',
+        '82b5081d15dd9bc89be4e2bf297aebecfd557936f78f2ac27a57506281c95ca3',
+        'cdfd6dbe182c8087fd4003dc7a824411c49b36f2be70bde162f59716b0e58088',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R1-6': (
+        'I7',
+        'f52440cdc12a779f809df5fc972c1708d4994826e35274dc363029f401decec2',
+        '9ca5a7e6ab45ddf7f0bf87e834b2d8b5190795b7519dd4c3dc168a96b5516375',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R1-7': (
+        'I3',
+        'd98e79a5ba07d975a3134252abe39a0e8cf2c1cfef5d5bcf60c9571079b9690d',
+        'd22232ceb8a25728b978017913023692bfa6c7bbbdabdebd4a4a946e42730e65',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R2-1': (
+        'I5',
+        'ba55b2e605f63a35fe96115a05fd7376d28bc097e17fed00443c75feab4ca199',
+        '3f721bb0bf1d7e7a2b57121b92aee097b6c68cb6197fa67a2f70b01a164d359a',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R2-2': (
+        'I9',
+        'd8fab5b50f8047e8555df867c122581ef708789430fcf2dc309669e173ae065e',
+        'b81741ceaa5e5a0f4b6c6b16c402c3e3f269e1d82efe27bb70cc84d610984ace',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R2-3': (
+        'I7',
+        '95ba96462717a8750c818b388b08d7f5246bb7984873d4d273405ef1fa232e85',
+        '7bc5cd451992d6ac015aa7d805a28a78a0b3b63750438dcde6bf3c3b78030e13',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R2-4': (
+        'I7',
+        '5b39f56d4736131134d77c50f406e84a17486d972aed20020774f96ac5d07fbd',
+        '811a6fec9c477cfd0223370d5fa7c43571625099a217b3d5241d69e80f312244',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R2-5': (
+        'I8',
+        '94e55e522333ee47360f99f263451caaac168a0353c2bea91cd4ee908a7915c6',
+        '05297880e16f1903f877dddcefdf0563c90f11d7a650bf1466d32cad868336b1',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R3-N1': (
+        'I5',
+        '481117eed77c62f0d1357f66897fad1146dd3af404bf705f81be7f05b7e77aff',
+        '04bee091076bbd4bc9089c2a2ba5c762b3e67e8de89a4681be3a7925c1f3a920',
+        'c20e685ae9abefbcd413fe672d58d5f08958ae96349bd662aeec935adb76368c',
+    ),
+    'R3-N2': (
+        'I7',
+        'c6217334baeebc443a44bc1ecafaf0e04ae706689f9246525a8f7ec105f53300',
+        'c7728fd8af898b6e210407423780be89568a368c5962a4d3538244bd433260d2',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R3-N3': (
+        'I8',
+        'ae83d775bbf18917c6ff33fbed91f286c282c8e715a3f12370d839c4f9bf527f',
+        '4fd7d29bc8ded0ad08caa831529ecde6f9872794e28c7b92bbaae9345811dd26',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R4-F1': (
+        'I3',
+        '57a14dcce9656c92889548cd22a9f1d2c2444e284ca698037db6d12c079f9885',
+        '0c6edce50088a59d0a90a133052262fcdc0e4b79a9ad5bd0d1144c8ce5e81f98',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R4-F2': (
+        'I1',
+        '67a5ad4cec8a5bb0ec4ae029ce1f91c9ee663f05b6456693d637e253f397dafa',
+        '7bc6e83f33915728e2401bb48d36b4c580a2fef34c56eae2e4e1b238a69c3c58',
+        '52ef77111b3347dbc21d27a0cf1c03213ce6dce8182ff0d9d9566341c3af2f77',
+    ),
+    'R5-A': (
+        'I1',
+        '4564e76e97d5b14cdeeb611f1eec971d4363c78fc73fdef8bd3077e909248d2e',
+        'c115bc39eaeb6a06075040d62481c06dba7933e088b1acfbac5dbf6e116325c1',
+        '52ef77111b3347dbc21d27a0cf1c03213ce6dce8182ff0d9d9566341c3af2f77',
+    ),
+    'R5-B': (
+        'I3',
+        '767087f47a566156e1a9beb9eda20ecebe5668a5e4aa8e4d1ed21d88780bc9c2',
+        '90196a3a547b3a0bb62e255e2dca98e451f24be08ff2327131b241007f2bbed0',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R5-C': (
+        'I10',
+        '8531120bb019d857eda03867cdd173abb8bcd9eae60f88dc1fdcf630eb7d94bd',
+        '7c7f27b2b864b151cbf1f7af0eac3f42452a5978848ac0cbe4ab4523325aa319',
+        '8bd8e360f67ab6503c4c48689f8aa10fe63a546b7a6b68c9a416828e7cf0a1c5',
+    ),
+    'R5-D': (
+        'I5',
+        'e25b42a1fbb348b1c932126e7a03f4c715a770097cb0661512717b52a3f62e99',
+        'f6d9e27a65859c7411943efd52310082e1164f9bf15c36616525648cb4047584',
+        'c20e685ae9abefbcd413fe672d58d5f08958ae96349bd662aeec935adb76368c',
+    ),
+    'R6-F1': (
+        'I4',
+        'ad101b8763f0d9a21c39d6ad058d5e26c4527fd8dfed625398e721e83ecc23c6',
+        '2eddd0b4c2c7dfba4939088de9637fde87884aa2cf5e8a4081774d02dfc1e1ef',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R6-F2': (
+        'I5',
+        'eff71972884f6800d8b35bff619d5925b64ef320e9a28e771516b3d103acbcf5',
+        '48f0a69cc132afc5832ba243e325adc15d24312968171bc187606cbb3dfe611e',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R6-F3': (
+        'I1',
+        '5dac9db7ce70a0778a2190233d40fa3f9afa2ddf9b8bffd478925056152d2c93',
+        '35bdc6d562d0e1fe983cba7500a07c86dc58f2ac7b235a5ccc9dfa20fc8b7b69',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R6-N1': (
+        'I5',
+        '3d232b9e49f044c8b09299a4dd2221cb8c041b8fabeecd1873449b17d6bad4e9',
+        '637c267a2264cc33081acb1bcfcc48af40c09ec45548e25e4b1aee25d8d37664',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R7B-1': (
+        'I3',
+        '7747c0d458a3fa3ed2f19d1dd1c91b98b98112389053c09231f1b1a20328dfae',
+        'e38aa0046a111d1fd183f5cbca61adf783f1b8467d60abd35d26274567445ff6',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R7B-2': (
+        'I4',
+        '81000f115f241360ae890704952eb6d26af4794f9a8bf9fbd8ffadaedbf6a29f',
+        'e8352eea1c638ecb1dac18440267814bfddccf9f649c698fcd59690b210215bb',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R7B-3': (
+        'I10',
+        '7769901530fa5089a4875b02bc99eb01599602155f1782403cca21a884e3005c',
+        '6a94349a84c3181d4e9bb959b7521cc231d60b863c6377c120bbc862b713904f',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R7B-4': (
+        'I1',
+        'cfd040b6d55ad4de6e39aeacfcc5c6ee07738aa41ebfe80e3a078c1094c8a37e',
+        'edb81756ed7053419c214899db7d5a922c3e292afd8bf4034270fabfee0d0fc2',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R8-1': (
+        'I10',
+        '51828f43b8767ceb09a3f983aa4ff7b5ebdce742f832825e4feb8084e0c6e0ae',
+        'dfb58a7ee0b5262658c15c53d9bdc76cc8af2c38809de197dee9c80c49a10ec7',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R8-2': (
+        'I10',
+        '25e8edbdc5b1f7f2c91036801e9844febb136cd92a916a4069887584172ff846',
+        '622f5dc52c459c30d4d391021c2ba1c3e61530cf470342d80cb8a5ebf1cd2fdc',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R8-N1': (
+        'I10',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+        '663c6a30fc60895d624f20925033cbaf74cb288d4dd083aac4b963e961641266',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R8-N2': (
+        'I4',
+        '30f90f5560736751efccdd137a15fa801b1d8ea0c4b34d39ee4a27ae978e2823',
+        'f1a7a5d4667fbcf3656363ee361d316dbbcfbab2354a25211b20afee0558cdd0',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R8-N3': (
+        'I4',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+        '738ad0f7bb24f3b1e55ad60e25baff97f836015004790bccf6a0025a3e5f03f4',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R9-1': (
+        'I7',
+        '0f5c0ab1cda08928807a5e39f51b24b701dc729d1c7bef8048c879c99bff2f54',
+        '8854f40478c2c9fdd334740495ffeec0e875e10eb06a0cffa339eb93e227965f',
+        '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
+    ),
+    'R9-N1': (
+        'I4',
+        '38e1ae3a93f7ebeb0f3c107e55a22b5a91867a5379ff21f66b9ac0674ac40da7',
+        'a0b1dafcc40b0ef5d7e3a85432c2154b18fb112111484fae50ebeaf99ea9787d',
         '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
     ),
 }
-
 # Normalized full collected function AST, including invariant asserts and guards.
 # Parameter IDs are pinned above; informational/bypass cases receive no credit.
 REVIEWED_ASSERTION_BODIES = {
@@ -1093,12 +1093,63 @@ REVIEWED_ASSERTION_BODIES = {
         'ad3c39951acd843b582a46dc565633d0d94d85112dc2206ac054bc0a3584dc92',
     'tests/independent/hourly_r5/test_independent_hourly_r5.py::test_hourly_login_redirect_is_typed_auth_loss':
         '1c4fd5c8f19c8f89e454be879ccbc220576425e032527e6b47c2eed17e89959a',
-    'tests/systemic/test_dispatch_fence.py::test_slow_full_boundary_retirement_sweep':
-        'b4e19ec5f434d91aed7e24691eca9b8afccb05fd2621f09f526dbc66d4baf353',
-    'tests/systemic/test_exit_checkpoint.py::test_slow_exit_checkpoint_sweep':
-        '6de5c5e3b8ccde3e9e12ffac9158932261f68206c9270cd55f2f3a86b8db87be',
-    'tests/systemic/test_response_corpus.py::test_slow_case':
-        '4bdce96845ba775e94863b4b0d5a8c76fcf1dc128600635130baa57f4d089bf7',
+    'tests/systemic/test_auth_systemic_catalog.py::test_adapter_parser_provenance_and_empty_renewal_identity':
+        'd79a4c6c0930951cef4bb4035f7c7682e6737d42d7b81611fe2a668da3166914',
+    'tests/systemic/test_auth_systemic_catalog.py::test_checkpoint_ack_cannot_clear_a_newer_publication':
+        'dd497ec423f506b14d7bfdf1e541c83ce4129c8ad6a6e943af190ee78630cbc4',
+    'tests/systemic/test_auth_systemic_catalog.py::test_confirmed_remember_slide_is_not_a_second_renewal_generation':
+        '2c7b9b307c5556414a474c9733b005c7371c9009b18542b4d473ec11db92ccfb',
+    'tests/systemic/test_auth_systemic_catalog.py::test_daily_successor_is_learned_when_hourly_omits_it':
+        '2bc65eb4e799681b7ab379787ed138ce432949d7b024abc8cd7bcd710de9d8e2',
+    'tests/systemic/test_auth_systemic_catalog.py::test_failed_first_setup_preserves_spent_terminal_admission':
+        '48ca31d7fed4f5d4ec5c865cef965f3a33f8d7574a81758459641a7655e047f2',
+    'tests/systemic/test_auth_systemic_catalog.py::test_failed_renewal_preserves_preprobe_jar_and_spent_budget':
+        '7d7dc184ab65b4b04410a9ddf13b577486a1839bb13d6580d10866c8c6b2949b',
+    'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract':
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    'tests/systemic/test_auth_systemic_catalog.py::test_fresh_human_cookie_flow_has_its_own_account_proof':
+        '1b1399fcaed78f3df5490c58d19bff2069304bd59ffaa390d5cf2bbb78e29814',
+    'tests/systemic/test_auth_systemic_catalog.py::test_handoff_callback_fault_preserves_physical_owner':
+        '2416f505b83327f96cbd32d5a7fabd63ed02a0487ac5a221976cbe38c71497af',
+    'tests/systemic/test_auth_systemic_catalog.py::test_handoff_refuses_unvalidated_or_partial_live_jar':
+        'e51368acecc22a87f301af351e6840c7c156abb31aa05a9ac775fbdc6de03200',
+    'tests/systemic/test_auth_systemic_catalog.py::test_hourly_login_redirect_is_typed_auth_loss_with_statistics_isolation':
+        '8db338b7eae412740b3ab90fbd64792b75f2d0ce39de8c489d8fee1c19635792',
+    'tests/systemic/test_auth_systemic_catalog.py::test_hourly_stage_cookie_is_rolled_back_when_data_fails':
+        'ab21d032e3ce250a5f59f140a21fae40082c49a952df85970ea6ace31e3d8e84',
+    'tests/systemic/test_auth_systemic_catalog.py::test_loaded_admission_has_the_correct_public_outcome':
+        '3113b6d3d4c3aaf73f116df63815a3219c2712bbfa34ab2ed9986f84909c188f',
+    'tests/systemic/test_auth_systemic_catalog.py::test_login_json_security_step_is_latched_and_durable':
+        '2a3f310576998506b12649151058831df4c8f4296ca8c75d59b1a3d1a8ca1569',
+    'tests/systemic/test_auth_systemic_catalog.py::test_old_checkpoint_cannot_overwrite_human_successor':
+        '3d94a0ea9564b02c2291fb770569ed79fcee2400f9fd5356f91bff4504ae52ee',
+    'tests/systemic/test_auth_systemic_catalog.py::test_owner_stays_active_inside_own_physical_assignment':
+        '63aaac2a7dd869c837e5b65c3cd88ceaf4332f8dceb7dbd503b2b9b629d61af1',
+    'tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint':
+        '7289bed8e0b4ac8f806f1298ed88c4a02b2e84dabc4b275cfaabb1c9544ef79f',
+    'tests/systemic/test_auth_systemic_catalog.py::test_rejected_daily_result_contains_no_foreign_readings':
+        '3f4c7b61e6ee18817252568c2abf006718cd421d29cd60737404273bb54b8120',
+    'tests/systemic/test_auth_systemic_catalog.py::test_renewal_anomalous_proof_never_adopts_response_cookies':
+        'ed116b72280641985d0afa994a0c744530ebb24407a35fe29ce6be2a31089c20',
+    'tests/systemic/test_auth_systemic_catalog.py::test_renewal_requires_known_daily_proof_before_publication':
+        'c7a903e3e95ea9572a0108ef1f7f7dd6ca3c345d0bf9f689cfb808375797c1ff',
+    'tests/systemic/test_auth_systemic_catalog.py::test_replacement_inherits_the_inflight_entry_reservation':
+        'd1597eb4e80e8428b348e0179b9cf717aa59f8a41c84a733130bb69c0e4e7553',
+    'tests/systemic/test_auth_systemic_catalog.py::test_retired_keepalive_cannot_dismiss_successor_issue_after_export_await':
+        '0160de1b9d9a200eb5f0fe6ec398fee9c1a7ec34bac0b66a0a262b053a0cd990',
+    'tests/systemic/test_auth_systemic_catalog.py::test_uncertain_midsequence_admission_refuses_publication':
+        '37a7b54f8a0f8da2febc86b8d21a0b056f62e2eb04afc8a0c52ed205de53e240',
+    'tests/systemic/test_auth_systemic_catalog.py::test_valid_history_chunk_publishes_immutable_checkpoint':
+        '41e59e02fc7c3043c4a7dd7dbd64648e2d1ce2c6a8bab98a030fc4da93a3a996',
+    'tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative': '8e0f3604c603f8fbaf7224d4a12cadce059601df2edec5248cccf2c75b7c1c6e',
+    'tests/systemic/test_dispatch_fence.py::test_slow_full_boundary_retirement_sweep': 'b4e19ec5f434d91aed7e24691eca9b8afccb05fd2621f09f526dbc66d4baf353',
+    'tests/systemic/test_exit_checkpoint.py::test_fast_exit_checkpoint_control': '539dabcb17a8e9f4f7c5276db9282f67c42bdc73c88567f3512d3b1ff32a69f7',
+    'tests/systemic/test_exit_checkpoint.py::test_slow_exit_checkpoint_sweep': '6de5c5e3b8ccde3e9e12ffac9158932261f68206c9270cd55f2f3a86b8db87be',
+    'tests/systemic/test_policy_properties.py::test_literal_metadata_table': '5b8ea4feaac337232bb3d69e4f7db3f0a281aad02a916f74d352eb4de62e2cc0',
+    'tests/systemic/test_policy_properties.py::test_literal_spacing_and_rollback': '31f2868d3744aa41a5073dcde331564e4b327e4f2b9c4968db05d00d03eba152',
+    'tests/systemic/test_response_corpus.py::test_mandatory_auth_on_hourly_is_not_a_daily_fallback':
+        'befc964d9a4a39e499dfeb7c017c862aab64d741d7f73d2f30e55299fa880aba',
+    'tests/systemic/test_response_corpus.py::test_slow_case': '4bdce96845ba775e94863b4b0d5a8c76fcf1dc128600635130baa57f4d089bf7',
     'tests/test_auth_review_r2_regressions.py::test_confirmed_dashboard_slide_is_not_a_renewal_rotation':
         'b6adf20cf09d0e72f13eb282e42289920b8f7bcd370507f642ecc3f859d12587',
     'tests/test_auth_review_r2_regressions.py::test_confirmed_slide_with_a_domain_copy_is_not_a_renewal_rotation':
@@ -1135,8 +1186,7 @@ REVIEWED_ASSERTION_BODIES = {
         'c098ab3298be852a2dac7b4a2c4bf46bfea5e3e464d3b98bcacfa2ff4b8fae0c',
     'tests/test_auth_review_r4_regressions.py::test_real_unload_retires_saved_password_fallback':
         '13a702587674c91d16a9f584cdce56e92a7cf42dcadadeb1be49cf40c06f2282',
-    'tests/test_auth_review_r4_regressions.py::test_real_unload_retires_sso_fallback':
-        '1132869f6e76aabe4d0b98d5cc130aee371fd0751ab2587260f76cf803a7f7b4',
+    'tests/test_auth_review_r4_regressions.py::test_real_unload_retires_sso_fallback': '1132869f6e76aabe4d0b98d5cc130aee371fd0751ab2587260f76cf803a7f7b4',
     'tests/test_auth_review_r5_regressions.py::test_backfill_invalid_or_empty_chunk_cookie_is_quarantined':
         '51729c6d73fa6f80996663dbe7367fbd5b42e6294ba100ea4d94c3151cb8e10c',
     'tests/test_auth_review_r5_regressions.py::test_checkpoint_lock_synchronizes_publish_and_clear':
@@ -1193,6 +1243,251 @@ REVIEWED_ASSERTION_BODIES = {
         '8d8fc6868dcd386d7f92bb0991d3284d410e2463005c07545531e2838492c2d8',
     'tests/test_auth_review_regressions.py::test_success_without_rotation_does_not_authorize_transient_retry':
         '51ca4658dac0dfbf77161371060979197f1bee2710a1afba44f0099e23f9c147',
-    'tests/test_auth_review_regressions.py::test_uncertain_metadata_refuses':
-        '4b62c8a4341eacd3bdf5cbb21161f86d965fd2f7024eb17d6dd0176875d5b416',
+    'tests/test_auth_review_regressions.py::test_uncertain_metadata_refuses': '4b62c8a4341eacd3bdf5cbb21161f86d965fd2f7024eb17d6dd0176875d5b416',
+}
+
+# P2-10 literal reviewed additions: exact nodes and full assertion ASTs.
+#
+# Fence-row truth (R2 measured, not a coverage claim): the preserved rows
+# 27/28/29/31 are compound replacements (their stage guard *and* the structural
+# AllowlistedSession.send guard), so their own-stage fast cases detect the compound
+# row. For 28/29/31 the stage guard is redundant defence-in-depth behind the
+# identical _check_active_owner predicate Session.send already enforces (same
+# typed exception, zero dispatch) and both layers must be removed; 27's verify
+# path also goes through can_dispatch. Row 1 is not a Session.send detector: it is
+# mapped to the uncertain-admission case, where can_dispatch's reservation-owner
+# and not-uncertain checks are the only refusal (its stage guard is not redundant).
+SYSTEMIC_AUTH_DETECTORS = {
+    '1-entry-shared-admission': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_replacement_inherits_the_inflight_entry_reservation',
+        'd1597eb4e80e8428b348e0179b9cf717aa59f8a41c84a733130bb69c0e4e7553',
+    ),
+    '1-immediate-owner-check': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_uncertain_midsequence_admission_refuses_publication',
+        '37a7b54f8a0f8da2febc86b8d21a0b056f62e2eb04afc8a0c52ed205de53e240',
+    ),
+    '10-cooldown-is-transient': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_loaded_admission_has_the_correct_public_outcome[cooldown]',
+        '3113b6d3d4c3aaf73f116df63815a3219c2712bbfa34ab2ed9986f84909c188f',
+    ),
+    '11-uncertain-fails-closed': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_loaded_admission_has_the_correct_public_outcome[uncertain]',
+        '3113b6d3d4c3aaf73f116df63815a3219c2712bbfa34ab2ed9986f84909c188f',
+    ),
+    '12-confirmed-generation': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_confirmed_remember_slide_is_not_a_second_renewal_generation[host]',
+        '2c7b9b307c5556414a474c9733b005c7371c9009b18542b4d473ec11db92ccfb',
+    ),
+    '12-confirmed-generation-dedupe': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_confirmed_remember_slide_is_not_a_second_renewal_generation[domain-copy]',
+        '2c7b9b307c5556414a474c9733b005c7371c9009b18542b4d473ec11db92ccfb',
+    ),
+    '14-confirmed-snapshot-capture': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[maintenance]',
+        '7289bed8e0b4ac8f806f1298ed88c4a02b2e84dabc4b275cfaabb1c9544ef79f',
+    ),
+    '15-confirmed-stop-handoff': (
+        'tests/systemic/test_exit_checkpoint.py::test_fast_exit_checkpoint_control[after:fetch_energy_data::stop::no-renewal::MM_RememberMe]',
+        '539dabcb17a8e9f4f7c5276db9282f67c42bdc73c88567f3512d3b1ff32a69f7',
+    ),
+    '16-confirmed-snapshot-not-live-jar': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_handoff_refuses_unvalidated_or_partial_live_jar[immutable]',
+        'e51368acecc22a87f301af351e6840c7c156abb31aa05a9ac775fbdc6de03200',
+    ),
+    '17-confirmed-stale-owner-guard': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_old_checkpoint_cannot_overwrite_human_successor',
+        '3d94a0ea9564b02c2291fb770569ed79fcee2400f9fd5356f91bff4504ae52ee',
+    ),
+    '18-confirmed-partial-jar-guard': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_handoff_refuses_unvalidated_or_partial_live_jar[partial]',
+        'e51368acecc22a87f301af351e6840c7c156abb31aa05a9ac775fbdc6de03200',
+    ),
+    '19-settled-spent-is-exhausted': (
+        'tests/systemic/test_policy_properties.py::test_literal_spacing_and_rollback[1-False-899-exhausted]',
+        '31f2868d3744aa41a5073dcde331564e4b327e4f2b9c4968db05d00d03eba152',
+    ),
+    '2-independent-policy-handoff': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_failed_first_setup_preserves_spent_terminal_admission',
+        '48ca31d7fed4f5d4ec5c865cef965f3a33f8d7574a81758459641a7655e047f2',
+    ),
+    '20-durable-challenge-admission': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_login_json_security_step_is_latched_and_durable',
+        '2a3f310576998506b12649151058831df4c8f4296ca8c75d59b1a3d1a8ca1569',
+    ),
+    '21-durable-challenge-no-background-http': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_login_json_security_step_is_latched_and_durable',
+        '2a3f310576998506b12649151058831df4c8f4296ca8c75d59b1a3d1a8ca1569',
+    ),
+    '22-exhausted-no-password-fallback': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_loaded_admission_has_the_correct_public_outcome[exhausted]',
+        '3113b6d3d4c3aaf73f116df63815a3219c2712bbfa34ab2ed9986f84909c188f',
+    ),
+    '23-optional-hourly-jar-quarantine': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-empty]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '24-optional-hourly-stage-rollback': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_hourly_stage_cookie_is_rolled_back_when_data_fails',
+        'ab21d032e3ce250a5f59f140a21fae40082c49a952df85970ea6ace31e3d8e84',
+    ),
+    '25-persist-confirmed-cookies-guard': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_handoff_refuses_unvalidated_or_partial_live_jar[unconfirmed]',
+        'e51368acecc22a87f301af351e6840c7c156abb31aa05a9ac775fbdc6de03200',
+    ),
+    '26-active-owner-dispatch-guard': (
+        'tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_first_poll_unload]',
+        '8e0f3604c603f8fbaf7224d4a12cadce059601df2edec5248cccf2c75b7c1c6e',
+    ),
+    '27-remember-me-inflight-owner-guard': (
+        'tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_remember_me_proof_unload]',
+        '8e0f3604c603f8fbaf7224d4a12cadce059601df2edec5248cccf2c75b7c1c6e',
+    ),
+    '28-login-form-entry-owner-guard': (
+        'tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_login_form_entry_unload]',
+        '8e0f3604c603f8fbaf7224d4a12cadce059601df2edec5248cccf2c75b7c1c6e',
+    ),
+    '29-login-post-owner-guard': (
+        'tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_login_post_unload]',
+        '8e0f3604c603f8fbaf7224d4a12cadce059601df2edec5248cccf2c75b7c1c6e',
+    ),
+    '3-poll-identity-proof': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_renewal_requires_known_daily_proof_before_publication',
+        'c7a903e3e95ea9572a0108ef1f7f7dd6ca3c345d0bf9f689cfb808375797c1ff',
+    ),
+    '30-sso-entry-owner-guard': (
+        'tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_redirect_boundary_reload]',
+        '8e0f3604c603f8fbaf7224d4a12cadce059601df2edec5248cccf2c75b7c1c6e',
+    ),
+    '31-sso-post-owner-guard': (
+        'tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_sso_post_unload]',
+        '8e0f3604c603f8fbaf7224d4a12cadce059601df2edec5248cccf2c75b7c1c6e',
+    ),
+    '32-structural-session-send-owner-guard': (
+        'tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_stage_transition_handoff]',
+        '8e0f3604c603f8fbaf7224d4a12cadce059601df2edec5248cccf2c75b7c1c6e',
+    ),
+    '33-post-renewal-failed-dashboard-leg-restore': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[maintenance]',
+        '7289bed8e0b4ac8f806f1298ed88c4a02b2e84dabc4b275cfaabb1c9544ef79f',
+    ),
+    '34-post-renewal-missing-token-leg-restore': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[notoken]',
+        '7289bed8e0b4ac8f806f1298ed88c4a02b2e84dabc4b275cfaabb1c9544ef79f',
+    ),
+    '35-post-renewal-exception-leg-restore': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[503]',
+        '7289bed8e0b4ac8f806f1298ed88c4a02b2e84dabc4b275cfaabb1c9544ef79f',
+    ),
+    '36-hourly-records-validation-before-confirm': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-empty]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '37-hourly-root-dict-validation': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[hourly-root]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '38-latest-confirmed-checkpoint-publish': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_checkpoint_ack_cannot_clear_a_newer_publication',
+        'dd497ec423f506b14d7bfdf1e541c83ce4129c8ad6a6e943af190ee78630cbc4',
+    ),
+    '39-daily-validation-before-confirm': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-empty]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '4-post-await-retirement': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_retired_keepalive_cannot_dismiss_successor_issue_after_export_await',
+        '0160de1b9d9a200eb5f0fe6ec398fee9c1a7ec34bac0b66a0a262b053a0cd990',
+    ),
+    '40-history-chunk-acceptance-checkpoint': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_valid_history_chunk_publishes_immutable_checkpoint',
+        '41e59e02fc7c3043c4a7dd7dbd64648e2d1ce2c6a8bab98a030fc4da93a3a996',
+    ),
+    '41-history-gap-abort-rollback': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[backfill-null]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '42-own-save-owner-predicate': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_owner_stays_active_inside_own_physical_assignment',
+        '63aaac2a7dd869c837e5b65c3cd88ceaf4332f8dceb7dbd503b2b9b629d61af1',
+    ),
+    '43-atomic-checkpoint-compare-clear': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_checkpoint_ack_cannot_clear_a_newer_publication',
+        'dd497ec423f506b14d7bfdf1e541c83ce4129c8ad6a6e943af190ee78630cbc4',
+    ),
+    '44-nested-series-and-ajax-shape-guard': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[backfill-nested]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '45-per-record-contributor-provenance': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-foreign]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '46-rejected-daily-quarantines-result': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_rejected_daily_result_contains_no_foreign_readings',
+        '3f4c7b61e6ee18817252568c2abf006718cd421d29cd60737404273bb54b8120',
+    ),
+    '47-handoff-finally-baseline-reconcile': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_handoff_callback_fault_preserves_physical_owner[after]',
+        '2416f505b83327f96cbd32d5a7fabd63ed02a0487ac5a221976cbe38c71497af',
+    ),
+    '48-history-chart-envelope-guard': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[backfill-ajax]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '49-live-chart-envelope-guard': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-ajax]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '5-pre-probe-confirmed-jar': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_failed_renewal_preserves_preprobe_jar_and_spent_budget',
+        '7d7dc184ab65b4b04410a9ddf13b577486a1839bb13d6580d10866c8c6b2949b',
+    ),
+    '51-human-label-identity-only': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_fresh_human_cookie_flow_has_its_own_account_proof[label-only]',
+        '1b1399fcaed78f3df5490c58d19bff2069304bd59ffaa390d5cf2bbb78e29814',
+    ),
+    '52-rejected-daily-typed-failure': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-empty]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '53-daily-hourly-contributor-union': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_daily_successor_is_learned_when_hourly_omits_it',
+        '2bc65eb4e799681b7ab379787ed138ce432949d7b024abc8cd7bcd710de9d8e2',
+    ),
+    '54-non-meter-series-skip-order': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-telemetry]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '56-anomaly-withholds-cookie-confirmation': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_focused_chart_response_contract[daily-telemetry]',
+        'f9c9e57e618caaf06577d25eedf370d0dc17cfab9fd9985102a2c6e27c526292',
+    ),
+    '57-renewal-proof-anomaly-restore': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_renewal_anomalous_proof_never_adopts_response_cookies',
+        'ed116b72280641985d0afa994a0c744530ebb24407a35fe29ce6be2a31089c20',
+    ),
+    '6-present-corrupt-refusal': (
+        'tests/systemic/test_policy_properties.py::test_literal_metadata_table[None-True-uncertain]',
+        '5b8ea4feaac337232bb3d69e4f7db3f0a281aad02a916f74d352eb4de62e2cc0',
+    ),
+    '7-transient-only-retry': (
+        'tests/systemic/test_policy_properties.py::test_literal_spacing_and_rollback[1-False-899-exhausted]',
+        '31f2868d3744aa41a5073dcde331564e4b327e4f2b9c4968db05d00d03eba152',
+    ),
+    '8-post-renewal-verified-keep': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[maintenance]',
+        '7289bed8e0b4ac8f806f1298ed88c4a02b2e84dabc4b275cfaabb1c9544ef79f',
+    ),
+    '9-post-renewal-token-keep': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_postrenewal_dashboard_failure_keeps_verified_checkpoint[notoken]',
+        '7289bed8e0b4ac8f806f1298ed88c4a02b2e84dabc4b275cfaabb1c9544ef79f',
+    ),
+    'setup-human-account-proof': (
+        'tests/systemic/test_auth_systemic_catalog.py::test_fresh_human_cookie_flow_has_its_own_account_proof[valid]',
+        '1b1399fcaed78f3df5490c58d19bff2069304bd59ffaa390d5cf2bbb78e29814',
+    ),
+}
+
+P210_FAST_ADDITIONS = {
+    'tests/systemic/test_auth_systemic_catalog.py': (52, 'b13ba3bb7313d28cf549800896cc15d23c7261ed391f6f26b351ecb993a9525f'),
 }
