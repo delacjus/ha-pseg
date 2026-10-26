@@ -45,6 +45,7 @@ _NODE_FILES = (
     "tests/test_node_offline.js",
     "tests/test_captcha_helper.js",
     "tests/test_captcha_extension.js",
+    "tests/test_energy_card.js",
 )
 
 # Scoped statistics-surface baseline; the child never regenerates it.

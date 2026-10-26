@@ -37,6 +37,11 @@ class PsegEnergyCard extends HTMLElement {
 
   constructor() {
     super();
+    // Remove the old account-agnostic cache. Readings now come only from the
+    // configured HA entity, which already restores its last successful data.
+    try {
+      localStorage.removeItem("pseg_last_valid_entity");
+    } catch (_) {}
   }
 
   setConfig(config) {
@@ -161,40 +166,8 @@ class PsegEnergyCard extends HTMLElement {
     if (!this.shadowRoot || !this._hass || !this.config) return;
 
     try {
-      let entity = this._hass.states[this.config.entity];
-      if (!entity) {
-        entity = this._hass.states["sensor.pseg_electricity_consumption"] ||
-                 this._hass.states["sensor.pseg_electricity_yesterday"] || 
-                 this._hass.states["sensor.pseg_smart_energy_meter_electricity_yesterday"];
-      }
-
-      // 1. Cache valid entity attributes if present
-      if (entity && entity.attributes && Array.isArray(entity.attributes.history_14d) && entity.attributes.history_14d.length > 0) {
-        this._cachedEntity = {
-          state: entity.state,
-          attributes: { ...entity.attributes }
-        };
-        try {
-          localStorage.setItem("pseg_last_valid_entity", JSON.stringify(this._cachedEntity));
-        } catch (_) {}
-      }
-
-      // 2. Fall back to cached entity if live entity is unavailable, unknown, or missing
+      const entity = this._hass.states[this.config.entity];
       const isUnavailable = !entity || entity.state === "unavailable" || entity.state === "unknown";
-      if (isUnavailable) {
-        if (!this._cachedEntity) {
-          try {
-            const stored = localStorage.getItem("pseg_last_valid_entity");
-            if (stored) this._cachedEntity = JSON.parse(stored);
-          } catch (_) {}
-        }
-        if (this._cachedEntity) {
-          entity = {
-            state: this._cachedEntity.state,
-            attributes: { ...this._cachedEntity.attributes }
-          };
-        }
-      }
 
       if (!entity || !entity.attributes || !entity.attributes.history_14d || entity.attributes.history_14d.length === 0) {
         this.shadowRoot.innerHTML = `
@@ -230,8 +203,8 @@ class PsegEnergyCard extends HTMLElement {
     // Auto-derive effective electric rate from actual entity readings if not explicitly configured
     let autoRate = 0.247;
     const latestKwhVal = parseFloat(entity.attributes.latest_kwh) || parseFloat(entity.state) || 0;
-    const latestCostVal = parseFloat(entity.attributes.latest_cost) || 0;
-    if (latestKwhVal > 0 && latestCostVal > 0) {
+    const latestCostVal = parseFloat(entity.attributes.latest_cost);
+    if (latestKwhVal > 0 && Number.isFinite(latestCostVal) && latestCostVal >= 0) {
       autoRate = parseFloat((latestCostVal / latestKwhVal).toFixed(3));
     }
     const rate = (this.config.cost_per_kwh != null && !isNaN(parseFloat(this.config.cost_per_kwh)))

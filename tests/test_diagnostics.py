@@ -128,11 +128,13 @@ async def test_diagnostics_never_exposes_meter_ids(hass: HomeAssistant) -> None:
 
     client = PsegClient(portal_cookies="MM_SID=session")
     coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
-    coord.data = {
-        "meter": f"Electric Meter {meter}",
-        "meter_ids": [meter, other],
-        "latest_kwh": 12.5,
-    }
+    # Exercise the actual parser shape, including its contributing meter ids.
+    coord.data = client._parse_chart_data({"Data": {"series": [
+        {"name": f"Meter #{meter_id}", "data": [
+            {"y": 12.5, "hs": {"start": "10/20/2026"}}
+        ]}
+        for meter_id in (meter, other)
+    ]}})
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coord
 
     diag = await async_get_config_entry_diagnostics(hass, entry)
@@ -145,6 +147,8 @@ async def test_diagnostics_never_exposes_meter_ids(hass: HomeAssistant) -> None:
     assert diag["entry"]["data"]["known_meter_ids"] == REDACTED
     assert diag["coordinator"]["data"]["meter"] == REDACTED
     assert diag["coordinator"]["data"]["meter_ids"] == REDACTED
+    assert diag["coordinator"]["data"]["contributing_meter_ids"] == REDACTED
+    assert diag["coordinator"]["data"]["latest_kwh"] == 25.0
 
 
 async def test_diagnostics_for_entry_that_is_not_loaded(hass: HomeAssistant) -> None:
