@@ -278,6 +278,19 @@ Entities created for the registered meter account:
 - `sensor.pseg_connection_status`: Connection status with session telemetry attributes
 - `button.pseg_refresh_data`: Button to trigger an immediate portal sync
 
+## HVAC calibration check
+
+Most HVAC energy estimates in Home Assistant multiply runtime by a guessed wattage. `tools/hvac_calibration_check.py` checks that guess against your real hourly grid meter (for example this integration's hourly PSE&G data). It subtracts your other Energy dashboard devices, then measures the watts your system actually draws while heating, cooling or running the fan, and shows what your current estimate assumes.
+
+It is a single read-only Python 3.11+ file with no dependencies; it never changes Home Assistant. Quick start:
+
+```sh
+curl -O https://raw.githubusercontent.com/delacjus/ha-pseg/main/tools/hvac_calibration_check.py
+HA_URL=http://homeassistant.local:8123 python3 hvac_calibration_check.py --hvac-stat sensor.your_hvac_energy
+```
+
+Paste a long-lived access token at the hidden prompt. See the [HVAC calibration guide](docs/hvac-calibration.md) for requirements, reading the results and applying them.
+
 ## Testing
 
 The integration maintains a comprehensive test suite covering authentication lifecycles, parser contracts, hourly statistics invariants, and copy-only mutation testing.
