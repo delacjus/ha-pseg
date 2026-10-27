@@ -192,13 +192,17 @@ def test_probe_wraps_catalog_name_before_and_after() -> None:
         )
         probe = ExitProbe(boundary)
         client = FakeClient()
-        probe.install(client)
-        probe.gate.proceed()
-        assert client.fetch_energy_data(3) == {"days": 3}
-        assert client.calls == [3]
-        assert probe.hits == 1
-        assert probe.gate.hit_count == 1
-        assert probe.armed is False
+        try:
+            probe.install(client)
+            probe.gate.proceed()
+            assert client.fetch_energy_data(3) == {"days": 3}
+            assert client.calls == [3]
+            assert probe.hits == 1
+            assert probe.gate.hit_count == 1
+            assert probe.armed is False
+        finally:
+            # A failed assertion must never leave a worker parked on this gate.
+            probe.gate.proceed()
 
 
 def test_probe_gate_is_one_shot_and_bounded() -> None:
@@ -207,11 +211,14 @@ def test_probe_gate_is_one_shot_and_bounded() -> None:
         entry for entry in EXIT_BOUNDARY_CATALOG if entry.boundary_id == "before:keepalive"
     )
     probe = ExitProbe(boundary)
-    assert probe.blocking is True
-    assert probe.boundary.boundary_id == "before:keepalive"
-    assert probe.gate.name == "exit:before:keepalive"
-    assert probe.gate.default_timeout == 10.0
-    assert probe.armed is True
+    try:
+        assert probe.blocking is True
+        assert probe.boundary.boundary_id == "before:keepalive"
+        assert probe.gate.name == "exit:before:keepalive"
+        assert probe.gate.default_timeout == 10.0
+        assert probe.armed is True
+    finally:
+        probe.gate.proceed()
 
 
 def test_probe_factory_installs_on_every_generation() -> None:
@@ -223,15 +230,18 @@ def test_probe_factory_installs_on_every_generation() -> None:
         entry for entry in EXIT_BOUNDARY_CATALOG if entry.boundary_id == "before:fetch_energy_data"
     )
     probe = ExitProbe(boundary)
-    probe.gate.proceed()
-    factory.probe = probe
-    with factory:
-        first = factory.create_client(cookie_list=[])
-        second = factory.create_client(cookie_list=[])
-        assert first.fetch_energy_data.__name__ == "wrapper"
-        assert second.fetch_energy_data.__name__ == "wrapper"
-        assert first is not second
-    assert first.generation_id != second.generation_id
+    try:
+        probe.gate.proceed()
+        factory.probe = probe
+        with factory:
+            first = factory.create_client(cookie_list=[])
+            second = factory.create_client(cookie_list=[])
+            assert first.fetch_energy_data.__name__ == "wrapper"
+            assert second.fetch_energy_data.__name__ == "wrapper"
+            assert first is not second
+        assert first.generation_id != second.generation_id
+    finally:
+        probe.gate.proceed()
 
 
 def test_case_dataclass_exposes_flow_mapping() -> None:

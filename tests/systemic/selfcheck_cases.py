@@ -574,12 +574,11 @@ async def run_selfcheck_case(
                 journal=snap.journal,
                 timestamp=snap.timestamp,
             )
-            if active:
-                driver.last_automatic_auth_attempted = True
-                oracle.observe_step(driver, "terminal_reload", snap_terminal)
-            else:
-                driver.last_automatic_auth_attempted = False
-                oracle.observe_step(driver, "terminal_reload", snap_terminal)
+            oracle.violations.extend(
+                oracle.evaluate_i8(
+                    snap_terminal, automatic_auth_attempted=active, human_rearmed=False
+                )
+            )
             observed_before = False
 
         elif case_id == "i9_liveness_ownership":

@@ -767,6 +767,11 @@ class ScriptedPortal:
                 elapsed=elapsed,
                 error=None,
                 outcome=reply.reply_id,
+                metadata={
+                    **dict(reply.metadata),
+                    "reply_valid": reply.valid,
+                    "cookie_eligible": reply.cookie_eligible,
+                },
             )
             self._update_dispatch(dispatch, completed_dispatch)
 
