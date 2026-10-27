@@ -90,6 +90,7 @@ def test_cli_fake_and_read_only(monkeypatch, capsys):
             calls.append(("WS", command["type"]))
             if command["type"] == "energy/get_prefs":
                 return {"energy_sources": [{"type": "grid", "stat_energy_from": "grid"}]}
+            assert command["units"] == {"energy": "kWh"}
             return {"grid": [{"start": int((start + dt.timedelta(hours=i)).timestamp() * 1000), "change": .18} for i in range(3)]}
     monkeypatch.setenv("HA_TOKEN", "secret-token")
     assert hvac.main(["--start", start.isoformat(), "--end", (start + dt.timedelta(hours=3)).isoformat(), "--json"], Fake) == 0
@@ -103,3 +104,96 @@ def test_cli_fake_and_read_only(monkeypatch, capsys):
         hvac.Client("http://localhost", "secret-token").ws({"type": "anything_else"})
     with pytest.raises(ValueError):
         hvac.Client("http://localhost", "secret-token").get("/api/services")
+
+
+def test_threshold_rechecked_after_mixed_hour_dropped():
+    rows = synthetic_rows()[:5]
+    for row, cool, fan in zip(rows, [1, 1, .5, 0, 0], [.001, 0, 0, 0, 0]):
+        row["hours"].update(cool=cool, fan=fan, heat=0)
+    fit = hvac.fit_rows(rows, 2)
+    assert "cool" not in fit["modes"]
+    assert fit["dropped"] == 3
+
+
+def test_socket_fragment_extended_length_and_ping():
+    class Socket:
+        def __init__(self):
+            self.data = bytearray(b'\x01\x7e\x00\x82' + b'{"value":"' + b'a' * 120 + b'\x89\x02hi\x80\x02"}')
+            self.sent = b""
+        def recv(self, size):
+            result = self.data[:size]
+            del self.data[:size]
+            return bytes(result)
+        def sendall(self, data):
+            self.sent = data
+    sock = Socket()
+    assert hvac.Client._receive(sock) == {"value": "a" * 120}
+    assert sock.sent[:2] == b"\x8a\x82"
+    assert bytes(b ^ sock.sent[2 + i % 4] for i, b in enumerate(sock.sent[6:])) == b"hi"
+
+
+def test_connection_failure_hides_token(monkeypatch, capsys):
+    class Fake:
+        def __init__(self, url, token):
+            raise OSError("secret-token")
+    monkeypatch.setenv("HA_TOKEN", "secret-token")
+    assert hvac.main([], Fake) == 2
+    output = capsys.readouterr()
+    assert "secret-token" not in output.out + output.err
+    assert "Connection, authentication, or data error" in output.err
+
+
+def test_cli_hvac_stat_and_no_devices(monkeypatch, capsys):
+    start = hvac.parse_time("2026-01-01T00:00:00Z")
+    commands = []
+    class Fake:
+        def __init__(self, url, token):
+            pass
+        def get(self, path):
+            if path == "/api/states":
+                return [{"entity_id": "climate.home"}]
+            return [[{"last_changed": (start + dt.timedelta(hours=i)).isoformat(), "state": "on", "attributes": {"hvac_action": action}} for i, action in enumerate(["idle", "heating", "idle", "heating", "idle"])]]
+        def ws(self, command):
+            if command["type"] == "energy/get_prefs":
+                return {"energy_sources": [{"type": "grid", "stat_energy_from": "grid"}], "device_consumption": [{"stat_consumption": "device"}, {"stat_consumption": "hvac"}]}
+            commands.append(command)
+            values = {"grid": [.2, .3, .2, .3, .2], "device": [.02] * 5, "hvac": [0, .5, 0, .5, 0]}
+            return {sid: [{"start": int((start + dt.timedelta(hours=i)).timestamp() * 1000), "change": v} for i, v in enumerate(values[sid])] for sid in command["statistic_ids"]}
+    monkeypatch.setenv("HA_TOKEN", "secret-token")
+    args = ["--start", start.isoformat(), "--end", (start + dt.timedelta(hours=5)).isoformat(), "--hvac-stat", "hvac"]
+    assert hvac.main(args, Fake) == 0
+    assert commands[-1]["statistic_ids"] == ["grid", "device", "hvac"]
+    assert "heat: 100 W" in capsys.readouterr().out
+    assert hvac.main(args + ["--no-devices"], Fake) == 0
+    assert commands[-1]["statistic_ids"] == ["grid", "hvac"]
+    assert "your estimate implies 500 W" in capsys.readouterr().out
+
+
+def test_unreliable_suggestions():
+    fit = {"n": 4, "dropped": 0, "modes": ["cool", "heat"], "totals": {"cool": 2, "heat": 2}, "fit": ([.18, -.1, .1], [.01, .01, .06], .5)}
+    output = hvac.format_result([], {}, fit)
+    assert "Suggested values:" not in output
+    assert output.count("no reliable value yet — collect more hours") == 2
+
+
+def test_cli_insufficient_fit(monkeypatch, capsys):
+    start = hvac.parse_time("2026-01-01T00:00:00Z")
+    class Fake:
+        action = "heating"
+        def __init__(self, url, token):
+            pass
+        def get(self, path):
+            if path == "/api/states":
+                return [{"entity_id": "climate.home"}]
+            return [[{"last_changed": start.isoformat(), "state": "on", "attributes": {"hvac_action": self.action}}]]
+        def ws(self, command):
+            if command["type"] == "energy/get_prefs":
+                return {"energy_sources": [{"type": "grid", "stat_energy_from": "grid"}]}
+            return {"grid": [{"start": int(start.timestamp() * 1000), "change": .3}]}
+    monkeypatch.setenv("HA_TOKEN", "secret-token")
+    args = ["--start", start.isoformat(), "--end", (start + dt.timedelta(hours=1)).isoformat()]
+    assert hvac.main(args + ["--min-hours", "1"], Fake) == 1
+    assert "not enough varied data" in capsys.readouterr().out
+    Fake.action = "idle"
+    assert hvac.main(args + ["--json"], Fake) == 1
+    assert json.loads(capsys.readouterr().out)["error"] == "not enough varied data"

@@ -124,7 +124,12 @@ def least_squares(x, y):
 def fit_rows(rows, min_hours, with_estimate=False):
     totals = {m: sum(r["hours"][m] for r in rows) for m in MODES}
     modes = [m for m in MODES if totals[m] >= min_hours and totals[m] > 0]
-    kept = [r for r in rows if not any(r["hours"][m] > 1 / 60 for m in MODES if m not in modes)]
+    while True:
+        kept = [r for r in rows if not any(r["hours"][m] > 0 for m in MODES if m not in modes)]
+        eligible = [m for m in modes if sum(r["hours"][m] for r in kept) >= min_hours and sum(r["hours"][m] for r in kept) > 0]
+        if eligible == modes:
+            break
+        modes = eligible
     result = {"totals": totals, "modes": modes, "dropped": len(rows) - len(kept), "n": len(kept)}
     if not kept:
         result["fit"] = None
@@ -157,7 +162,10 @@ def format_result(rows, skips, fit, show_hours=False):
                 msg += " — warning: negative or uncertain result"
             lines.append(msg)
         for i, mode in enumerate(fit["modes"], 1):
-            lines.append(f"Suggested values: {mode} {coef[i] * 1000:.0f} W")
+            if coef[i] >= 0 and se[i] is not None and se[i] <= coef[i] * 0.5:
+                lines.append(f"Suggested values: {mode} {coef[i] * 1000:.0f} W")
+            else:
+                lines.append(f"{mode}: no reliable value yet — collect more hours")
     lines.append("History recorded before a change keeps its old values.")
     return "\n".join(lines)
 
@@ -285,7 +293,7 @@ def main(argv=None, client_factory=Client):
         if not grids:
             raise ValueError("No grid import statistic found; specify --grid-stat")
         ids = list(dict.fromkeys(grids + devices + ([args.hvac_stat] if args.hvac_stat else [])))
-        raw = client.ws({"type": "recorder/statistics_during_period", "start_time": start.isoformat(), "end_time": end.isoformat(), "statistic_ids": ids, "period": "hour", "types": ["change"]})
+        raw = client.ws({"type": "recorder/statistics_during_period", "start_time": start.isoformat(), "end_time": end.isoformat(), "statistic_ids": ids, "period": "hour", "types": ["change"], "units": {"energy": "kWh"}})
         stats = {sid: {int(p["start"] / 1000): p["change"] for p in points if p.get("change") is not None} for sid, points in raw.items()}
         path = "/api/history/period/" + urllib.parse.quote(start.isoformat(), safe="") + "?" + urllib.parse.urlencode({"filter_entity_id": climate, "end_time": end.isoformat()})
         history = client.get(path)
@@ -297,6 +305,10 @@ def main(argv=None, client_factory=Client):
         fit = fit_rows(rows, args.min_hours, bool(args.hvac_stat))
         if not fit["n"]:
             print(json.dumps({"error": "No usable hours after filtering", "skips": skips, "result": fit}) if args.json else "No usable hours after filtering under-threshold modes.")
+            return 1
+        if fit["fit"] is None or any(error is None for error in fit["fit"][1]):
+            message = "not enough varied data"
+            print(json.dumps({"error": message, "skips": skips, "result": fit}) if args.json else message)
             return 1
         print(json.dumps({"rows": rows if args.hours else [], "skips": skips, "result": fit}) if args.json else format_result(rows, skips, fit, args.hours))
         return 0

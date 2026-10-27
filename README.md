@@ -278,6 +278,10 @@ Entities created for the registered meter account:
 - `sensor.pseg_connection_status`: Connection status with session telemetry attributes
 - `button.pseg_refresh_data`: Button to trigger an immediate portal sync
 
+## HVAC calibration check
+
+Compare an HVAC energy estimate with your hourly grid meter using the read-only [HVAC calibration check](docs/hvac-calibration.md).
+
 ## Testing
 
 The integration maintains a comprehensive test suite covering authentication lifecycles, parser contracts, hourly statistics invariants, and copy-only mutation testing.
@@ -295,7 +299,3 @@ For complete testing details, see [Testing Documentation](docs/testing.md).
 ## License
 
 MIT
-
-## HVAC calibration check
-
-Compare an HVAC energy estimate with your hourly grid meter using the read-only [HVAC calibration check](docs/hvac-calibration.md).
