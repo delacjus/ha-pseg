@@ -827,19 +827,22 @@ async def run_exit_case(
             register_scripted_eligibility(oracle, portal)
             setup_task = asyncio.ensure_future(current.setup())
             try:
-                await hass.async_add_executor_job(probe.gate.wait_arrived, 5.0)
-            except TimeoutError:
-                setup_task.cancel()
-                await asyncio.gather(setup_task, return_exceptions=True)
-                raise AssertionError(
-                    f"{case.case_id}: exit boundary '{case.boundary.boundary_id}' was "
-                    f"never reached during setup"
-                ) from None
-            gate_expected = _expectation_at_boundary(
-                current, case, checkpoint_b, exit_jar, sequence=3
-            )
-            probe.gate.proceed()
-            result = await asyncio.gather(setup_task, return_exceptions=True)
+                try:
+                    await hass.async_add_executor_job(probe.gate.wait_arrived, 5.0)
+                except TimeoutError:
+                    setup_task.cancel()
+                    raise AssertionError(
+                        f"{case.case_id}: exit boundary '{case.boundary.boundary_id}' was "
+                        f"never reached during setup"
+                    ) from None
+                gate_expected = _expectation_at_boundary(
+                    current, case, checkpoint_b, exit_jar, sequence=3
+                )
+            finally:
+                probe.gate.proceed()
+                result = await asyncio.wait_for(
+                    asyncio.gather(setup_task, return_exceptions=True), timeout=20
+                )
             await hass.async_block_till_done()
             assert result[0] is False, (
                 f"{case.case_id}: the scripted setup failure unexpectedly succeeded"
@@ -889,30 +892,33 @@ async def run_exit_case(
                 probe.install(current.client)
                 task = asyncio.ensure_future(_start_operation(current, operation))
                 try:
-                    await hass.async_add_executor_job(probe.gate.wait_arrived, 5.0)
-                except TimeoutError:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                    raise AssertionError(
-                        f"{case.case_id}: exit boundary '{case.boundary.boundary_id}' was "
-                        f"never reached during {operation}"
-                    ) from None
-                expected = _expectation_at_boundary(
-                    current, case, checkpoint_b, exit_jar, sequence=3
-                )
-                if transition == "cancel":
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
-                elif transition == "unload":
-                    assert await current.unload() is True
-                elif transition == "stop":
-                    await current.stop()
-                await hass.async_block_till_done()
-                await _assert_persisted_pair(current, oracle, case, expected)
-                if transition == "stop":
-                    assert await current.unload() is True
-                probe.gate.proceed()
-                await asyncio.gather(task, return_exceptions=True)
+                    try:
+                        await hass.async_add_executor_job(probe.gate.wait_arrived, 5.0)
+                    except TimeoutError:
+                        task.cancel()
+                        raise AssertionError(
+                            f"{case.case_id}: exit boundary '{case.boundary.boundary_id}' was "
+                            f"never reached during {operation}"
+                        ) from None
+                    expected = _expectation_at_boundary(
+                        current, case, checkpoint_b, exit_jar, sequence=3
+                    )
+                    if transition == "cancel":
+                        task.cancel()
+                        await asyncio.wait_for(
+                            asyncio.gather(task, return_exceptions=True), timeout=20
+                        )
+                    elif transition == "unload":
+                        assert await current.unload() is True
+                    elif transition == "stop":
+                        await current.stop()
+                    await hass.async_block_till_done()
+                    await _assert_persisted_pair(current, oracle, case, expected)
+                    if transition == "stop":
+                        assert await current.unload() is True
+                finally:
+                    probe.gate.proceed()
+                    await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=20)
                 await hass.async_add_executor_job(probe.finished.wait, 10.0)
                 assert probe.finished.is_set(), (
                     f"{case.case_id}: the released exit operation did not finish at "

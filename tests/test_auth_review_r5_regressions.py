@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from http.client import HTTPMessage
 import json
 import threading
-import time
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -48,6 +47,7 @@ from custom_components.pseg.pseg_client import (
     _MeterRecord,
 )
 from custom_components.pseg.renewal_admission import rearm_entry_admission
+from tests.support.synchronization import wait_event, wait_task
 
 
 @pytest.fixture(autouse=True)
@@ -1037,6 +1037,15 @@ async def test_owner_predicate_true_during_own_write_and_false_on_foreign_replac
     """F3: Own cookie write does not retire the coordinator; foreign human write still retires."""
     portal = R6StagePortal()
     client, entry, coord = _r6_build(hass, portal)
+    renewal_finished = threading.Event()
+    task = None
+
+    def keepalive_during_write():
+        try:
+            return client.keepalive()
+        finally:
+            renewal_finished.set()
+
     try:
         await coord._async_update_data()
         portal.dash.extend(
@@ -1050,7 +1059,7 @@ async def test_owner_predicate_true_during_own_write_and_false_on_foreign_replac
             ]
         )
         portal.gate_path = "/Dashboard"
-        task = hass.async_add_executor_job(client.keepalive)
+        task = hass.async_add_executor_job(keepalive_during_write)
         assert await hass.async_add_executor_job(portal.entered.wait, 3)
         seen: list[bool] = []
         original = hass.config_entries.async_update_entry
@@ -1060,7 +1069,7 @@ async def test_owner_predicate_true_during_own_write_and_false_on_foreign_replac
             if "cookies" in (kwargs.get("data") or {}):
                 seen.append(coord._renewal_runtime.is_active(coord._renewal_token))
                 portal.release.set()
-                time.sleep(0.15)
+                wait_event(renewal_finished, "keepalive completion during own cookie write")
             return res
 
         hass.config_entries.async_update_entry = spy  # type: ignore[method-assign]
@@ -1077,7 +1086,7 @@ async def test_owner_predicate_true_during_own_write_and_false_on_foreign_replac
             coord._write_cookie_handoff(changed, frozenset({"MM_SID"}))
         finally:
             hass.config_entries.async_update_entry = original  # type: ignore[method-assign]
-        outcome = await task
+        outcome = await wait_task(task, "own-write keepalive result")
         assert seen and all(seen), seen
         assert outcome is True
         assert client._renewal_admission.blocked_reason(datetime.now(UTC)) != "exhausted"
@@ -1099,6 +1108,8 @@ async def test_owner_predicate_true_during_own_write_and_false_on_foreign_replac
         assert not coord._renewal_runtime.is_active(coord._renewal_token)
     finally:
         portal.release.set()
+        if task is not None:
+            await wait_task(task, "own-write keepalive cleanup")
         coord.stop_keepalive()
         abort_flows(hass)
 

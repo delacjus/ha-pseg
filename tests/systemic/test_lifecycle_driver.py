@@ -100,6 +100,12 @@ def _create_test_entry(
     return entry
 
 
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations(recorder_mock: Any, enable_custom_integrations: Any) -> Any:
+    """Create the recorder before hass so snapshots read real physical series."""
+    yield
+
+
 async def test_poll_without_coordinator_raises_runtime_error(
     hass: HomeAssistant,
 ) -> None:

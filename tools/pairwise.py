@@ -114,7 +114,418 @@ MANDATORY_FAST: tuple[dict[str, Any], ...] = (
         "family": "ha",
         "note": "last leg of the call: only the follow-on shows a persisted poison",
     },
+    {
+        "id": "mandatory:login-form-get-is-the-real-get",
+        "stage": "login_form_get",
+        "kind": "500",
+        "cookie": "none",
+        "position": "pre_proof",
+        "flow": "L",
+        "event": "poll",
+        "family": "client",
+        "note": "the login form stage answers the real GET / token read, not POST /Home/Login",
+    },
+    {
+        "id": "mandatory:sso-keepalive-acs-relay",
+        "stage": "saml_acs",
+        "kind": "500",
+        "cookie": "none",
+        "position": "pre_proof",
+        "flow": "S",
+        "event": "keepalive",
+        "family": "client",
+        "note": "SSO keepalive really posts ACS (SignIn -> ACS -> Dashboard); the failed relay reply is consumed and quarantined",
+    },
 )
+
+#: Reviewed fast-tier rows the greedy reselection must never drop.
+#:
+#: The B3 login-stage relabel re-ran tier assignment; without these pins it dropped
+#: unrelated former fast rows (F3, review-r1 2026-10-27) and demoted the reviewed fast
+#: set to a fresh greedy sample. Pins are tier-only: they add no pair requirement and
+#: every entry is a valid declared tuple. ``mandatory:*`` rows above stay the named
+#: finding proofs; these rows are the historical/reviewed fast membership.
+PRESERVED_FAST: tuple[dict[str, Any], ...] = (
+    {
+        "id": "daily_chart_data::maintenance::none::post_proof::S::setup::ha",
+        "stage": "daily_chart_data",
+        "kind": "maintenance",
+        "cookie": "none",
+        "position": "post_proof",
+        "flow": "S",
+        "event": "setup",
+        "family": "ha",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "daily_chart_data::missing_token::aux::post_proof::R::setup::ha",
+        "stage": "daily_chart_data",
+        "kind": "missing_token",
+        "cookie": "aux",
+        "position": "post_proof",
+        "flow": "R",
+        "event": "setup",
+        "family": "ha",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "daily_chart_data::root_number::remember_me::post_proof::H::poll::client",
+        "stage": "daily_chart_data",
+        "kind": "root_number",
+        "cookie": "remember_me",
+        "position": "post_proof",
+        "flow": "H",
+        "event": "poll",
+        "family": "client",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "dashboard_verify_token::403::aux::post_proof::L::keepalive::ha",
+        "stage": "dashboard_verify_token",
+        "kind": "403",
+        "cookie": "aux",
+        "position": "post_proof",
+        "flow": "L",
+        "event": "keepalive",
+        "family": "ha",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "dashboard_verify_token::429::none::pre_proof::H::backfill::ha",
+        "stage": "dashboard_verify_token",
+        "kind": "429",
+        "cookie": "none",
+        "position": "pre_proof",
+        "flow": "H",
+        "event": "backfill",
+        "family": "ha",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "dashboard_verify_token::all_invalid::remember_me::pre_proof::R::setup::ha",
+        "stage": "dashboard_verify_token",
+        "kind": "all_invalid",
+        "cookie": "remember_me",
+        "position": "pre_proof",
+        "flow": "R",
+        "event": "setup",
+        "family": "ha",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "dashboard_verify_token::empty::aux::pre_proof::L::poll::client",
+        "stage": "dashboard_verify_token",
+        "kind": "empty",
+        "cookie": "aux",
+        "position": "pre_proof",
+        "flow": "L",
+        "event": "poll",
+        "family": "client",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "history_chunk::root_null::remember_me::post_proof::L::backfill::client",
+        "stage": "history_chunk",
+        "kind": "root_null",
+        "cookie": "remember_me",
+        "position": "post_proof",
+        "flow": "L",
+        "event": "backfill",
+        "family": "client",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "history_chunk::truncated_json::sid::post_proof::R::backfill::client",
+        "stage": "history_chunk",
+        "kind": "truncated_json",
+        "cookie": "sid",
+        "position": "post_proof",
+        "flow": "R",
+        "event": "backfill",
+        "family": "client",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "history_chunk::unrelated::aux::post_proof::S::backfill::ha",
+        "stage": "history_chunk",
+        "kind": "unrelated",
+        "cookie": "aux",
+        "position": "post_proof",
+        "flow": "S",
+        "event": "backfill",
+        "family": "ha",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "hourly_chart::302_login::none::post_proof::R::setup::ha",
+        "stage": "hourly_chart",
+        "kind": "302_login",
+        "cookie": "none",
+        "position": "post_proof",
+        "flow": "R",
+        "event": "setup",
+        "family": "ha",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "hourly_chart::404::aux::optional::H::setup::client",
+        "stage": "hourly_chart",
+        "kind": "404",
+        "cookie": "aux",
+        "position": "optional",
+        "flow": "H",
+        "event": "setup",
+        "family": "client",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "hourly_chart_data::root_array::remember_me::optional::R::poll::client",
+        "stage": "hourly_chart_data",
+        "kind": "root_array",
+        "cookie": "remember_me",
+        "position": "optional",
+        "flow": "R",
+        "event": "poll",
+        "family": "client",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "hourly_chart_data::root_string::none::post_proof::S::setup::client",
+        "stage": "hourly_chart_data",
+        "kind": "root_string",
+        "cookie": "none",
+        "position": "post_proof",
+        "flow": "S",
+        "event": "setup",
+        "family": "client",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "login_form_get::connection_error::remember_me::pre_proof::L::poll::ha",
+        "stage": "login_form_get",
+        "kind": "connection_error",
+        "cookie": "remember_me",
+        "position": "pre_proof",
+        "flow": "L",
+        "event": "poll",
+        "family": "ha",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "saml_acs::timeout::aux::pre_proof::S::poll::ha",
+        "stage": "saml_acs",
+        "kind": "timeout",
+        "cookie": "aux",
+        "position": "pre_proof",
+        "flow": "S",
+        "event": "poll",
+        "family": "ha",
+        "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+    },
+    {
+        "id": "daily_chart_data::connection_error::sid::post_proof::R::setup::client",
+        "stage": "daily_chart_data",
+        "kind": "connection_error",
+        "cookie": "sid",
+        "position": "post_proof",
+        "flow": "R",
+        "event": "setup",
+        "family": "client",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "daily_chart_data::missing_token::none::post_proof::H::poll::ha",
+        "stage": "daily_chart_data",
+        "kind": "missing_token",
+        "cookie": "none",
+        "position": "post_proof",
+        "flow": "H",
+        "event": "poll",
+        "family": "ha",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "daily_chart_data::root_string::remember_me::post_proof::L::setup::client",
+        "stage": "daily_chart_data",
+        "kind": "root_string",
+        "cookie": "remember_me",
+        "position": "post_proof",
+        "flow": "L",
+        "event": "setup",
+        "family": "client",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "daily_chart_data::unrelated::aux::post_proof::S::setup::ha",
+        "stage": "daily_chart_data",
+        "kind": "unrelated",
+        "cookie": "aux",
+        "position": "post_proof",
+        "flow": "S",
+        "event": "setup",
+        "family": "ha",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "dashboard_verify_token::403::sid::post_proof::S::keepalive::ha",
+        "stage": "dashboard_verify_token",
+        "kind": "403",
+        "cookie": "sid",
+        "position": "post_proof",
+        "flow": "S",
+        "event": "keepalive",
+        "family": "ha",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "dashboard_verify_token::429::remember_me::pre_proof::R::backfill::ha",
+        "stage": "dashboard_verify_token",
+        "kind": "429",
+        "cookie": "remember_me",
+        "position": "pre_proof",
+        "flow": "R",
+        "event": "backfill",
+        "family": "ha",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "dashboard_verify_token::empty::none::pre_proof::H::backfill::ha",
+        "stage": "dashboard_verify_token",
+        "kind": "empty",
+        "cookie": "none",
+        "position": "pre_proof",
+        "flow": "H",
+        "event": "backfill",
+        "family": "ha",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "dashboard_verify_token::maintenance::aux::pre_proof::L::setup::client",
+        "stage": "dashboard_verify_token",
+        "kind": "maintenance",
+        "cookie": "aux",
+        "position": "pre_proof",
+        "flow": "L",
+        "event": "setup",
+        "family": "client",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "history_chunk::302_login::none::post_proof::R::poll::ha",
+        "stage": "history_chunk",
+        "kind": "302_login",
+        "cookie": "none",
+        "position": "post_proof",
+        "flow": "R",
+        "event": "poll",
+        "family": "ha",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "history_chunk::all_invalid::sid::post_proof::L::backfill::client",
+        "stage": "history_chunk",
+        "kind": "all_invalid",
+        "cookie": "sid",
+        "position": "post_proof",
+        "flow": "L",
+        "event": "backfill",
+        "family": "client",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "history_chunk::root_null::aux::post_proof::S::backfill::ha",
+        "stage": "history_chunk",
+        "kind": "root_null",
+        "cookie": "aux",
+        "position": "post_proof",
+        "flow": "S",
+        "event": "backfill",
+        "family": "ha",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "history_chunk::root_number::remember_me::post_proof::H::backfill::client",
+        "stage": "history_chunk",
+        "kind": "root_number",
+        "cookie": "remember_me",
+        "position": "post_proof",
+        "flow": "H",
+        "event": "backfill",
+        "family": "client",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "hourly_chart::timeout::aux::optional::H::setup::ha",
+        "stage": "hourly_chart",
+        "kind": "timeout",
+        "cookie": "aux",
+        "position": "optional",
+        "flow": "H",
+        "event": "setup",
+        "family": "ha",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "hourly_chart_data::404::remember_me::optional::R::poll::client",
+        "stage": "hourly_chart_data",
+        "kind": "404",
+        "cookie": "remember_me",
+        "position": "optional",
+        "flow": "R",
+        "event": "poll",
+        "family": "client",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "hourly_chart_data::root_array::none::optional::S::setup::client",
+        "stage": "hourly_chart_data",
+        "kind": "root_array",
+        "cookie": "none",
+        "position": "optional",
+        "flow": "S",
+        "event": "setup",
+        "family": "client",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "hourly_chart_data::truncated_json::aux::optional::L::setup::ha",
+        "stage": "hourly_chart_data",
+        "kind": "truncated_json",
+        "cookie": "aux",
+        "position": "optional",
+        "flow": "L",
+        "event": "setup",
+        "family": "ha",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "login_post::captcha::none::post_proof::L::poll::ha",
+        "stage": "login_post",
+        "kind": "captcha",
+        "cookie": "none",
+        "position": "post_proof",
+        "flow": "L",
+        "event": "poll",
+        "family": "ha",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+    {
+        "id": "login_post::timeout::sid::pre_proof::L::poll::client",
+        "stage": "login_post",
+        "kind": "timeout",
+        "cookie": "sid",
+        "position": "pre_proof",
+        "flow": "L",
+        "event": "poll",
+        "family": "client",
+        "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+    },
+)
+
+
+def pinned_rows() -> tuple[dict[str, Any], ...]:
+    """Every row generation and checking must keep in the fast tier."""
+    return MANDATORY_FAST + PRESERVED_FAST
 
 
 class ModelError(ValueError):
@@ -329,7 +740,7 @@ def coverage_problems(model: dict[str, Any]) -> list[str]:
     for left, right in missing:
         problems.append(f"missing pair: {left} x {right}")
     unknown_ids = {str(row["id"]) for row in model["rows"]}
-    for mandatory in MANDATORY_FAST:
+    for mandatory in pinned_rows():
         if mandatory["id"] not in unknown_ids:
             problems.append(f"mandatory fast row missing: {mandatory['id']}")
     return problems
@@ -373,7 +784,14 @@ def assign_tiers(
 
 
 def generate_rows(model: dict[str, Any]) -> list[dict[str, Any]]:
-    """Generate a deterministic constrained pairwise covering in stable order."""
+    """Generate a deterministic constrained pairwise covering in stable order.
+
+    ``PRESERVED_FAST`` rows are pre-selected rows: they do not reduce the pair
+    requirement, so adding or refreshing a preserved pin can never change which
+    rows the greedy pass selects (a reviewed slow row is never silently dropped by
+    a tier-only change). ``MANDATORY_FAST`` finding proofs are seeded the same way
+    they always were and do reduce the requirement.
+    """
     axes = [axis for axis in PAIRWISE_AXES if axis in model["axes"]]
     tuples = valid_tuples(model, scope="pairwise")
     pair_cache = {tuple_id(values): pair_keys(values, tuple(axes)) for values in tuples}
@@ -391,6 +809,13 @@ def generate_rows(model: dict[str, Any]) -> list[dict[str, Any]]:
         mandatory.append({**entry, "tier": "fast"})
         mandatory_tuples.add(tuple_id(values))
         requirement -= pair_keys(values)
+    for entry in PRESERVED_FAST:
+        values = {axis: str(entry[axis]) for axis in PAIRWISE_AXES}
+        reason = is_excluded(model, values, "pairwise")
+        if reason is not None:
+            raise ModelError(f"preserved fast row '{entry['id']}' is excluded: {reason}")
+        mandatory.append({**entry, "tier": "fast"})
+        mandatory_tuples.add(tuple_id(values))
 
     ordered = [tuple_id(values) for values in tuples]
     random.Random(model["seed"]).shuffle(ordered)
@@ -416,7 +841,7 @@ def generate_rows(model: dict[str, Any]) -> list[dict[str, Any]]:
     tiers = assign_tiers(
         model,
         [{axis: row[axis] for axis in PAIRWISE_AXES} for row in generated],
-        [{axis: entry[axis] for axis in PAIRWISE_AXES} for entry in MANDATORY_FAST],
+        [{axis: entry[axis] for axis in PAIRWISE_AXES} for entry in pinned_rows()],
     )
     for row, tier in zip(generated, tiers, strict=True):
         row["tier"] = tier
@@ -450,7 +875,7 @@ def check_file(path: str | Path) -> list[str]:
             for values in valid_tuples(model, scope="nightly")
         ):
             problems.append(f"model-only value {token} is missing from the nightly declaration")
-    for mandatory in MANDATORY_FAST:
+    for mandatory in pinned_rows():
         matches = [row for row in model["rows"] if row["id"] == mandatory["id"]]
         if matches and matches[0].get("tier") != "fast":
             problems.append(f"mandatory row '{mandatory['id']}' is not fast")

@@ -63,6 +63,23 @@ def _first_boundary(flow: str, operation: str, boundary_class: BoundaryClass) ->
     raise KeyError(f"{flow}:{operation} has no {boundary_class} boundary")
 
 
+def _stage_boundary(
+    flow: str,
+    operation: str,
+    method: str,
+    path: str,
+    leg: int = 1,
+) -> Boundary:
+    """Return one exact plan boundary by method, path and occurrence (1-based)."""
+    seen = 0
+    for boundary in generated_boundaries(flow)[operation]:
+        if boundary.method == method.upper() and boundary.path == path:
+            seen += 1
+            if seen == leg:
+                return boundary
+    raise KeyError(f"{flow}:{operation} has no {method} {path} #{leg} boundary")
+
+
 def _case(
     case_id: str,
     flow: str,
@@ -85,6 +102,14 @@ def _case(
 #: Mandatory fast representatives: one per boundary class plus the redirect/stage
 #: fence controls the acceptance command repeats ten times.
 FAST_CASES: tuple[FenceCase, ...] = (
+    _case(
+        "fast_setup_chartdata_unload",
+        "L",
+        "setup",
+        _stage_boundary("L", "setup", "GET", "/Dashboard/ChartData"),
+        "unload",
+        "retire the active constructing owner at setup's third request, then unload",
+    ),
     _case(
         "fast_first_poll_unload",
         "L",
@@ -133,6 +158,57 @@ FAST_CASES: tuple[FenceCase, ...] = (
         "cancel",
         "the last leg before persistence is in flight when the refresh is cancelled",
     ),
+    # Own-stage detectors for the per-stage owner guards. Each case parks the
+    # dispatch immediately *before* one guarded stage, retires the owning
+    # generation, and releases. The preserved rows are compound replacements
+    # (stage guard *and* the structural AllowlistedSession.send guard), so these
+    # cases detect the compound row, not the stage guard on its own: rows 28, 29
+    # and 31 guard the same _check_active_owner predicate Session.send already
+    # enforces (same typed exception, zero dispatch), so their stage guard is
+    # redundant defence-in-depth and both layers must be removed; row 27's verify
+    # path also goes through can_dispatch. Row 1 is not detected here: it is
+    # mapped to the catalog's uncertain-admission case, where can_dispatch's
+    # reservation-owner and not-uncertain checks are the only refusal.
+    _case(
+        "fast_remember_me_proof_unload",
+        "R",
+        "auth_renewal",
+        _stage_boundary("R", "auth_renewal", "GET", "/Dashboard", 2),
+        "unload",
+        "the Remember-Me in-flight owner guard refuses the proof read after unload",
+    ),
+    _case(
+        "fast_renewal_proof_read_unload",
+        "R",
+        "auth_renewal",
+        _stage_boundary("R", "auth_renewal", "POST", "/Dashboard/Chart", 1),
+        "unload",
+        "the renewal-owner predicate refuses the proof read after the owner unloads",
+    ),
+    _case(
+        "fast_login_form_entry_unload",
+        "L",
+        "auth_renewal",
+        _first_boundary("L", "auth_renewal", BoundaryClass.REDIRECT),
+        "unload",
+        "the saved-login form entry guard refuses the form GET after unload",
+    ),
+    _case(
+        "fast_login_post_unload",
+        "L",
+        "auth_renewal",
+        _stage_boundary("L", "auth_renewal", "GET", "/", 2),
+        "unload",
+        "the saved-login POST guard refuses the credential POST after unload",
+    ),
+    _case(
+        "fast_sso_post_unload",
+        "S",
+        "auth_renewal",
+        _stage_boundary("S", "auth_renewal", "GET", "/Saml/okta-prod/SignIn", 1),
+        "unload",
+        "the SAML ACS POST guard refuses the credential POST after unload",
+    ),
 )
 
 
@@ -164,7 +240,7 @@ def slow_case_matrix() -> tuple[FenceCase, ...]:
     cases: list[FenceCase] = []
     for flow in FLOWS:
         for index, (operation, boundary) in enumerate(sweepable_boundaries(flow)):
-            transition = slow_transition(flow, index)
+            transition = "unload" if operation == "setup" else slow_transition(flow, index)
             cases.append(
                 FenceCase(
                     case_id=f"slow_{flow}_{operation}_{boundary.method.lower()}"
@@ -183,7 +259,7 @@ def slow_case_matrix() -> tuple[FenceCase, ...]:
 SLOW_CASES: tuple[FenceCase, ...] = slow_case_matrix()
 
 #: Boundaries that are inventoried but cannot be retirement-fenced in flight.
-EXCLUDED_OPERATIONS: tuple[str, ...] = ("setup", "reauth", "reconfigure")
+EXCLUDED_OPERATIONS: tuple[str, ...] = ("reauth", "reconfigure")
 
 
 def inventory_summary() -> dict[str, dict[str, int]]:

@@ -11,11 +11,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 import re
 import threading
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any
+import urllib.parse
 
 from homeassistant.config_entries import ConfigEntryState
 
@@ -108,6 +110,23 @@ def _cookie_name_val(c: Any) -> tuple[str, str]:
 class Oracle:
     """Single invariant evaluator and observer for systemic testing (I1-I12)."""
 
+    #: Declared transient reply statuses for the I7 retry-earned rule.
+    _TRANSIENT_STATUSES = frozenset({408, 425, 429})
+    #: Declared transport failures, read from the observed dispatch outcome name.
+    _TRANSIENT_TRANSPORT_ERRORS = frozenset(
+        {
+            "ChunkedEncodingError",
+            "ConnectTimeout",
+            "ConnectionError",
+            "ReadTimeout",
+            "RequestException",
+            "SSLError",
+            "Timeout",
+        }
+    )
+    #: Authentication request suffixes that I8 treats as an automatic auth attempt.
+    _AUTH_SEND_SUFFIXES = ("/login", "/signin", "/acs")
+
     def __init__(
         self,
         expectation_state: ExpectationState | None = None,
@@ -121,6 +140,13 @@ class Oracle:
         self._caplog: Any | None = None
         self._registry: Any | None = None
         self._last_snapshot: Any | None = None
+        self._renewal_cursors: dict[int, int] = {}
+        self._auth_send_cursors: dict[int, int] = {}
+        # Per driver: Remember-Me generation -> {"sequences", "last_settlement"}.
+        self._renewal_generations: dict[int, dict[tuple[int, str], dict[str, Any]]] = {}
+        self._last_renewal_at: dict[int, float] = {}
+        # Per entry: an observed terminal latch that disk state cannot clear.
+        self._terminal_history: dict[str, dict[str, Any]] = {}
         self._sequence_counter = 0
         self.violations: list[Violation] = []
         self.send_observations: list[Observation] = []
@@ -269,17 +295,8 @@ class Oracle:
                 # I5: Latest checkpoint
                 violations_found.extend(self.evaluate_i5(snap, state))
 
-                # I8: Terminal durability
-                terminal_reason = dict(getattr(snap, "renewal_admission", {})).get(
-                    "terminal_reason"
-                )
-                if terminal_reason:
-                    if getattr(driver, "last_automatic_auth_attempted", False):
-                        violations_found.extend(
-                            self.evaluate_i8(
-                                snap, automatic_auth_attempted=True, human_rearmed=False
-                            )
-                        )
+            if driver is not None:
+                violations_found.extend(self._observe_live_auth(driver, snap))
 
             # I9: HA liveness / ownership
             if driver is not None:
@@ -341,6 +358,12 @@ class Oracle:
                 violations_found.extend(self.evaluate_i11(surfaces_to_scan))
 
             # I12: Statistics isolation
+            if snap is not None and getattr(snap, "recorder_error", None):
+                # Unavailable recorder evidence is an observation failure, never an
+                # empty series that would let a changed row set compare equal.
+                raise AssertionError(
+                    f"INVALID I12: recorder observation unavailable ({snap.recorder_error})"
+                )
             if self._last_snapshot is not None and snap is not None:
                 if step_tag == "failure" or (
                     driver is not None
@@ -810,6 +833,189 @@ class Oracle:
     # -------------------------------------------------------------------------
     # Invariant I7: Budget
     # -------------------------------------------------------------------------
+    @staticmethod
+    def _uncertain_admission(event: Mapping[str, Any]) -> bool:
+        """Validate the send-time persisted admission schema without production code.
+
+        Mirrors the declared durable schema, not the production parser: an absent
+        key is a genuine first run, while a present key that does not validate is
+        corrupt evidence.
+        """
+        if not event["admission_present"]:
+            return False
+        raw = event["admission"]
+        if not isinstance(raw, Mapping) or raw.get("uncertain", False) is not False:
+            return True
+        count, retry = raw.get("sequences"), raw.get("retry_eligible", False)
+        if type(count) is not int or not 0 <= count <= 2 or type(retry) is not bool:
+            return True
+        if retry and count != 1:
+            return True
+        last = raw.get("last_sequence_at")
+        if last is None:
+            return bool(count)
+        try:
+            return not isinstance(last, str) or datetime.fromisoformat(last).utcoffset() is None
+        except ValueError, TypeError:
+            return True
+
+    @classmethod
+    def _send_is_transient(cls, dispatch: Dispatch) -> bool:
+        """Classify one observed dispatch as transient from declared reply evidence."""
+        if dispatch.metadata.get("transient") is True:
+            return True
+        status = dispatch.status_code
+        if status is not None and (status in cls._TRANSIENT_STATUSES or status >= 500):
+            return True
+        outcome = str(dispatch.outcome or "")
+        if outcome == "gated":
+            return True
+        if outcome.startswith("error: "):
+            return outcome.split(": ", 1)[1] in cls._TRANSIENT_TRANSPORT_ERRORS
+        return False
+
+    def _observe_live_auth(self, driver: Any, snapshot: Any = None) -> list[Violation]:
+        """Derive I7 and I8 from the driver's observed attempts and actual sends.
+
+        I7 counts real renewal attempts: one attempt is one observed Remember-Me
+        sequence that actually sent requests, grouped by the Remember-Me generation
+        identity (the MM_RememberMe value the attempt carried) and by human rearm
+        epoch, and spaced by the driver clock. The previous attempt's whole-sequence
+        settlement decides whether a retry was earned: a sequence that ultimately
+        succeeded settles as a success even if an intermediate reply was transient,
+        while a genuinely failed sequence is transient only from declared evidence.
+        Nothing is repaired or fenced, and no production admission/validity predicate
+        is consulted.
+
+        I8 is send-time evidence plus the oracle's own terminal history: a
+        Login/ACS/renewal send performed by an automatic (non-human) caller is
+        flagged while a terminal reason was persisted at send time *or* after the
+        oracle has once observed a terminal latch for that entry. Disk state alone
+        never clears the latch; only a completed human rearm (the driver's human
+        epoch) does. History updates follow each send's own rearm epoch, so a
+        buffered send from before a completed rearm can never re-arm it after the
+        epoch has advanced.
+        """
+        violations: list[Violation] = []
+        key = id(driver)
+        dispatches = {d.sequence: d for d in driver.portal.dispatches}
+        generations = self._renewal_generations.setdefault(key, {})
+
+        events = tuple(driver.renewal_events)
+        for event in events[self._renewal_cursors.get(key, 0) :]:
+            if event["human"]:
+                # A human sign-in rearms the generation; it spends no budget.
+                continue
+            sends = tuple(event["sends"])
+            missing = [sequence for sequence in sends if sequence not in dispatches]
+            if missing:
+                raise AssertionError(
+                    f"INVALID I7: renewal attempt sent dispatch(es) {missing} that the "
+                    "portal did not record"
+                )
+            replies = [dispatches[sequence] for sequence in sends]
+            generation = generations.setdefault(
+                (event["epoch"], event["remember_me"]),
+                {"sequences": 0, "last_settlement": "transient"},
+            )
+            prior_sequences = int(generation["sequences"])
+            prior_settlement = str(generation["last_settlement"])
+            failed = event.get("settlement") != "success"
+            # Whole-sequence settlement, not the worst intermediate reply: an
+            # eventual success earns no later retry without a verified rotation.
+            transient = failed and any(self._send_is_transient(reply) for reply in replies)
+            uncertain = self._uncertain_admission(event)
+            facts = {
+                # It sent while the persisted admission was corrupt: it did not fail closed.
+                "corrupt_metadata": uncertain,
+                "failed_closed": not uncertain,
+                "sequences_count": prior_sequences + 1,
+                "spacing_seconds": (
+                    event["timestamp"] - self._last_renewal_at[key]
+                    if key in self._last_renewal_at
+                    else 900.0
+                ),
+                "is_retry": prior_sequences > 0,
+                "prior_error_transient": prior_settlement == "transient",
+                "sequence_settlement": (
+                    "transient" if transient else ("failed" if failed else "success")
+                ),
+                # A retry is earned only by a transient failure. A settled success
+                # cannot earn one without a verified rotation, which would start a
+                # new generation and reset the count.
+                "rotated_after_success": prior_sequences == 0 or prior_settlement == "transient",
+                "send_sequences": sends,
+                "remember_me": event["remember_me"],
+            }
+            violations.extend(self.evaluate_i7(facts))
+            generation["sequences"] = prior_sequences + 1
+            generation["last_settlement"] = facts["sequence_settlement"]
+            self._last_renewal_at[key] = event["timestamp"]
+        self._renewal_cursors[key] = len(events)
+
+        entry_key = str(getattr(driver.entry, "entry_id", "") or key)
+        epoch = int(getattr(driver, "human_epoch", 0))
+        sends = tuple(driver.auth_sends)
+        cursor = self._auth_send_cursors.get(key, 0)
+        latch = self._terminal_history.get(entry_key)
+        if snapshot is not None:
+            admission = getattr(snapshot, "renewal_admission", None)
+            observed = admission.get("terminal_reason") if isinstance(admission, Mapping) else None
+            if observed:
+                # History only governs sends attempted after this observation; an
+                # earlier send's own send-time evidence still decides on its own.
+                since = int(latch["since"]) if latch is not None else len(sends)
+                latch = {"reason": str(observed), "epoch": epoch, "since": since}
+                self._terminal_history[entry_key] = latch
+
+        for index in range(cursor, len(sends)):
+            send = sends[index]
+            send_epoch = int(send.get("epoch", epoch))
+            if latch is not None and send_epoch > int(latch["epoch"]):
+                # Ordered by dispatch sequence and send-time rearm epoch, not by when
+                # the oracle gets to process the buffer: a send dispatched after a
+                # completed human rearm belongs to the new generation, so the old
+                # latch is spent before this send is judged.
+                del self._terminal_history[entry_key]
+                latch = None
+            send_terminal = send["terminal_reason"]
+            if send_terminal and (latch is None or send_epoch >= int(latch["epoch"])):
+                # Send-time durable evidence also establishes the independent latch,
+                # never in place of a newer latch or observation.
+                latch = {"reason": str(send_terminal), "epoch": send_epoch, "since": index}
+                self._terminal_history[entry_key] = latch
+            if send["human"]:
+                continue
+            terminal_reason = send_terminal
+            if not terminal_reason and latch is not None and index >= int(latch["since"]):
+                terminal_reason = latch["reason"]
+            if not terminal_reason:
+                continue
+            path = urllib.parse.urlparse(send["url"]).path.lower()
+            if not (send["renewal"] or path.endswith(self._AUTH_SEND_SUFFIXES)):
+                continue
+            violations.extend(
+                self.evaluate_i8(
+                    SimpleNamespace(renewal_admission={"terminal_reason": terminal_reason}),
+                    automatic_auth_attempted=True,
+                    human_rearmed=False,
+                    evidence={
+                        "url": send["url"],
+                        "method": send["method"],
+                        "send_sequence": send["sequence"],
+                        "terminal_reason": terminal_reason,
+                        "terminal_from_history": not send_terminal,
+                    },
+                )
+            )
+        self._auth_send_cursors[key] = len(sends)
+
+        if latch is not None and epoch > int(latch["epoch"]):
+            # A completed human rearm is the only thing that clears the latch, and no
+            # send after it needed judging, so retire it now.
+            del self._terminal_history[entry_key]
+        return violations
+
     def evaluate_i7(
         self,
         facts: Mapping[str, Any],
@@ -855,12 +1061,19 @@ class Oracle:
         snapshot: Any,
         automatic_auth_attempted: bool = False,
         human_rearmed: bool = False,
+        evidence: Mapping[str, Any] | None = None,
     ) -> list[Violation]:
         """I8: CAPTCHA/security refusal blocks automatic auth across reload/restart."""
         admission = dict(getattr(snapshot, "renewal_admission", {}))
         terminal_reason = admission.get("terminal_reason")
 
         if terminal_reason and automatic_auth_attempted and not human_rearmed:
+            facts = {
+                "terminal_reason": terminal_reason,
+                "automatic_auth_attempted": automatic_auth_attempted,
+            }
+            if evidence is not None:
+                facts.update(evidence)
             return [
                 Violation(
                     code=ViolationCode.I8,
@@ -868,12 +1081,7 @@ class Oracle:
                         f"I8 terminal durability violation: automatic auth attempted while terminal "
                         f"reason '{terminal_reason}' active without human rearm"
                     ),
-                    facts=MappingProxyType(
-                        {
-                            "terminal_reason": terminal_reason,
-                            "automatic_auth_attempted": automatic_auth_attempted,
-                        }
-                    ),
+                    facts=MappingProxyType(facts),
                     observation_type="step",
                 )
             ]
@@ -1016,6 +1224,11 @@ class Oracle:
 
         Compares BOTH series and journal around auth failure.
         """
+        if any(getattr(snap, "recorder_error", None) for snap in (before_snapshot, after_snapshot)):
+            reason = getattr(before_snapshot, "recorder_error", None) or getattr(
+                after_snapshot, "recorder_error", None
+            )
+            raise AssertionError(f"INVALID I12: recorder observation unavailable ({reason})")
         b_rows = dict(getattr(before_snapshot, "rows", ()))
         a_rows = dict(getattr(after_snapshot, "rows", ()))
 

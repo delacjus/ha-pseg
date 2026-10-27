@@ -7,12 +7,55 @@ and awaited operations in recording and recovery.
 Also provides PhysicalDurabilitySubstrate and StatsFaultHarness to ensure
 faults target physical disk durability (SQLite database and HA Store JSON)
 rather than in-memory mocks.
+
+Label-to-boundary map (production is read-only; HA 2026.10.2):
+* STORE_WRITE_PENDING / STORE_WRITE_COMMIT: Store._write_data(wrapper), on
+  the executor immediately before its atomic JSON write. wrapper.data.pending
+  selects pending versus cleared/provenance write. Memory already changed;
+  disk still has the preceding snapshot. async_discard also clears pending.
+* STORE_READBACK: StatisticsStateStore._async_verify_persisted(snapshot),
+  AFTER Store.async_save returned, immediately before its real disk read.
+  It is not the initial load or a warm Store cache read.
+* RECORDER_IMPORT_{CONSUMPTION,COST}: immediately before the corresponding
+  synchronous async_add_external_statistics queue dispatch. Cost-first buffers
+  consumption until the cost dispatch; it never bypasses the real importer.
+* RECORDER_COMMIT_{CONSUMPTION,COST}: on the recorder worker at each separate
+  ImportStatisticsTask.run entry. HA calls import_statistics -> session_scope
+  -> SQL writes and commit, separately per series. These are pre-transaction
+  fault boundaries, not claims of SQL COMMIT having completed. A failed task is
+  omitted and its exception delivered after queue drain; the other task runs.
+* RECORDER_COMMIT_BARRIER and BEFORE/AFTER_RECORDER_COMMIT: the shared
+  coordinator _async_wait_for_recorder_commit await, NOT a per-series commit.
+* RECORDER_READBACK_{CONSUMPTION,COST}: before each _async_get_series_with_sums
+  await in _async_verify_mutation (recording and recovery).
+* BEFORE/AFTER_STORE_LOAD: StatisticsStateStore.async_load await, including
+  its loaded-cache fast path; physical post-save verification is separate.
+* BEFORE/AFTER_RECOVER_PENDING: coordinator._async_recover_pending await.
+* BEFORE/AFTER_BASELINE_READS: EACH of the four production baseline awaits,
+  in source order: _async_get_last_stat_before consumption, cost, then
+  _async_get_stats_from consumption, cost. No prior read escapes these gates.
+* BEFORE/AFTER_JOURNAL_SAVE, JOURNAL_COMMIT, JOURNAL_DISCARD: respectively
+  async_begin, async_commit, async_discard awaits. Commit labels also apply in
+  recovery; discard is reached after journaling when the owner retires.
+* BEFORE/AFTER_RECORDER_IMPORT: synchronous dispatch visit counters only;
+  async pause/cancel/timeout actions are explicitly inapplicable there.
+* BEFORE/AFTER_MUTATION_VERIFY: _async_verify_mutation await in either path.
+* BEFORE/AFTER_RECOVERY_DURABILITY_WAIT, RECOVERY_VERIFY, RECOVERY_REPLAY,
+  RECOVERY_COMMIT: the corresponding async_wait_durable, _async_verify_mutation,
+  _async_replay_mutation and async_commit awaits ONLY inside recovery. An empty
+  recovery still awaits durability, but does not verify/replay/commit.
+
+Live boundary tests inspect disk at write/readback gates, prior-read arrival,
+separate physical series transactions, and discard. Inventory counts alone are
+not evidence that the adapter reaches those production boundaries.
+
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from concurrent.futures import CancelledError as WorkerCancelledError
 from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
@@ -24,6 +67,7 @@ from unittest.mock import patch
 
 from homeassistant.components.recorder import Recorder, get_instance
 from homeassistant.components.recorder.statistics import statistics_during_period
+from homeassistant.components.recorder.tasks import ImportStatisticsTask
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import recorder as recorder_helper
 from homeassistant.helpers.recorder import DATA_INSTANCE, DATA_RECORDER
@@ -78,6 +122,8 @@ BEFORE_MUTATION_VERIFY = "before_mutation_verify"
 AFTER_MUTATION_VERIFY = "after_mutation_verify"
 BEFORE_JOURNAL_COMMIT = "before_journal_commit"
 AFTER_JOURNAL_COMMIT = "after_journal_commit"
+BEFORE_JOURNAL_DISCARD = "before_journal_discard"
+AFTER_JOURNAL_DISCARD = "after_journal_discard"
 
 # Awaited Operations in Recovery (_async_recover_pending)
 BEFORE_RECOVERY_DURABILITY_WAIT = "before_recovery_durability_wait"
@@ -108,7 +154,7 @@ BARRIER_INVENTORY: dict[str, BarrierDescriptor] = {
         "store",
         "none",
         "storage",
-        "Physical load/readback of statistics Store provenance JSON from disk",
+        "Physical post-save verification readback of statistics Store JSON from disk",
     ),
     STORE_WRITE_PENDING: BarrierDescriptor(
         STORE_WRITE_PENDING,
@@ -345,6 +391,15 @@ BARRIER_INVENTORY: dict[str, BarrierDescriptor] = {
         "After store.async_commit completes in recovery",
     ),
 }
+
+
+for _name, _description in (
+    (BEFORE_JOURNAL_DISCARD, "Before awaiting async_discard of a durable unimported journal"),
+    (AFTER_JOURNAL_DISCARD, "After awaiting async_discard of a durable unimported journal"),
+):
+    BARRIER_INVENTORY[_name] = BarrierDescriptor(
+        _name, "awaited_recording", "both", "recording", _description
+    )
 
 
 def audit_barrier_inventory() -> dict[str, Any]:
@@ -664,7 +719,10 @@ class StatsFaultHarness:
         self._fired_counts: dict[str, int] = {}
         self._patches: list[Any] = []
         self._installed = False
-        self._baseline_count = 0
+        self._in_recovery = False
+        self._arrivals: dict[str, asyncio.Event] = {}
+        self._waiters: dict[str, list[_BarrierAction]] = {}
+        self._worker_errors: list[BaseException] = []
         self._buffered_stats: tuple[Any, Any, Any] | None = None
 
     def hits(self, barrier_name: str) -> int:
@@ -696,12 +754,14 @@ class StatsFaultHarness:
         """Pause execution once at the barrier until resumed, then pass through."""
         assert barrier_name in BARRIER_INVENTORY, f"Unknown barrier name: {barrier_name}"
         event = asyncio.Event()
+        self._arrivals[barrier_name] = asyncio.Event()
         self._actions[barrier_name] = _BarrierAction(kind="pause", event=event, one_shot=True)
 
     def pause(self, barrier_name: str) -> None:
         """Pause execution when the barrier is reached until resumed."""
         assert barrier_name in BARRIER_INVENTORY, f"Unknown barrier name: {barrier_name}"
         event = asyncio.Event()
+        self._arrivals[barrier_name] = asyncio.Event()
         self._actions[barrier_name] = _BarrierAction(kind="pause", event=event)
 
     def resume(self, barrier_name: str) -> None:
@@ -709,6 +769,16 @@ class StatsFaultHarness:
         action = self._actions.get(barrier_name)
         if action and action.event:
             action.event.set()
+        for waiter in self._waiters.get(barrier_name, ()):
+            waiter.event.set()
+
+    async def wait_until_reached(self, barrier_name: str) -> None:
+        """Wait for an observed arrival without ordering sleeps."""
+        event = self._arrivals.setdefault(barrier_name, asyncio.Event())
+        try:
+            await asyncio.wait_for(event.wait(), DEFAULT_BARRIER_TIMEOUT)
+        except TimeoutError as err:
+            raise AssertionError(f"Barrier {barrier_name} was not reached within 10s") from err
 
     def hold(self, barrier_name: str, timeout: float = DEFAULT_BARRIER_TIMEOUT) -> None:
         """Hold execution at the barrier with a bounded timeout (fails within <= 10.0s)."""
@@ -735,6 +805,7 @@ class StatsFaultHarness:
     async def _dispatch(self, barrier_name: str, context: Any = None) -> None:
         """Internal hook invoked at seam points."""
         self._hit_counts[barrier_name] = self._hit_counts.get(barrier_name, 0) + 1
+        self._arrivals.setdefault(barrier_name, asyncio.Event()).set()
         action = self._actions.get(barrier_name)
         if not action:
             return
@@ -743,13 +814,15 @@ class StatsFaultHarness:
             self._actions.pop(barrier_name, None)
         self._fired_counts[barrier_name] = self._fired_counts.get(barrier_name, 0) + 1
 
-        if action.kind == "pause":
-            await action.event.wait()
-        elif action.kind == "hold":
+        if action.kind in ("pause", "hold"):
+            self._waiters.setdefault(barrier_name, []).append(action)
             try:
                 await asyncio.wait_for(action.event.wait(), timeout=action.timeout)
             except TimeoutError as err:
                 raise TimeoutError(f"Barrier {barrier_name} stalled and timed out") from err
+            finally:
+                self._waiters[barrier_name].remove(action)
+                action.event.set()
         elif action.kind == "fail":
             assert action.exception is not None
             raise action.exception
@@ -762,66 +835,114 @@ class StatsFaultHarness:
     def install(self, coord: PsegDataUpdateCoordinator) -> None:
         """Attach fault hooks to coordinator and its internal statistics runtime."""
         self.coord = coord
+        loop = asyncio.get_running_loop()
+
+        def dispatch_from_worker(barrier, context=None):
+            future = asyncio.run_coroutine_threadsafe(self._dispatch(barrier, context), loop)
+            try:
+                future.result(timeout=DEFAULT_BARRIER_TIMEOUT + 1)
+            except WorkerCancelledError as err:
+                raise asyncio.CancelledError(f"Barrier {barrier} injected cancellation") from err
+            finally:
+                if not future.done():
+                    future.cancel()
+
+        # The actual Store executor write, after async_begin/commit changed memory.
+        original_write = coord._stats_state._store._write_data
+
+        def physical_write(wrapper):
+            barrier = STORE_WRITE_PENDING if wrapper["data"]["pending"] else STORE_WRITE_COMMIT
+            dispatch_from_worker(barrier, wrapper)
+            return original_write(wrapper)
+
+        p = patch.object(coord._stats_state._store, "_write_data", physical_write)
+        p.start()
+        self._patches.append(p)
+
+        original_readback = coord._stats_state._async_verify_persisted
+
+        async def physical_readback(snapshot):
+            await self._dispatch(STORE_READBACK, snapshot)
+            return await original_readback(snapshot)
+
+        p = patch.object(coord._stats_state, "_async_verify_persisted", physical_readback)
+        p.start()
+        self._patches.append(p)
 
         # Hook Store load
         orig_load = coord._stats_state.async_load
 
         async def hooked_load():
             await self._dispatch(BEFORE_STORE_LOAD)
-            await self._dispatch(STORE_READBACK)
             res = await orig_load()
             await self._dispatch(AFTER_STORE_LOAD)
             return res
 
-        coord._stats_state.async_load = hooked_load  # type: ignore[method-assign]
+        p = patch.object(coord._stats_state, "async_load", hooked_load)
+        p.start()
+        self._patches.append(p)
 
         # Hook Store begin (pending write)
         orig_begin = coord._stats_state.async_begin
 
         async def hooked_begin(mutation):
             await self._dispatch(BEFORE_JOURNAL_SAVE, mutation)
-            await self._dispatch(STORE_WRITE_PENDING, mutation)
             res = await orig_begin(mutation)
             await self._dispatch(AFTER_JOURNAL_SAVE, mutation)
             return res
 
-        coord._stats_state.async_begin = hooked_begin  # type: ignore[method-assign]
+        p = patch.object(coord._stats_state, "async_begin", hooked_begin)
+        p.start()
+        self._patches.append(p)
 
         # Hook Store commit (committed write)
         orig_commit = coord._stats_state.async_commit
 
         async def hooked_commit(mutation_id):
             await self._dispatch(BEFORE_JOURNAL_COMMIT, mutation_id)
-            await self._dispatch(STORE_WRITE_COMMIT, mutation_id)
-            await self._dispatch(BEFORE_RECOVERY_COMMIT, mutation_id)
+            if self._in_recovery:
+                await self._dispatch(BEFORE_RECOVERY_COMMIT, mutation_id)
             res = await orig_commit(mutation_id)
-            await self._dispatch(AFTER_RECOVERY_COMMIT, mutation_id)
+            if self._in_recovery:
+                await self._dispatch(AFTER_RECOVERY_COMMIT, mutation_id)
             await self._dispatch(AFTER_JOURNAL_COMMIT, mutation_id)
             return res
 
-        coord._stats_state.async_commit = hooked_commit  # type: ignore[method-assign]
+        p = patch.object(coord._stats_state, "async_commit", hooked_commit)
+        p.start()
+        self._patches.append(p)
 
         # Hook recover pending
         orig_recover = coord._async_recover_pending
 
         async def hooked_recover():
             await self._dispatch(BEFORE_RECOVER_PENDING)
-            res = await orig_recover()
+            self._in_recovery = True
+            try:
+                res = await orig_recover()
+            finally:
+                self._in_recovery = False
             await self._dispatch(AFTER_RECOVER_PENDING)
             return res
 
-        coord._async_recover_pending = hooked_recover  # type: ignore[method-assign]
+        p = patch.object(coord, "_async_recover_pending", hooked_recover)
+        p.start()
+        self._patches.append(p)
 
         # Hook durability wait in recovery
         orig_wait_durable = coord._stats_state.async_wait_durable
 
         async def hooked_wait_durable(*args, **kwargs):
-            await self._dispatch(BEFORE_RECOVERY_DURABILITY_WAIT)
+            if self._in_recovery:
+                await self._dispatch(BEFORE_RECOVERY_DURABILITY_WAIT)
             res = await orig_wait_durable(*args, **kwargs)
-            await self._dispatch(AFTER_RECOVERY_DURABILITY_WAIT)
+            if self._in_recovery:
+                await self._dispatch(AFTER_RECOVERY_DURABILITY_WAIT)
             return res
 
-        coord._stats_state.async_wait_durable = hooked_wait_durable  # type: ignore[method-assign]
+        p = patch.object(coord._stats_state, "async_wait_durable", hooked_wait_durable)
+        p.start()
+        self._patches.append(p)
 
         # Hook replay in recovery
         orig_replay = coord._async_replay_mutation
@@ -832,25 +953,38 @@ class StatsFaultHarness:
             await self._dispatch(AFTER_RECOVERY_REPLAY, mutation)
             return res
 
-        coord._async_replay_mutation = hooked_replay  # type: ignore[method-assign]
+        p = patch.object(coord, "_async_replay_mutation", hooked_replay)
+        p.start()
+        self._patches.append(p)
 
-        # Hook baseline reads
-        orig_get_stats = coord_mod._async_get_stats_from
-
-        async def hooked_get_stats(hass_arg, stat_id, start):
-            self._baseline_count += 1
-            if self._baseline_count == 1:
+        # All four baseline awaits: prior consumption/cost, then existing consumption/cost.
+        def baseline_wrapper(original):
+            async def wrapped(*args, **kwargs):
                 await self._dispatch(BEFORE_BASELINE_READS)
-            res = await orig_get_stats(hass_arg, stat_id, start)
-            if self._baseline_count == 2:
+                result = await original(*args, **kwargs)
                 await self._dispatch(AFTER_BASELINE_READS)
-            return res
+                return result
 
-        if not self._patches:
-            p1 = patch.object(coord_mod, "_async_get_stats_from", hooked_get_stats)
-            p1.start()
-            self._patches.append(p1)
+            return wrapped
 
+        for name in ("_async_get_last_stat_before", "_async_get_stats_from"):
+            p = patch.object(coord_mod, name, baseline_wrapper(getattr(coord_mod, name)))
+            p.start()
+            self._patches.append(p)
+
+        original_discard = coord._stats_state.async_discard
+
+        async def discard(mutation_id):
+            await self._dispatch(BEFORE_JOURNAL_DISCARD, mutation_id)
+            result = await original_discard(mutation_id)
+            await self._dispatch(AFTER_JOURNAL_DISCARD, mutation_id)
+            return result
+
+        p = patch.object(coord._stats_state, "async_discard", discard)
+        p.start()
+        self._patches.append(p)
+
+        if not self._installed:
             # Hook async_add_external_statistics (per-series imports)
             orig_add_stats = coord_mod.async_add_external_statistics
 
@@ -901,15 +1035,39 @@ class StatsFaultHarness:
             p2.start()
             self._patches.append(p2)
 
+            # Each task owns a separate import_statistics/session_scope transaction.
+            original_run = ImportStatisticsTask.run
+
+            def run_import(task, instance):
+                statistic_id = task.metadata["statistic_id"]
+                if not statistic_id.startswith("pseg:"):
+                    return original_run(task, instance)
+                barrier = (
+                    RECORDER_COMMIT_CONSUMPTION
+                    if statistic_id.endswith("_energy_consumption")
+                    else RECORDER_COMMIT_COST
+                )
+                try:
+                    dispatch_from_worker(barrier, statistic_id)
+                except BaseException as err:
+                    # Preserve HA's worker; report failure after the queue drains.
+                    self._worker_errors.append(err)
+                    return None
+                return original_run(task, instance)
+
+            p = patch.object(ImportStatisticsTask, "run", run_import)
+            p.start()
+            self._patches.append(p)
+
             # Hook recorder commit wait
             orig_wait_commit = coord_mod._async_wait_for_recorder_commit
 
             async def hooked_wait_commit(hass_arg):
                 await self._dispatch(BEFORE_RECORDER_COMMIT)
-                await self._dispatch(RECORDER_COMMIT_CONSUMPTION)
-                await self._dispatch(RECORDER_COMMIT_COST)
                 await self._dispatch(RECORDER_COMMIT_BARRIER)
                 res = await orig_wait_commit(hass_arg)
+                if self._worker_errors:
+                    raise self._worker_errors.pop(0)
                 await self._dispatch(AFTER_RECORDER_COMMIT)
                 return res
 
@@ -922,13 +1080,17 @@ class StatsFaultHarness:
 
         async def hooked_verify(mutation):
             await self._dispatch(BEFORE_MUTATION_VERIFY, mutation)
-            await self._dispatch(BEFORE_RECOVERY_VERIFY, mutation)
+            if self._in_recovery:
+                await self._dispatch(BEFORE_RECOVERY_VERIFY, mutation)
             res = await orig_verify(mutation)
             await self._dispatch(AFTER_MUTATION_VERIFY, mutation)
-            await self._dispatch(AFTER_RECOVERY_VERIFY, mutation)
+            if self._in_recovery:
+                await self._dispatch(AFTER_RECOVERY_VERIFY, mutation)
             return res
 
-        coord._async_verify_mutation = hooked_verify  # type: ignore[method-assign]
+        p = patch.object(coord, "_async_verify_mutation", hooked_verify)
+        p.start()
+        self._patches.append(p)
 
         # Hook per-series readback in verify
         orig_get_series = coord_mod._async_get_series_with_sums
@@ -948,7 +1110,7 @@ class StatsFaultHarness:
 
     def uninstall(self) -> None:
         """Remove all active patches and wrappers."""
-        for p in self._patches:
+        for p in reversed(self._patches):
             p.stop()
         self._patches.clear()
         self._installed = False
@@ -956,6 +1118,8 @@ class StatsFaultHarness:
     async def cleanup(self) -> None:
         """Resume any held barriers and clean up pending tasks to prevent resource leaks."""
         # Release all waiting events so tasks do not hang
+        for barrier in self._waiters:
+            self.resume(barrier)
         for action in self._actions.values():
             if action.event and not action.event.is_set():
                 action.event.set()

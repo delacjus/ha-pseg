@@ -102,6 +102,12 @@ def _make_dummy_snapshot(
     )
 
 
+@pytest.fixture(autouse=True)
+def auto_enable_custom_integrations(recorder_mock: Any, enable_custom_integrations: Any) -> Any:
+    """Create the recorder before hass so snapshots read real physical series."""
+    yield
+
+
 async def test_healthy_trace_zero_violations(hass: HomeAssistant) -> None:
     """Healthy run_case trace produces zero violations."""
     entry = MockConfigEntry(
