@@ -31,6 +31,12 @@ from custom_components.pseg.const import (
 )
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
 from custom_components.pseg.pseg_client import PsegClient, PsegOktaSessionExpired
+from tests.support.synchronization import (
+    ObservedLock,
+    join_thread,
+    wait_event_async,
+    wait_task,
+)
 
 METER = "12345678"
 DATA = {
@@ -293,6 +299,7 @@ async def test_overlapping_failed_renewal_cannot_persist_a_partial_jar(
     client = PsegClient(cookie_list=[dict(c) for c in remembered])
     coord = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
 
+    client._lock = ObservedLock(client._lock, "renewal/cookie export client lock")
     renewal_started = threading.Event()
     release_renewal = threading.Event()
     renewed: dict[str, object] = {}
@@ -314,18 +321,21 @@ async def test_overlapping_failed_renewal_cannot_persist_a_partial_jar(
                 renewed["error"] = err
 
     thread = threading.Thread(target=renew)
+    persist = None
     thread.start()
     try:
         assert renewal_started.wait(5)
         # The failed renewal already dropped MM_SID and still holds the client lock;
         # this snapshot must wait for it and then see its auth_reason.
         persist = asyncio.create_task(coord._async_persist_cookies())
-        await asyncio.sleep(0.05)
+        await wait_event_async(client._lock.contended, "cookie export waiting on renewal")
         release_renewal.set()
         await asyncio.wait_for(persist, 10)
     finally:
         release_renewal.set()
-        thread.join(10)
+        join_thread(thread, "failed renewal")
+        if persist is not None:
+            await wait_task(persist, "cookie persistence cleanup")
 
     assert "error" in renewed
     assert client.auth_reason == AUTH_REASON_REMEMBER_ME_REJECTED

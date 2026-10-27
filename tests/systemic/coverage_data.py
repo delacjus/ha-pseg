@@ -1207,8 +1207,10 @@ REVIEWED_ASSERTION_BODIES = {
         '29daee1629535da6ad3db5e73a2b6c7e88ad275dad9444d1db68b5ceb2a6f907',
     'tests/test_auth_review_r5_regressions.py::test_latest_valid_hourly_jar_survives_cancel_or_stop':
         'd51ec8e794a99f9296a53d3b24b12f81abc6b6eb0e3aa8171f62f2cecf7ccec4',
+    # P2-12 replaced this test's 0.15 s ordering sleep with a handshake;
+    # assertions unchanged (AST-checked), fingerprint re-pinned.
     'tests/test_auth_review_r5_regressions.py::test_owner_predicate_true_during_own_write_and_false_on_foreign_replace':
-        '04692a44e4d05c8fcfda082676b08c7f84fa2f4e930bf9710e1647ecc6480b48',
+        'e79eeba2fa4961fe19c0b46a35d5922b16236feb8c7be9de8229574759499cb3',
     'tests/test_auth_review_r5_regressions.py::test_postproof_failed_dashboard_cookie_cannot_be_promoted_by_next_poll':
         '8640860022c193a1aa7bbcdd6378ed5493140c1e63548dc106fbd022228e9acb',
     'tests/test_auth_review_r5_regressions.py::test_r7b_known_decoy_series_with_unknown_valid_records_rejected':
