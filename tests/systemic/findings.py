@@ -330,10 +330,10 @@ SLOW_R5_A = (
 )
 
 SLOW_R5_C = (
-    "tests/systemic/test_response_corpus.py::test_slow_case[hourly_chart_data::all_invalid::aux::optional::L::setup::client]",
-    "tests/systemic/test_response_corpus.py::test_slow_case[hourly_chart_data::empty::none::optional::R::setup::ha]",
-    "tests/systemic/test_response_corpus.py::test_slow_case[hourly_chart_data::root_array::none::optional::S::poll::ha]",
-    "tests/systemic/test_response_corpus.py::test_slow_case[hourly_chart_data::unrelated::sid::optional::L::poll::client]",
+    "tests/systemic/test_response_corpus.py::test_slow_case[hourly_chart_data::all_invalid::none::optional::S::setup::ha]",
+    "tests/systemic/test_response_corpus.py::test_slow_case[hourly_chart_data::empty::aux::optional::S::setup::ha]",
+    "tests/systemic/test_response_corpus.py::test_slow_case[hourly_chart_data::root_array::aux::optional::L::poll::client]",
+    "tests/systemic/test_response_corpus.py::test_slow_case[hourly_chart_data::unrelated::sid::optional::H::poll::client]",
 )
 
 SLOW_R5_D = (
@@ -1895,3 +1895,116 @@ KNOWN_GAPS = (
 
 # Historical carried gaps remain in the inventory; these are their focused
 # resolutions, separate from the original reason and future-fault description.
+
+
+# Gate B closures: findings demonstrated against the live suite that are fixed by
+# case/covering data and exact fast probes rather than by an R1-R9 finding row.
+# Each entry names the review that found it and the nodes that now assert it, so a
+# later re-open of the same generator gap has a pinned regression.
+GATE_CLOSURES = (
+    {
+        "id": "B3",
+        "source_kb": "8e261d0b-ae95-4f56-bbf9-905173bebf5c",
+        "family": "δ",
+        "invariant": "I10",
+        "reason": "Stage.LOGIN_FORM_GET was implemented as POST /Home/Login for both "
+        "injection and reply matching, so every login_form_get row claimed GET form "
+        "coverage while exercising the credential-POST classifier; the real GET form "
+        "read had no G3 coverage.",
+        "closure": "login_form_get is GET / - the form request production makes at "
+        "pseg_client._login_form_token (:1097-1108) - and the credential POST keeps its "
+        "own login_post stage (POST /Home/Login, JSON Data classifier). Covering and "
+        "nightly declarations regenerated with seed 20261025.",
+        "cases": (
+            "tests/systemic/test_response_corpus.py::test_mandatory_login_form_get_serves_the_real_get_form_read",
+            "tests/systemic/test_response_corpus.py::test_fast_case[mandatory:login-form-get-is-the-real-get]",
+        ),
+    },
+    {
+        "id": "B4",
+        "source_kb": "8e261d0b-ae95-4f56-bbf9-905173bebf5c",
+        "family": "δ",
+        "invariant": "I3",
+        "reason": "A single keepalive exclusion removed saml_acs on the false premise "
+        "that keepalive is GET-only. FLOW_PLANS S keepalive is SignIn -> ACS -> "
+        "Dashboard (tests/support/boundaries.py:204), so the SSO keepalive ACS reply "
+        "was reachable and was reported inapplicable instead of covered.",
+        "closure": "The ACS keepalive exclusion is flow-aware: it removes L/R/H (the "
+        "Dashboard-only GET keepalive) and keeps S executable, so the failed relay is "
+        "consumed on a real ACS POST and its unique cookie stays quarantined. The "
+        "renewal rotation of the jar is proven by the independently derived whole jar "
+        "(F1), not by adopting the observed jar.",
+        "cases": (
+            "tests/systemic/test_response_corpus.py::test_mandatory_sso_keepalive_acs_relay_is_a_covered_row",
+            "tests/systemic/test_response_corpus.py::test_fast_case[mandatory:sso-keepalive-acs-relay]",
+        ),
+    },
+)
+
+
+# Generator fix closures (review r1 2026-10-27): the B3/B4 generator repair above
+# was correct but weakened three proofs. Each row names the regression that now
+# fails if the weakening returns.
+GENERATOR_FIX_CLOSURES = (
+    {
+        "id": "F1",
+        "source_kb": "451e02bb-6070-46d7-beb9-e5e859169649",
+        "invariant": "I5",
+        "reason": "run_ha_case treated any observed jar difference as a legitimate "
+        "declared renewal and then adopted the observed jar/admission as its own "
+        "expectation (response_cases.py:837-883 before the fix), so a fault that "
+        "cleared the persisted cookies passed and completed the whole ending.",
+        "closure": "The latest whole jar and settled admission are derived from the "
+        "pre-operation baseline plus every consumed *declared* reply through the pure "
+        "expectation model, and the exit and authorized successor are compared against "
+        "that pair. A declared rotation still advances it (positive control); deleting "
+        "the persisted jar now raises. The admission half is compared exactly "
+        "(review-r2): an empty declaration means the persisted admission is empty, a "
+        "declared nullable field must be present, and the successor's settlement is "
+        "derived from its own declared healthy replies.",
+        "cases": (
+            "tests/systemic/test_gate_b_generator_regressions.py::test_deletion_of_persisted_cookies_is_rejected",
+            "tests/systemic/test_gate_b_generator_regressions.py::test_declared_rotation_advances_the_derived_jar",
+            "tests/systemic/test_gate_b_generator_regressions.py::test_no_declared_proof_keeps_the_baseline_jar",
+            "tests/systemic/test_gate_b_generator_regressions.py::test_declared_rotation_case_still_passes",
+            "tests/systemic/test_gate_b_generator_regressions.py::test_undeclared_fresh_admission_is_rejected",
+            "tests/systemic/test_gate_b_generator_regressions.py::test_settled_admission_must_keep_its_nullable_fields",
+            "tests/systemic/test_gate_b_generator_regressions.py::test_declared_settled_admission_passes_exactly",
+        ),
+    },
+    {
+        "id": "F2",
+        "source_kb": "451e02bb-6070-46d7-beb9-e5e859169649",
+        "invariant": "I2",
+        "reason": "The terminal latch fence in tests/support/expectation.py:412-415 "
+        "listed LOGIN_FORM_GET and SAML_ACS but not the new LOGIN_POST stage, so a "
+        "terminal state accepted a credential POST, validated its reply and "
+        "accumulated its cookies without flagging a violation.",
+        "closure": "Stage.LOGIN_POST is part of the terminal fence. The negative "
+        "regression proves a terminal LOGIN_POST is flagged with no validated reply "
+        "and no cookie accumulation, the honest GET/ACS stages stay fenced, and a "
+        "non-terminal LOGIN_POST still validates.",
+        "cases": (
+            "tests/systemic/test_gate_b_generator_regressions.py::test_terminal_fence_covers_the_credential_post",
+            "tests/systemic/test_gate_b_generator_regressions.py::test_non_terminal_credential_post_still_validates",
+        ),
+    },
+    {
+        "id": "F3",
+        "source_kb": "451e02bb-6070-46d7-beb9-e5e859169649",
+        "invariant": "I5",
+        "reason": "Re-running tier assignment for the B3 login-stage relabel dropped "
+        "15 unrelated former fast rows and demoted one more, and the rewritten "
+        "coverage_data pins blessed the loss instead of preserving the shared fast "
+        "contract.",
+        "closure": "The 16 former fast rows are preserved, pinned fast in "
+        "tools/pairwise.py PRESERVED_FAST so greedy reselection cannot drop them, and "
+        "pinned as mandatory fast nodes. The one other removed row is a login-stage "
+        "row the B3 applicability rule excludes with a declared reason.",
+        "cases": (
+            "tests/systemic/test_gate_b_generator_regressions.py::test_former_fast_rows_stay_fast",
+            "tests/systemic/test_gate_b_generator_regressions.py::test_fast_tier_still_represents_the_core_vocabulary",
+        ),
+    },
+)
+

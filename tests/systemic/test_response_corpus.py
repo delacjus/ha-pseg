@@ -3,8 +3,9 @@
 Fast tier
     Every stage/kind/cookie/position value is represented plus the mandatory
     findings: the 307/308 credential re-POST, the healthy hourly rotation, the
-    auth-on-hourly versus non-auth daily-fallback controls, and one post-proof
-    poison that only the follow-on can catch.
+    auth-on-hourly versus non-auth daily-fallback controls, one post-proof poison
+    that only the follow-on can catch, the real GET login-form read (B3) and the
+    SSO keepalive ACS relay (B4).
 
 Slow tier
     The constrained pairwise HA/client cases from the checked-in covering.
@@ -30,7 +31,9 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 import pytest
 
+from custom_components.pseg.const import PORTAL_BASE_URL
 from tests.support.corpus import (
+    FlowMode,
     Position,
     ResponseKind,
     Stage,
@@ -41,10 +44,12 @@ from tests.systemic.response_cases import (
     ALL_CASES,
     FAST_CASES,
     SLOW_CASES,
+    STAGE_PATHS,
     CaseEvidence,
     ResponseCase,
     night_case_params,
     run_case_evidence,
+    trace_case_dispatches,
 )
 
 COVERING = Path(__file__).with_name("response_covering.json")
@@ -271,7 +276,10 @@ def test_nightly_collection_count_equals_independent_calculation() -> None:
     assert len(NIGHTLY_CASES) == NIGHTLY_COUNT
     assert len(NIGHTLY_CASES) == len(NIGHTLY_TUPLES)
     assert len({case.case_id for case in NIGHTLY_CASES}) == len(NIGHTLY_CASES)
-    assert NIGHTLY_COUNT == 724
+    # 8 stages x 24 kinds x 4 cookies x 3 positions = 2,304 raw tuples minus the
+    # declared core exclusions. The login handshake contributes 124 per request
+    # stage: (15 kinds x 4 cookies + 2 terminal kinds x 1 cookie) x 2 positions.
+    assert NIGHTLY_COUNT == 848
     # Every core value appears in the exhaustive declaration, including the
     # model-only security-step kind.
     nightly_values = {
@@ -309,6 +317,26 @@ def test_every_exclusion_declares_a_reason() -> None:
         assert exclusion["values"]
     for entry in model.get("model_only", []):
         assert entry["reason"].strip()
+
+
+def test_gate_closures_point_at_fast_assertions() -> None:
+    """The B3/B4 registry entries resolve to real fast nodes with a covered row."""
+    from tests.systemic.findings import GATE_CLOSURES
+
+    fast_ids = {case.case_id for case in FAST_CASES}
+    assert {closure["id"] for closure in GATE_CLOSURES} == {"B3", "B4"}
+    for closure in GATE_CLOSURES:
+        assert closure["reason"].strip() and closure["closure"].strip()
+        assert closure["cases"], closure["id"]
+        for node in closure["cases"]:
+            module, _, rest = node.partition("::")
+            assert module == "tests/systemic/test_response_corpus.py", node
+            function, _, param = rest.partition("[")
+            if param:
+                assert function == "test_fast_case", node
+                assert param.rstrip("]") in fast_ids, f"missing covered row: {node}"
+            else:
+                assert callable(globals().get(function)), f"missing closure node: {node}"
 
 
 # ---------------------------------------------------------------------------
@@ -388,3 +416,97 @@ async def test_post_proof_poison_is_caught_only_by_the_follow_on(
         "the post-proof poison case must not have a later request inside the case body"
     )
     assert "follow_on_only" in evidence.notes, evidence.notes
+
+
+async def test_mandatory_login_form_get_serves_the_real_get_form_read(
+    hass: HomeAssistant,
+) -> None:
+    """B3/G3: the login-form stage answers production's GET form read, not the POST.
+
+    Production fetches the form with ``GET {PORTAL}/`` filtered to a status < 500
+    and the antiforgery token (``pseg_client._login_form_token``, :1097-1108); the
+    credential POST to ``/Home/Login`` is a separate stage with its own classifier.
+    The probe therefore requires the declared reply to be served on that direct
+    root GET and no credential POST to precede it.
+    """
+    case = _mandatory("mandatory:login-form-get-is-the-real-get")
+    assert STAGE_PATHS[Stage.LOGIN_FORM_GET] == ("GET", "/")
+    assert STAGE_PATHS[Stage.LOGIN_POST] == ("POST", "/Home/Login")
+
+    dispatches = await trace_case_dispatches(case, hass)
+    consumed = [dispatch for dispatch in dispatches if dispatch.reply_id == case.reply_id]
+    assert consumed, [
+        (dispatch.method, dispatch.url, dispatch.reply_id) for dispatch in dispatches
+    ]
+    served = consumed[0]
+    assert (served.method, served.url) == ("GET", f"{PORTAL_BASE_URL}/"), (
+        f"the login-form reply was served on {served.method} {served.url}, not the "
+        "real form GET"
+    )
+    assert served.is_redirect_hop is False, (
+        "the declared reply answered the signed-out Dashboard bounce hop, not the "
+        "form read the renewal performs"
+    )
+    posts = [
+        dispatch
+        for dispatch in dispatches
+        if dispatch.sequence < served.sequence
+        and dispatch.method == "POST"
+        and dispatch.url.split("?")[0].endswith("/Home/Login")
+    ]
+    assert not posts, "the failed form read must not reach the credential POST"
+
+    evidence = await run_case_evidence(case, hass)
+    assert evidence.reply_consumed and evidence.quarantined
+    assert len(evidence.follow_on_steps) == 4
+
+
+async def test_mandatory_sso_keepalive_acs_relay_is_a_covered_row(
+    hass: HomeAssistant,
+) -> None:
+    """B4/G3: the S keepalive really posts the ACS, and that pair is covered.
+
+    ``FLOW_PLANS`` S keepalive is SignIn -> ACS -> Dashboard
+    (tests/support/boundaries.py:204), so the keepalive ACS reply is reachable and
+    may not be excluded globally: only the local, Remember-Me and human keepalive
+    flows are Dashboard-only GETs.
+    """
+    case = _mandatory("mandatory:sso-keepalive-acs-relay")
+    assert (case.stage, case.flow, case.event) == (Stage.SAML_ACS, FlowMode.S, "keepalive")
+    assert case.tier == "fast"
+
+    model = _model()
+    acs_keepalive = [
+        exclusion
+        for exclusion in model["exclusions"]
+        if exclusion["axis"] == "event"
+        and "keepalive" in exclusion["values"]
+        and exclusion.get("context", {}).get("stage") == [Stage.SAML_ACS]
+    ]
+    assert acs_keepalive, "the ACS keepalive reachability rule must stay declared"
+    assert set(acs_keepalive[0]["context"]["flow"]) == {
+        FlowMode.L,
+        FlowMode.R,
+        FlowMode.H,
+    }, "the ACS keepalive exclusion must stay flow-aware and keep S reachable"
+
+    dispatches = await trace_case_dispatches(case, hass)
+    consumed = [dispatch for dispatch in dispatches if dispatch.reply_id == case.reply_id]
+    assert consumed, [
+        (dispatch.method, dispatch.url, dispatch.reply_id) for dispatch in dispatches
+    ]
+    served = consumed[0]
+    assert (served.method, served.url) == ("POST", f"{PORTAL_BASE_URL}/Saml/okta-prod/Acs")
+    assert served.is_redirect_hop is False
+    signin = [
+        dispatch
+        for dispatch in dispatches
+        if dispatch.url.split("?")[0].endswith("/Saml/okta-prod/SignIn")
+    ]
+    assert signin and signin[0].sequence < served.sequence, (
+        "the SSO keepalive must reach the ACS through the Okta SignIn leg"
+    )
+
+    evidence = await run_case_evidence(case, hass)
+    assert evidence.reply_consumed and evidence.quarantined
+    assert len(evidence.follow_on_steps) == 4

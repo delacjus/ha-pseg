@@ -46,6 +46,7 @@ class Stage:
     HOURLY_CHART_DATA = "hourly_chart_data"
     HISTORY_CHUNK = "history_chunk"
     LOGIN_FORM_GET = "login_form_get"
+    LOGIN_POST = "login_post"
     SAML_ACS = "saml_acs"
 
     ALL = (
@@ -55,6 +56,7 @@ class Stage:
         HOURLY_CHART_DATA,
         HISTORY_CHUNK,
         LOGIN_FORM_GET,
+        LOGIN_POST,
         SAML_ACS,
     )
 
@@ -243,6 +245,24 @@ EXCLUSION_RULES = (
     ),
     ExclusionRule(
         category="stages",
+        member=Stage.LOGIN_POST,
+        context="mode:R",
+        reason="Remember-Me mode renews by re-issuing MM_SID, never by posting the saved credentials.",
+    ),
+    ExclusionRule(
+        category="stages",
+        member=Stage.LOGIN_POST,
+        context="mode:S",
+        reason="SSO mode transports the credential through the Okta SAML ACS, not /Home/Login.",
+    ),
+    ExclusionRule(
+        category="stages",
+        member=Stage.LOGIN_POST,
+        context="mode:H",
+        reason="Human reauth pastes/keeps a confirmed jar; it never posts stored credentials.",
+    ),
+    ExclusionRule(
+        category="stages",
         member=Stage.SAML_ACS,
         context="mode:L",
         reason="Local mode authenticates via /Home/Login POST, not Okta SAML ACS autopost.",
@@ -418,6 +438,22 @@ def build_stage_reply(stage: str, valid: bool = True, **kwargs: Any) -> Reply:
     if stage == Stage.LOGIN_FORM_GET:
         body = build_synthetic_login_form() if valid else build_synthetic_missing_token_html()
         hdrs.setdefault("Content-Type", "text/html; charset=utf-8")
+        return Reply(
+            reply_id=rid,
+            status_code=200,
+            headers=hdrs,
+            body=body,
+            cookies=cookies if valid else {},
+            valid=valid,
+            cookie_eligible=valid,
+            metadata={"stage": stage},
+        )
+
+    if stage == Stage.LOGIN_POST:
+        # Production classifies the credential POST from its JSON Data, not HTML
+        # (pseg_client._classify_login_response), so the valid form is a Data dict.
+        body = json.dumps({"Data": {}}) if valid else "{}"
+        hdrs.setdefault("Content-Type", "application/json")
         return Reply(
             reply_id=rid,
             status_code=200,

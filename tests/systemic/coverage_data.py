@@ -26,6 +26,7 @@ NEW_MODULES = frozenset(
         "tests/systemic/test_findings_registry.py",
         "tests/systemic/test_coverage_meta.py",
         "tests/systemic/test_auth_systemic_catalog.py",
+        "tests/systemic/test_gate_b_generator_regressions.py",
     }
 )
 
@@ -488,8 +489,8 @@ BASELINE_FAST = {
         "b3fa1f9297647298448f3c3a280a06da166eaf73931aeebb9161886971480a39",
     ),
     "tests/systemic/test_response_corpus.py": (
-        34,
-        "fb82bec0ab6407484247af1c6615921a28fa8ff72cbeb13b1a50002d51073877",
+        56,
+        "0d29415f3ad812c2c6f5d3d8ee3bfe10dede3ea386df14e5fc2f721d5337ec40",
     ),
     "tests/test_auth_mutation_catalog.py": (
         3,
@@ -663,8 +664,8 @@ GENERATED_INVENTORY = {
         "41d45eafb9048b088e160715124ed75b8a40de2244ca94b6cabc240fa7a02a19",
     ),
     "tests/systemic/test_response_corpus.py": (
-        854,
-        "62fc87afb8395d0757baf89578d27ee3c2406089ea97d6a546624b49f64e26d0",
+        997,
+        "23ecd05f20b71852078e2518e58a0ee27ec34c080f109dae86f7e6f7f9b16e1d",
     ),
 }
 
@@ -763,6 +764,24 @@ MANDATORY_FAST = (
     "tests/systemic/test_exit_checkpoint.py::test_fast_exit_checkpoint_control[after:export_cookies_and_auth_reason::cancel::renewal::MM_AuxUtil]",
     "tests/systemic/test_exit_checkpoint.py::test_fast_exit_checkpoint_control[before:confirmed_cookies::stop::renewal::MM_SID]",
     "tests/systemic/test_exit_checkpoint.py::test_fast_exit_checkpoint_control[after:pending_confirmed_snapshot::stop::no-renewal::MM_RememberMe]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[daily_chart_data::connection_error::sid::post_proof::R::setup::client]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[daily_chart_data::missing_token::none::post_proof::H::poll::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[daily_chart_data::root_string::remember_me::post_proof::L::setup::client]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[daily_chart_data::unrelated::aux::post_proof::S::setup::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[dashboard_verify_token::403::sid::post_proof::S::keepalive::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[dashboard_verify_token::429::remember_me::pre_proof::R::backfill::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[dashboard_verify_token::empty::none::pre_proof::H::backfill::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[dashboard_verify_token::maintenance::aux::pre_proof::L::setup::client]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[history_chunk::302_login::none::post_proof::R::poll::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[history_chunk::all_invalid::sid::post_proof::L::backfill::client]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[history_chunk::root_null::aux::post_proof::S::backfill::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[history_chunk::root_number::remember_me::post_proof::H::backfill::client]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[hourly_chart::timeout::aux::optional::H::setup::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[hourly_chart_data::404::remember_me::optional::R::poll::client]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[hourly_chart_data::root_array::none::optional::S::setup::client]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[hourly_chart_data::truncated_json::aux::optional::L::setup::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[login_post::captcha::none::post_proof::L::poll::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[login_post::timeout::sid::pre_proof::L::poll::client]",
     "tests/systemic/test_response_corpus.py::test_fast_case[daily_chart_data::maintenance::none::post_proof::S::setup::ha]",
     "tests/systemic/test_response_corpus.py::test_fast_case[daily_chart_data::missing_token::aux::post_proof::R::setup::ha]",
     "tests/systemic/test_response_corpus.py::test_fast_case[daily_chart_data::root_number::remember_me::post_proof::H::poll::client]",
@@ -777,15 +796,16 @@ MANDATORY_FAST = (
     "tests/systemic/test_response_corpus.py::test_fast_case[hourly_chart::404::aux::optional::H::setup::client]",
     "tests/systemic/test_response_corpus.py::test_fast_case[hourly_chart_data::root_array::remember_me::optional::R::poll::client]",
     "tests/systemic/test_response_corpus.py::test_fast_case[hourly_chart_data::root_string::none::post_proof::S::setup::client]",
-    "tests/systemic/test_response_corpus.py::test_fast_case[login_form_get::captcha::none::post_proof::L::poll::client]",
     "tests/systemic/test_response_corpus.py::test_fast_case[login_form_get::connection_error::remember_me::pre_proof::L::poll::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[saml_acs::timeout::aux::pre_proof::S::poll::ha]",
     "tests/systemic/test_response_corpus.py::test_fast_case[mandatory:307-credential-repost]",
     "tests/systemic/test_response_corpus.py::test_fast_case[mandatory:308-credential-repost]",
     "tests/systemic/test_response_corpus.py::test_fast_case[mandatory:auth-on-hourly-is-auth-loss]",
     "tests/systemic/test_response_corpus.py::test_fast_case[mandatory:healthy-hourly-rotation]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[mandatory:login-form-get-is-the-real-get]",
     "tests/systemic/test_response_corpus.py::test_fast_case[mandatory:non-auth-hourly-daily-fallback]",
     "tests/systemic/test_response_corpus.py::test_fast_case[mandatory:post-proof-poison-only-follow-on]",
-    "tests/systemic/test_response_corpus.py::test_fast_case[saml_acs::timeout::aux::pre_proof::S::poll::ha]",
+    "tests/systemic/test_response_corpus.py::test_fast_case[mandatory:sso-keepalive-acs-relay]",
     "tests/systemic/test_response_corpus.py::test_mandatory_307_and_308_repost_the_credential_body",
     "tests/systemic/test_response_corpus.py::test_mandatory_healthy_hourly_rotation_advances_the_checkpoint",
     "tests/systemic/test_response_corpus.py::test_mandatory_auth_on_hourly_is_not_a_daily_fallback",
@@ -923,11 +943,15 @@ REVIEWED_FINDING_EVIDENCE = {
         '90196a3a547b3a0bb62e255e2dca98e451f24be08ff2327131b241007f2bbed0',
         '01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b',
     ),
+    # R5-C slow row identity follows the B3/B4 covering regeneration: the four
+    # invalid-hourly-200 optional rows were re-picked by tools/pairwise.py at the
+    # same seed with the same kinds/stage/position and only the generated
+    # flow/event/cookie assignment changed.
     'R5-C': (
         'I10',
         '8531120bb019d857eda03867cdd173abb8bcd9eae60f88dc1fdcf630eb7d94bd',
         '7c7f27b2b864b151cbf1f7af0eac3f42452a5978848ac0cbe4ab4523325aa319',
-        '8bd8e360f67ab6503c4c48689f8aa10fe63a546b7a6b68c9a416828e7cf0a1c5',
+        'aa435e8babd1c45dd9a2ac2e1972c360e55175f4eb9d91eba94093c60f84173a',
     ),
     'R5-D': (
         'I5',

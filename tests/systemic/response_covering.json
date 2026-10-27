@@ -10,6 +10,7 @@
       "hourly_chart_data",
       "history_chunk",
       "login_form_get",
+      "login_post",
       "saml_acs"
     ],
     "kind": [
@@ -87,10 +88,11 @@
           "dashboard_verify_token",
           "hourly_chart",
           "login_form_get",
+          "login_post",
           "saml_acs"
         ]
       },
-      "reason": "JSON-root kinds (array/string/null/number/truncated) are only observable where the response contract is a JSON chart payload: the daily and hourly ChartData reads and the history chunk read. The dashboard, chart-setup POST and login/ACS handshakes never parse a JSON chart root."
+      "reason": "JSON-root kinds (array/string/null/number/truncated) are only observable where the response contract is a JSON chart payload: the daily and hourly ChartData reads and the history chunk read. The dashboard, chart-setup POST and the login/ACS handshakes never parse a JSON chart root."
     },
     {
       "axis": "kind",
@@ -107,7 +109,7 @@
           "hourly_chart"
         ]
       },
-      "reason": "CAPTCHA/security-step challenges are raised by the authentication gateway, not by a data endpoint, and the dashboard gateway does not classify the challenge page as terminal (pseg_client.py:1804-1855 only checks the login bounce and the verification token). The corpus excludes both from the daily chart stage for the same reason; the login handshake keeps them."
+      "reason": "CAPTCHA/security-step challenges are raised by the authentication gateway, not by a data endpoint, and the dashboard gateway does not classify the challenge page as terminal (pseg_client.py:1804-1855 only checks the login bounce and the verification token). The corpus excludes both from the daily chart stage for the same reason; the login POST keeps them."
     },
     {
       "axis": "kind",
@@ -122,10 +124,11 @@
           "hourly_chart_data",
           "history_chunk",
           "login_form_get",
+          "login_post",
           "saml_acs"
         ]
       },
-      "reason": "A 307/308 only exercises the credential-preserving re-POST on the chart-setup POST. The other stages are GET reads (the corpus already excludes the login form GET), and the SAML ACS is itself the redirect target where a preserving redirect would loop the relay instead of testing a re-POST."
+      "reason": "A 307/308 only exercises the credential-preserving re-POST on the chart-setup POST. Every other stage is a GET read, and the login POST and the SAML ACS are sent with allow_redirects=False and refused/verified as a redirect (pseg_client.py:1237-1300) rather than re-POSTed."
     },
     {
       "axis": "kind",
@@ -151,13 +154,46 @@
       ],
       "context": {
         "stage": [
+          "login_post"
+        ]
+      },
+      "scope": [
+        "pairwise"
+      ],
+      "reason": "The login POST classifier distinguishes only HTTP >= 500, the CAPTCHA phrase/flag and the JSON error fields (pseg_client.py:1139-1169); any other 200/4xx/3xx body returns empty Data and is then confirmed through /Dashboard, so its declared invalidity is indistinguishable from a successful sign-in at that handshake. 500/503, timeout, connection error, CAPTCHA and valid_success stay."
+    },
+    {
+      "axis": "kind",
+      "values": [
+        "401",
+        "403",
+        "302_login",
+        "307",
+        "308",
+        "404",
+        "429",
+        "maintenance",
+        "missing_token",
+        "unrelated",
+        "empty",
+        "all_invalid",
+        "root_array",
+        "root_string",
+        "root_null",
+        "root_number",
+        "truncated_json",
+        "captcha",
+        "security_step"
+      ],
+      "context": {
+        "stage": [
           "login_form_get"
         ]
       },
       "scope": [
         "pairwise"
       ],
-      "reason": "The login POST classifier distinguishes only HTTP >= 500, the CAPTCHA phrase/flag and the JSON error field (pseg_client.py:1118-1149); a 200/4xx/3xx body is otherwise indistinguishable from a successful sign-in, which is then confirmed through /Dashboard. Those bodies are unobservable at this handshake, so asserting their declared invalidity there would be a fixture mismatch. 500/503, timeout, connection error, CAPTCHA and valid_success stay."
+      "reason": "The real login form read is GET / (pseg_client._login_form_token, :1097-1108): it checks only status >= 500 and extracts the antiforgery token, and it classifies neither redirects nor challenges. Any 200/4xx/3xx body without that token, including a CAPTCHA page, simply supplies an empty token and the flow proceeds to the login POST, so the declared invalidity is unobservable there. 500/503, timeout, connection error and the valid form stay."
     },
     {
       "axis": "kind",
@@ -240,6 +276,7 @@
         "stage": [
           "history_chunk",
           "login_form_get",
+          "login_post",
           "saml_acs"
         ]
       },
@@ -283,12 +320,40 @@
           "daily_chart_data",
           "hourly_chart",
           "hourly_chart_data",
-          "history_chunk",
-          "login_form_get",
-          "saml_acs"
+          "history_chunk"
         ]
       },
-      "reason": "keepalive() is the GET-only Dashboard validation; it never requests chart, history, login or ACS routes."
+      "reason": "No flow's keepalive() requests chart or history routes: L/R/H keepalive is the single Dashboard GET, and S keepalive is SignIn -> ACS -> Dashboard (P2-06 FLOW_PLANS, tests/support/boundaries.py:204)."
+    },
+    {
+      "axis": "event",
+      "values": [
+        "keepalive"
+      ],
+      "context": {
+        "stage": [
+          "login_form_get",
+          "login_post"
+        ]
+      },
+      "reason": "An expired keepalive session is handled as a typed auth failure or the Okta round trip (pseg_client.py:1080-1091, :1389-1400): _renew refuses to post the saved password while _in_keepalive, and no flow loads the local login form during keepalive."
+    },
+    {
+      "axis": "event",
+      "values": [
+        "keepalive"
+      ],
+      "context": {
+        "stage": [
+          "saml_acs"
+        ],
+        "flow": [
+          "L",
+          "R",
+          "H"
+        ]
+      },
+      "reason": "Only the legacy SSO flow's keepalive performs the Okta SignIn -> ACS -> Dashboard round trip (P2-06 FLOW_PLANS S keepalive, tests/support/boundaries.py:204), which P2-05's reviewed policy permits as the current-owner SAML relay. Local, Remember-Me and human keepalive is a Dashboard-only GET, so an ACS reply there is unreachable."
     },
     {
       "axis": "event",
@@ -301,10 +366,11 @@
           "hourly_chart",
           "hourly_chart_data",
           "login_form_get",
+          "login_post",
           "saml_acs"
         ]
       },
-      "reason": "backfill walks the Dashboard token plus one chart-setup/ChartData pair per history chunk; it has no daily/hourly poll leg and no login handshake."
+      "reason": "backfill walks the Dashboard token plus one chart-setup/ChartData pair per history chunk; it has no daily/hourly poll leg and no login/ACS handshake."
     },
     {
       "axis": "event",
@@ -315,10 +381,11 @@
         "stage": [
           "history_chunk",
           "login_form_get",
+          "login_post",
           "saml_acs"
         ]
       },
-      "reason": "Entry setup runs the Dashboard token plus daily/hourly legs. History is a service call, and the login/ACS handshakes need an expired session that a fresh declared jar does not present."
+      "reason": "Entry setup runs the Dashboard token plus daily/hourly legs. History is a service call, and the login form/POST and ACS handshakes need an expired session that a fresh declared jar does not present."
     },
     {
       "axis": "flow",
@@ -329,10 +396,11 @@
       ],
       "context": {
         "stage": [
-          "login_form_get"
+          "login_form_get",
+          "login_post"
         ]
       },
-      "reason": "The MyMeter email/password login form is the local renewal only: R renews with RememberMe, S with Okta SAML and H carries human-pasted cookies."
+      "reason": "The MyMeter email/password login handshake (form GET and credential POST) is the local renewal only: R renews with RememberMe, S with Okta SAML and H carries human-pasted cookies."
     },
     {
       "axis": "flow",
@@ -424,7 +492,7 @@
       "scope": [
         "pairwise"
       ],
-      "reason": "Corpus fixture gap (reported for P2-03/P2-09): the P2-03 security-step builder is an HTML page, while production classifies the terminal security step from the login POST's JSON Data (pseg_client.py:1141-1145). No stage in this executable matrix can serve that body and observe it, so the kind stays in the nightly declaration and in the fast model probe instead of asserting a fixture/production mismatch as an auth invariant."
+      "reason": "Corpus fixture gap (reported for P2-03/P2-09): the P2-03 security-step builder is an HTML page, while production classifies the terminal security step from the login POST's JSON Data (pseg_client.py:1139-1169). No stage in this executable matrix can serve that body and observe it, so the kind stays in the nightly declaration and in the fast model probe instead of asserting a fixture/production mismatch as an auth invariant."
     }
   ],
   "model_only": [
@@ -436,6 +504,19 @@
   ],
   "rows": [
     {
+      "id": "daily_chart_data::connection_error::sid::post_proof::R::setup::client",
+      "stage": "daily_chart_data",
+      "kind": "connection_error",
+      "cookie": "sid",
+      "position": "post_proof",
+      "flow": "R",
+      "event": "setup",
+      "family": "client",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "daily_chart_data::maintenance::none::post_proof::S::setup::ha",
       "stage": "daily_chart_data",
       "kind": "maintenance",
       "cookie": "none",
@@ -443,10 +524,11 @@
       "flow": "S",
       "event": "setup",
       "family": "ha",
-      "id": "daily_chart_data::maintenance::none::post_proof::S::setup::ha",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "daily_chart_data::missing_token::aux::post_proof::R::setup::ha",
       "stage": "daily_chart_data",
       "kind": "missing_token",
       "cookie": "aux",
@@ -454,10 +536,23 @@
       "flow": "R",
       "event": "setup",
       "family": "ha",
-      "id": "daily_chart_data::missing_token::aux::post_proof::R::setup::ha",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "daily_chart_data::missing_token::none::post_proof::H::poll::ha",
+      "stage": "daily_chart_data",
+      "kind": "missing_token",
+      "cookie": "none",
+      "position": "post_proof",
+      "flow": "H",
+      "event": "poll",
+      "family": "ha",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "daily_chart_data::root_number::remember_me::post_proof::H::poll::client",
       "stage": "daily_chart_data",
       "kind": "root_number",
       "cookie": "remember_me",
@@ -465,10 +560,35 @@
       "flow": "H",
       "event": "poll",
       "family": "client",
-      "id": "daily_chart_data::root_number::remember_me::post_proof::H::poll::client",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "daily_chart_data::root_string::remember_me::post_proof::L::setup::client",
+      "stage": "daily_chart_data",
+      "kind": "root_string",
+      "cookie": "remember_me",
+      "position": "post_proof",
+      "flow": "L",
+      "event": "setup",
+      "family": "client",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "daily_chart_data::unrelated::aux::post_proof::S::setup::ha",
+      "stage": "daily_chart_data",
+      "kind": "unrelated",
+      "cookie": "aux",
+      "position": "post_proof",
+      "flow": "S",
+      "event": "setup",
+      "family": "ha",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "dashboard_verify_token::403::aux::post_proof::L::keepalive::ha",
       "stage": "dashboard_verify_token",
       "kind": "403",
       "cookie": "aux",
@@ -476,10 +596,23 @@
       "flow": "L",
       "event": "keepalive",
       "family": "ha",
-      "id": "dashboard_verify_token::403::aux::post_proof::L::keepalive::ha",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "dashboard_verify_token::403::sid::post_proof::S::keepalive::ha",
+      "stage": "dashboard_verify_token",
+      "kind": "403",
+      "cookie": "sid",
+      "position": "post_proof",
+      "flow": "S",
+      "event": "keepalive",
+      "family": "ha",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "dashboard_verify_token::429::none::pre_proof::H::backfill::ha",
       "stage": "dashboard_verify_token",
       "kind": "429",
       "cookie": "none",
@@ -487,10 +620,23 @@
       "flow": "H",
       "event": "backfill",
       "family": "ha",
-      "id": "dashboard_verify_token::429::none::pre_proof::H::backfill::ha",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "dashboard_verify_token::429::remember_me::pre_proof::R::backfill::ha",
+      "stage": "dashboard_verify_token",
+      "kind": "429",
+      "cookie": "remember_me",
+      "position": "pre_proof",
+      "flow": "R",
+      "event": "backfill",
+      "family": "ha",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "dashboard_verify_token::all_invalid::remember_me::pre_proof::R::setup::ha",
       "stage": "dashboard_verify_token",
       "kind": "all_invalid",
       "cookie": "remember_me",
@@ -498,10 +644,11 @@
       "flow": "R",
       "event": "setup",
       "family": "ha",
-      "id": "dashboard_verify_token::all_invalid::remember_me::pre_proof::R::setup::ha",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "dashboard_verify_token::empty::aux::pre_proof::L::poll::client",
       "stage": "dashboard_verify_token",
       "kind": "empty",
       "cookie": "aux",
@@ -509,10 +656,71 @@
       "flow": "L",
       "event": "poll",
       "family": "client",
-      "id": "dashboard_verify_token::empty::aux::pre_proof::L::poll::client",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "dashboard_verify_token::empty::none::pre_proof::H::backfill::ha",
+      "stage": "dashboard_verify_token",
+      "kind": "empty",
+      "cookie": "none",
+      "position": "pre_proof",
+      "flow": "H",
+      "event": "backfill",
+      "family": "ha",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "dashboard_verify_token::maintenance::aux::pre_proof::L::setup::client",
+      "stage": "dashboard_verify_token",
+      "kind": "maintenance",
+      "cookie": "aux",
+      "position": "pre_proof",
+      "flow": "L",
+      "event": "setup",
+      "family": "client",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "history_chunk::302_login::none::post_proof::R::poll::ha",
+      "stage": "history_chunk",
+      "kind": "302_login",
+      "cookie": "none",
+      "position": "post_proof",
+      "flow": "R",
+      "event": "poll",
+      "family": "ha",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "history_chunk::all_invalid::sid::post_proof::L::backfill::client",
+      "stage": "history_chunk",
+      "kind": "all_invalid",
+      "cookie": "sid",
+      "position": "post_proof",
+      "flow": "L",
+      "event": "backfill",
+      "family": "client",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "history_chunk::root_null::aux::post_proof::S::backfill::ha",
+      "stage": "history_chunk",
+      "kind": "root_null",
+      "cookie": "aux",
+      "position": "post_proof",
+      "flow": "S",
+      "event": "backfill",
+      "family": "ha",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "history_chunk::root_null::remember_me::post_proof::L::backfill::client",
       "stage": "history_chunk",
       "kind": "root_null",
       "cookie": "remember_me",
@@ -520,10 +728,23 @@
       "flow": "L",
       "event": "backfill",
       "family": "client",
-      "id": "history_chunk::root_null::remember_me::post_proof::L::backfill::client",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "history_chunk::root_number::remember_me::post_proof::H::backfill::client",
+      "stage": "history_chunk",
+      "kind": "root_number",
+      "cookie": "remember_me",
+      "position": "post_proof",
+      "flow": "H",
+      "event": "backfill",
+      "family": "client",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "history_chunk::truncated_json::sid::post_proof::R::backfill::client",
       "stage": "history_chunk",
       "kind": "truncated_json",
       "cookie": "sid",
@@ -531,10 +752,11 @@
       "flow": "R",
       "event": "backfill",
       "family": "client",
-      "id": "history_chunk::truncated_json::sid::post_proof::R::backfill::client",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "history_chunk::unrelated::aux::post_proof::S::backfill::ha",
       "stage": "history_chunk",
       "kind": "unrelated",
       "cookie": "aux",
@@ -542,10 +764,11 @@
       "flow": "S",
       "event": "backfill",
       "family": "ha",
-      "id": "history_chunk::unrelated::aux::post_proof::S::backfill::ha",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "hourly_chart::302_login::none::post_proof::R::setup::ha",
       "stage": "hourly_chart",
       "kind": "302_login",
       "cookie": "none",
@@ -553,10 +776,11 @@
       "flow": "R",
       "event": "setup",
       "family": "ha",
-      "id": "hourly_chart::302_login::none::post_proof::R::setup::ha",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "hourly_chart::404::aux::optional::H::setup::client",
       "stage": "hourly_chart",
       "kind": "404",
       "cookie": "aux",
@@ -564,10 +788,47 @@
       "flow": "H",
       "event": "setup",
       "family": "client",
-      "id": "hourly_chart::404::aux::optional::H::setup::client",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "hourly_chart::timeout::aux::optional::H::setup::ha",
+      "stage": "hourly_chart",
+      "kind": "timeout",
+      "cookie": "aux",
+      "position": "optional",
+      "flow": "H",
+      "event": "setup",
+      "family": "ha",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "hourly_chart_data::404::remember_me::optional::R::poll::client",
+      "stage": "hourly_chart_data",
+      "kind": "404",
+      "cookie": "remember_me",
+      "position": "optional",
+      "flow": "R",
+      "event": "poll",
+      "family": "client",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "hourly_chart_data::root_array::none::optional::S::setup::client",
+      "stage": "hourly_chart_data",
+      "kind": "root_array",
+      "cookie": "none",
+      "position": "optional",
+      "flow": "S",
+      "event": "setup",
+      "family": "client",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "hourly_chart_data::root_array::remember_me::optional::R::poll::client",
       "stage": "hourly_chart_data",
       "kind": "root_array",
       "cookie": "remember_me",
@@ -575,10 +836,11 @@
       "flow": "R",
       "event": "poll",
       "family": "client",
-      "id": "hourly_chart_data::root_array::remember_me::optional::R::poll::client",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "hourly_chart_data::root_string::none::post_proof::S::setup::client",
       "stage": "hourly_chart_data",
       "kind": "root_string",
       "cookie": "none",
@@ -586,21 +848,23 @@
       "flow": "S",
       "event": "setup",
       "family": "client",
-      "id": "hourly_chart_data::root_string::none::post_proof::S::setup::client",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
-      "stage": "login_form_get",
-      "kind": "captcha",
-      "cookie": "none",
-      "position": "post_proof",
+      "id": "hourly_chart_data::truncated_json::aux::optional::L::setup::ha",
+      "stage": "hourly_chart_data",
+      "kind": "truncated_json",
+      "cookie": "aux",
+      "position": "optional",
       "flow": "L",
-      "event": "poll",
-      "family": "client",
-      "id": "login_form_get::captcha::none::post_proof::L::poll::client",
+      "event": "setup",
+      "family": "ha",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
       "tier": "fast"
     },
     {
+      "id": "login_form_get::connection_error::remember_me::pre_proof::L::poll::ha",
       "stage": "login_form_get",
       "kind": "connection_error",
       "cookie": "remember_me",
@@ -608,7 +872,31 @@
       "flow": "L",
       "event": "poll",
       "family": "ha",
-      "id": "login_form_get::connection_error::remember_me::pre_proof::L::poll::ha",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "login_post::captcha::none::post_proof::L::poll::ha",
+      "stage": "login_post",
+      "kind": "captcha",
+      "cookie": "none",
+      "position": "post_proof",
+      "flow": "L",
+      "event": "poll",
+      "family": "ha",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
+      "tier": "fast"
+    },
+    {
+      "id": "login_post::timeout::sid::pre_proof::L::poll::client",
+      "stage": "login_post",
+      "kind": "timeout",
+      "cookie": "sid",
+      "position": "pre_proof",
+      "flow": "L",
+      "event": "poll",
+      "family": "client",
+      "note": "current fast row (F3): reselection must not demote a reviewed fast case",
       "tier": "fast"
     },
     {
@@ -660,6 +948,18 @@
       "tier": "fast"
     },
     {
+      "id": "mandatory:login-form-get-is-the-real-get",
+      "stage": "login_form_get",
+      "kind": "500",
+      "cookie": "none",
+      "position": "pre_proof",
+      "flow": "L",
+      "event": "poll",
+      "family": "client",
+      "note": "the login form stage answers the real GET / token read, not POST /Home/Login",
+      "tier": "fast"
+    },
+    {
       "id": "mandatory:non-auth-hourly-daily-fallback",
       "stage": "hourly_chart_data",
       "kind": "500",
@@ -684,6 +984,19 @@
       "tier": "fast"
     },
     {
+      "id": "mandatory:sso-keepalive-acs-relay",
+      "stage": "saml_acs",
+      "kind": "500",
+      "cookie": "none",
+      "position": "pre_proof",
+      "flow": "S",
+      "event": "keepalive",
+      "family": "client",
+      "note": "SSO keepalive really posts ACS (SignIn -> ACS -> Dashboard); the failed relay reply is consumed and quarantined",
+      "tier": "fast"
+    },
+    {
+      "id": "saml_acs::timeout::aux::pre_proof::S::poll::ha",
       "stage": "saml_acs",
       "kind": "timeout",
       "cookie": "aux",
@@ -691,7 +1004,7 @@
       "flow": "S",
       "event": "poll",
       "family": "ha",
-      "id": "saml_acs::timeout::aux::pre_proof::S::poll::ha",
+      "note": "former fast row (F3): reselection must not drop a reviewed fast case",
       "tier": "fast"
     },
     {
@@ -699,21 +1012,21 @@
       "kind": "302_login",
       "cookie": "none",
       "position": "post_proof",
-      "flow": "S",
+      "flow": "L",
       "event": "poll",
       "family": "client",
-      "id": "daily_chart_data::302_login::none::post_proof::S::poll::client",
+      "id": "daily_chart_data::302_login::none::post_proof::L::poll::client",
       "tier": "slow"
     },
     {
       "stage": "daily_chart_data",
       "kind": "401",
-      "cookie": "remember_me",
+      "cookie": "sid",
       "position": "post_proof",
-      "flow": "H",
+      "flow": "S",
       "event": "setup",
       "family": "client",
-      "id": "daily_chart_data::401::remember_me::post_proof::H::setup::client",
+      "id": "daily_chart_data::401::sid::post_proof::S::setup::client",
       "tier": "slow"
     },
     {
@@ -721,54 +1034,54 @@
       "kind": "403",
       "cookie": "remember_me",
       "position": "post_proof",
-      "flow": "L",
-      "event": "setup",
+      "flow": "R",
+      "event": "poll",
       "family": "ha",
-      "id": "daily_chart_data::403::remember_me::post_proof::L::setup::ha",
+      "id": "daily_chart_data::403::remember_me::post_proof::R::poll::ha",
       "tier": "slow"
     },
     {
       "stage": "daily_chart_data",
       "kind": "404",
-      "cookie": "remember_me",
+      "cookie": "sid",
       "position": "post_proof",
-      "flow": "R",
-      "event": "setup",
+      "flow": "S",
+      "event": "poll",
       "family": "client",
-      "id": "daily_chart_data::404::remember_me::post_proof::R::setup::client",
+      "id": "daily_chart_data::404::sid::post_proof::S::poll::client",
       "tier": "slow"
     },
     {
       "stage": "daily_chart_data",
       "kind": "429",
-      "cookie": "sid",
+      "cookie": "remember_me",
       "position": "post_proof",
-      "flow": "R",
-      "event": "poll",
-      "family": "client",
-      "id": "daily_chart_data::429::sid::post_proof::R::poll::client",
+      "flow": "L",
+      "event": "setup",
+      "family": "ha",
+      "id": "daily_chart_data::429::remember_me::post_proof::L::setup::ha",
       "tier": "slow"
     },
     {
       "stage": "daily_chart_data",
       "kind": "500",
-      "cookie": "sid",
+      "cookie": "remember_me",
       "position": "post_proof",
-      "flow": "R",
+      "flow": "L",
       "event": "poll",
-      "family": "ha",
-      "id": "daily_chart_data::500::sid::post_proof::R::poll::ha",
+      "family": "client",
+      "id": "daily_chart_data::500::remember_me::post_proof::L::poll::client",
       "tier": "slow"
     },
     {
       "stage": "daily_chart_data",
       "kind": "503",
-      "cookie": "aux",
+      "cookie": "remember_me",
       "position": "post_proof",
-      "flow": "R",
-      "event": "setup",
+      "flow": "H",
+      "event": "poll",
       "family": "client",
-      "id": "daily_chart_data::503::aux::post_proof::R::setup::client",
+      "id": "daily_chart_data::503::remember_me::post_proof::H::poll::client",
       "tier": "slow"
     },
     {
@@ -777,20 +1090,9 @@
       "cookie": "aux",
       "position": "post_proof",
       "flow": "H",
-      "event": "setup",
-      "family": "ha",
-      "id": "daily_chart_data::all_invalid::aux::post_proof::H::setup::ha",
-      "tier": "slow"
-    },
-    {
-      "stage": "daily_chart_data",
-      "kind": "connection_error",
-      "cookie": "sid",
-      "position": "post_proof",
-      "flow": "S",
-      "event": "setup",
-      "family": "ha",
-      "id": "daily_chart_data::connection_error::sid::post_proof::S::setup::ha",
+      "event": "poll",
+      "family": "client",
+      "id": "daily_chart_data::all_invalid::aux::post_proof::H::poll::client",
       "tier": "slow"
     },
     {
@@ -798,76 +1100,65 @@
       "kind": "empty",
       "cookie": "sid",
       "position": "post_proof",
-      "flow": "H",
-      "event": "setup",
+      "flow": "L",
+      "event": "poll",
+      "family": "client",
+      "id": "daily_chart_data::empty::sid::post_proof::L::poll::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "daily_chart_data",
+      "kind": "maintenance",
+      "cookie": "sid",
+      "position": "post_proof",
+      "flow": "R",
+      "event": "poll",
       "family": "ha",
-      "id": "daily_chart_data::empty::sid::post_proof::H::setup::ha",
+      "id": "daily_chart_data::maintenance::sid::post_proof::R::poll::ha",
       "tier": "slow"
     },
     {
       "stage": "daily_chart_data",
       "kind": "root_array",
-      "cookie": "sid",
+      "cookie": "remember_me",
       "position": "post_proof",
-      "flow": "L",
-      "event": "setup",
+      "flow": "R",
+      "event": "poll",
       "family": "ha",
-      "id": "daily_chart_data::root_array::sid::post_proof::L::setup::ha",
+      "id": "daily_chart_data::root_array::remember_me::post_proof::R::poll::ha",
       "tier": "slow"
     },
     {
       "stage": "daily_chart_data",
       "kind": "root_null",
-      "cookie": "none",
+      "cookie": "sid",
       "position": "post_proof",
-      "flow": "S",
+      "flow": "L",
       "event": "poll",
-      "family": "client",
-      "id": "daily_chart_data::root_null::none::post_proof::S::poll::client",
+      "family": "ha",
+      "id": "daily_chart_data::root_null::sid::post_proof::L::poll::ha",
       "tier": "slow"
     },
     {
       "stage": "daily_chart_data",
       "kind": "root_number",
-      "cookie": "none",
+      "cookie": "aux",
       "position": "post_proof",
       "flow": "S",
       "event": "setup",
-      "family": "ha",
-      "id": "daily_chart_data::root_number::none::post_proof::S::setup::ha",
-      "tier": "slow"
-    },
-    {
-      "stage": "daily_chart_data",
-      "kind": "root_string",
-      "cookie": "aux",
-      "position": "post_proof",
-      "flow": "H",
-      "event": "poll",
       "family": "client",
-      "id": "daily_chart_data::root_string::aux::post_proof::H::poll::client",
+      "id": "daily_chart_data::root_number::aux::post_proof::S::setup::client",
       "tier": "slow"
     },
     {
       "stage": "daily_chart_data",
       "kind": "timeout",
-      "cookie": "none",
+      "cookie": "sid",
       "position": "post_proof",
-      "flow": "R",
+      "flow": "H",
       "event": "poll",
-      "family": "ha",
-      "id": "daily_chart_data::timeout::none::post_proof::R::poll::ha",
-      "tier": "slow"
-    },
-    {
-      "stage": "daily_chart_data",
-      "kind": "truncated_json",
-      "cookie": "aux",
-      "position": "post_proof",
-      "flow": "L",
-      "event": "poll",
-      "family": "ha",
-      "id": "daily_chart_data::truncated_json::aux::post_proof::L::poll::ha",
+      "family": "client",
+      "id": "daily_chart_data::timeout::sid::post_proof::H::poll::client",
       "tier": "slow"
     },
     {
@@ -875,32 +1166,21 @@
       "kind": "truncated_json",
       "cookie": "remember_me",
       "position": "post_proof",
-      "flow": "H",
+      "flow": "R",
       "event": "setup",
       "family": "client",
-      "id": "daily_chart_data::truncated_json::remember_me::post_proof::H::setup::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "daily_chart_data",
-      "kind": "unrelated",
-      "cookie": "none",
-      "position": "post_proof",
-      "flow": "H",
-      "event": "poll",
-      "family": "client",
-      "id": "daily_chart_data::unrelated::none::post_proof::H::poll::client",
+      "id": "daily_chart_data::truncated_json::remember_me::post_proof::R::setup::client",
       "tier": "slow"
     },
     {
       "stage": "daily_chart_data",
       "kind": "valid_success",
-      "cookie": "aux",
+      "cookie": "sid",
       "position": "post_proof",
-      "flow": "H",
-      "event": "setup",
-      "family": "client",
-      "id": "daily_chart_data::valid_success::aux::post_proof::H::setup::client",
+      "flow": "R",
+      "event": "poll",
+      "family": "ha",
+      "id": "daily_chart_data::valid_success::sid::post_proof::R::poll::ha",
       "tier": "slow"
     },
     {
@@ -910,8 +1190,8 @@
       "position": "pre_proof",
       "flow": "L",
       "event": "keepalive",
-      "family": "ha",
-      "id": "dashboard_verify_token::302_login::none::pre_proof::L::keepalive::ha",
+      "family": "client",
+      "id": "dashboard_verify_token::302_login::none::pre_proof::L::keepalive::client",
       "tier": "slow"
     },
     {
@@ -919,54 +1199,54 @@
       "kind": "302_login",
       "cookie": "none",
       "position": "pre_proof",
-      "flow": "L",
-      "event": "poll",
-      "family": "client",
-      "id": "dashboard_verify_token::302_login::none::pre_proof::L::poll::client",
+      "flow": "S",
+      "event": "backfill",
+      "family": "ha",
+      "id": "dashboard_verify_token::302_login::none::pre_proof::S::backfill::ha",
       "tier": "slow"
     },
     {
       "stage": "dashboard_verify_token",
       "kind": "401",
-      "cookie": "sid",
+      "cookie": "aux",
       "position": "pre_proof",
       "flow": "S",
-      "event": "keepalive",
-      "family": "client",
-      "id": "dashboard_verify_token::401::sid::pre_proof::S::keepalive::client",
+      "event": "backfill",
+      "family": "ha",
+      "id": "dashboard_verify_token::401::aux::pre_proof::S::backfill::ha",
       "tier": "slow"
     },
     {
       "stage": "dashboard_verify_token",
       "kind": "404",
-      "cookie": "sid",
+      "cookie": "aux",
       "position": "pre_proof",
-      "flow": "L",
+      "flow": "H",
       "event": "keepalive",
-      "family": "client",
-      "id": "dashboard_verify_token::404::sid::pre_proof::L::keepalive::client",
+      "family": "ha",
+      "id": "dashboard_verify_token::404::aux::pre_proof::H::keepalive::ha",
       "tier": "slow"
     },
     {
       "stage": "dashboard_verify_token",
       "kind": "429",
-      "cookie": "aux",
-      "position": "post_proof",
-      "flow": "L",
+      "cookie": "remember_me",
+      "position": "pre_proof",
+      "flow": "H",
       "event": "keepalive",
       "family": "client",
-      "id": "dashboard_verify_token::429::aux::post_proof::L::keepalive::client",
+      "id": "dashboard_verify_token::429::remember_me::pre_proof::H::keepalive::client",
       "tier": "slow"
     },
     {
       "stage": "dashboard_verify_token",
       "kind": "500",
-      "cookie": "sid",
-      "position": "pre_proof",
-      "flow": "S",
-      "event": "keepalive",
-      "family": "ha",
-      "id": "dashboard_verify_token::500::sid::pre_proof::S::keepalive::ha",
+      "cookie": "aux",
+      "position": "post_proof",
+      "flow": "R",
+      "event": "setup",
+      "family": "client",
+      "id": "dashboard_verify_token::500::aux::post_proof::R::setup::client",
       "tier": "slow"
     },
     {
@@ -974,120 +1254,98 @@
       "kind": "503",
       "cookie": "remember_me",
       "position": "pre_proof",
-      "flow": "R",
+      "flow": "H",
       "event": "keepalive",
       "family": "client",
-      "id": "dashboard_verify_token::503::remember_me::pre_proof::R::keepalive::client",
+      "id": "dashboard_verify_token::503::remember_me::pre_proof::H::keepalive::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "dashboard_verify_token",
+      "kind": "all_invalid",
+      "cookie": "remember_me",
+      "position": "pre_proof",
+      "flow": "R",
+      "event": "poll",
+      "family": "ha",
+      "id": "dashboard_verify_token::all_invalid::remember_me::pre_proof::R::poll::ha",
       "tier": "slow"
     },
     {
       "stage": "dashboard_verify_token",
       "kind": "connection_error",
-      "cookie": "none",
+      "cookie": "aux",
       "position": "post_proof",
-      "flow": "H",
-      "event": "keepalive",
-      "family": "client",
-      "id": "dashboard_verify_token::connection_error::none::post_proof::H::keepalive::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "dashboard_verify_token",
-      "kind": "empty",
-      "cookie": "remember_me",
-      "position": "pre_proof",
-      "flow": "L",
-      "event": "setup",
-      "family": "ha",
-      "id": "dashboard_verify_token::empty::remember_me::pre_proof::L::setup::ha",
-      "tier": "slow"
-    },
-    {
-      "stage": "dashboard_verify_token",
-      "kind": "maintenance",
-      "cookie": "sid",
-      "position": "pre_proof",
-      "flow": "H",
+      "flow": "S",
       "event": "backfill",
       "family": "client",
-      "id": "dashboard_verify_token::maintenance::sid::pre_proof::H::backfill::client",
+      "id": "dashboard_verify_token::connection_error::aux::post_proof::S::backfill::client",
       "tier": "slow"
     },
     {
       "stage": "dashboard_verify_token",
       "kind": "missing_token",
-      "cookie": "sid",
+      "cookie": "remember_me",
       "position": "pre_proof",
       "flow": "L",
       "event": "backfill",
       "family": "client",
-      "id": "dashboard_verify_token::missing_token::sid::pre_proof::L::backfill::client",
+      "id": "dashboard_verify_token::missing_token::remember_me::pre_proof::L::backfill::client",
       "tier": "slow"
     },
     {
       "stage": "dashboard_verify_token",
       "kind": "timeout",
       "cookie": "none",
-      "position": "pre_proof",
+      "position": "post_proof",
       "flow": "R",
-      "event": "keepalive",
+      "event": "backfill",
       "family": "client",
-      "id": "dashboard_verify_token::timeout::none::pre_proof::R::keepalive::client",
+      "id": "dashboard_verify_token::timeout::none::post_proof::R::backfill::client",
       "tier": "slow"
     },
     {
       "stage": "dashboard_verify_token",
       "kind": "unrelated",
-      "cookie": "remember_me",
-      "position": "pre_proof",
-      "flow": "R",
-      "event": "setup",
-      "family": "client",
-      "id": "dashboard_verify_token::unrelated::remember_me::pre_proof::R::setup::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "dashboard_verify_token",
-      "kind": "valid_success",
       "cookie": "none",
       "position": "pre_proof",
-      "flow": "S",
+      "flow": "L",
       "event": "backfill",
       "family": "client",
-      "id": "dashboard_verify_token::valid_success::none::pre_proof::S::backfill::client",
+      "id": "dashboard_verify_token::unrelated::none::pre_proof::L::backfill::client",
       "tier": "slow"
     },
     {
       "stage": "dashboard_verify_token",
       "kind": "valid_success",
-      "cookie": "remember_me",
-      "position": "pre_proof",
+      "cookie": "aux",
+      "position": "post_proof",
       "flow": "R",
       "event": "keepalive",
-      "family": "ha",
-      "id": "dashboard_verify_token::valid_success::remember_me::pre_proof::R::keepalive::ha",
+      "family": "client",
+      "id": "dashboard_verify_token::valid_success::aux::post_proof::R::keepalive::client",
       "tier": "slow"
     },
     {
-      "stage": "history_chunk",
-      "kind": "302_login",
+      "stage": "dashboard_verify_token",
+      "kind": "valid_success",
       "cookie": "none",
-      "position": "post_proof",
-      "flow": "S",
-      "event": "backfill",
+      "position": "pre_proof",
+      "flow": "H",
+      "event": "setup",
       "family": "ha",
-      "id": "history_chunk::302_login::none::post_proof::S::backfill::ha",
+      "id": "dashboard_verify_token::valid_success::none::pre_proof::H::setup::ha",
       "tier": "slow"
     },
     {
       "stage": "history_chunk",
       "kind": "401",
-      "cookie": "aux",
+      "cookie": "sid",
       "position": "post_proof",
-      "flow": "R",
-      "event": "backfill",
-      "family": "ha",
-      "id": "history_chunk::401::aux::post_proof::R::backfill::ha",
+      "flow": "H",
+      "event": "poll",
+      "family": "client",
+      "id": "history_chunk::401::sid::post_proof::H::poll::client",
       "tier": "slow"
     },
     {
@@ -1095,164 +1353,109 @@
       "kind": "403",
       "cookie": "remember_me",
       "position": "post_proof",
-      "flow": "R",
+      "flow": "L",
       "event": "backfill",
-      "family": "ha",
-      "id": "history_chunk::403::remember_me::post_proof::R::backfill::ha",
+      "family": "client",
+      "id": "history_chunk::403::remember_me::post_proof::L::backfill::client",
       "tier": "slow"
     },
     {
       "stage": "history_chunk",
       "kind": "404",
-      "cookie": "remember_me",
+      "cookie": "none",
       "position": "post_proof",
-      "flow": "R",
+      "flow": "L",
       "event": "backfill",
       "family": "ha",
-      "id": "history_chunk::404::remember_me::post_proof::R::backfill::ha",
+      "id": "history_chunk::404::none::post_proof::L::backfill::ha",
       "tier": "slow"
     },
     {
       "stage": "history_chunk",
       "kind": "429",
-      "cookie": "none",
+      "cookie": "remember_me",
       "position": "post_proof",
       "flow": "L",
-      "event": "poll",
-      "family": "ha",
-      "id": "history_chunk::429::none::post_proof::L::poll::ha",
+      "event": "backfill",
+      "family": "client",
+      "id": "history_chunk::429::remember_me::post_proof::L::backfill::client",
       "tier": "slow"
     },
     {
       "stage": "history_chunk",
       "kind": "500",
-      "cookie": "aux",
+      "cookie": "remember_me",
       "position": "post_proof",
       "flow": "H",
       "event": "backfill",
       "family": "ha",
-      "id": "history_chunk::500::aux::post_proof::H::backfill::ha",
+      "id": "history_chunk::500::remember_me::post_proof::H::backfill::ha",
       "tier": "slow"
     },
     {
       "stage": "history_chunk",
       "kind": "503",
-      "cookie": "sid",
+      "cookie": "remember_me",
       "position": "post_proof",
-      "flow": "S",
+      "flow": "R",
       "event": "backfill",
-      "family": "client",
-      "id": "history_chunk::503::sid::post_proof::S::backfill::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "history_chunk",
-      "kind": "all_invalid",
-      "cookie": "none",
-      "position": "post_proof",
-      "flow": "H",
-      "event": "poll",
-      "family": "client",
-      "id": "history_chunk::all_invalid::none::post_proof::H::poll::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "history_chunk",
-      "kind": "all_invalid",
-      "cookie": "sid",
-      "position": "post_proof",
-      "flow": "S",
-      "event": "backfill",
-      "family": "client",
-      "id": "history_chunk::all_invalid::sid::post_proof::S::backfill::client",
+      "family": "ha",
+      "id": "history_chunk::503::remember_me::post_proof::R::backfill::ha",
       "tier": "slow"
     },
     {
       "stage": "history_chunk",
       "kind": "connection_error",
-      "cookie": "sid",
+      "cookie": "aux",
       "position": "post_proof",
-      "flow": "S",
-      "event": "backfill",
+      "flow": "R",
+      "event": "poll",
       "family": "client",
-      "id": "history_chunk::connection_error::sid::post_proof::S::backfill::client",
+      "id": "history_chunk::connection_error::aux::post_proof::R::poll::client",
       "tier": "slow"
     },
     {
       "stage": "history_chunk",
       "kind": "empty",
-      "cookie": "none",
-      "position": "post_proof",
-      "flow": "S",
-      "event": "backfill",
-      "family": "ha",
-      "id": "history_chunk::empty::none::post_proof::S::backfill::ha",
-      "tier": "slow"
-    },
-    {
-      "stage": "history_chunk",
-      "kind": "maintenance",
-      "cookie": "aux",
-      "position": "post_proof",
-      "flow": "R",
-      "event": "backfill",
-      "family": "client",
-      "id": "history_chunk::maintenance::aux::post_proof::R::backfill::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "history_chunk",
-      "kind": "missing_token",
-      "cookie": "none",
-      "position": "post_proof",
-      "flow": "S",
-      "event": "poll",
-      "family": "client",
-      "id": "history_chunk::missing_token::none::post_proof::S::poll::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "history_chunk",
-      "kind": "root_array",
-      "cookie": "aux",
-      "position": "post_proof",
-      "flow": "H",
-      "event": "backfill",
-      "family": "client",
-      "id": "history_chunk::root_array::aux::post_proof::H::backfill::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "history_chunk",
-      "kind": "root_null",
-      "cookie": "aux",
-      "position": "post_proof",
-      "flow": "R",
-      "event": "poll",
-      "family": "client",
-      "id": "history_chunk::root_null::aux::post_proof::R::poll::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "history_chunk",
-      "kind": "root_number",
-      "cookie": "aux",
-      "position": "post_proof",
-      "flow": "R",
-      "event": "backfill",
-      "family": "client",
-      "id": "history_chunk::root_number::aux::post_proof::R::backfill::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "history_chunk",
-      "kind": "root_string",
       "cookie": "remember_me",
       "position": "post_proof",
       "flow": "R",
       "event": "backfill",
       "family": "client",
-      "id": "history_chunk::root_string::remember_me::post_proof::R::backfill::client",
+      "id": "history_chunk::empty::remember_me::post_proof::R::backfill::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "history_chunk",
+      "kind": "maintenance",
+      "cookie": "remember_me",
+      "position": "post_proof",
+      "flow": "H",
+      "event": "backfill",
+      "family": "client",
+      "id": "history_chunk::maintenance::remember_me::post_proof::H::backfill::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "history_chunk",
+      "kind": "missing_token",
+      "cookie": "aux",
+      "position": "post_proof",
+      "flow": "S",
+      "event": "poll",
+      "family": "client",
+      "id": "history_chunk::missing_token::aux::post_proof::S::poll::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "history_chunk",
+      "kind": "root_array",
+      "cookie": "sid",
+      "position": "post_proof",
+      "flow": "H",
+      "event": "backfill",
+      "family": "client",
+      "id": "history_chunk::root_array::sid::post_proof::H::backfill::client",
       "tier": "slow"
     },
     {
@@ -1260,32 +1463,76 @@
       "kind": "root_string",
       "cookie": "sid",
       "position": "post_proof",
-      "flow": "R",
-      "event": "poll",
+      "flow": "H",
+      "event": "backfill",
       "family": "ha",
-      "id": "history_chunk::root_string::sid::post_proof::R::poll::ha",
+      "id": "history_chunk::root_string::sid::post_proof::H::backfill::ha",
       "tier": "slow"
     },
     {
       "stage": "history_chunk",
       "kind": "timeout",
+      "cookie": "remember_me",
+      "position": "post_proof",
+      "flow": "R",
+      "event": "poll",
+      "family": "client",
+      "id": "history_chunk::timeout::remember_me::post_proof::R::poll::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "history_chunk",
+      "kind": "truncated_json",
       "cookie": "none",
       "position": "post_proof",
-      "flow": "H",
+      "flow": "S",
       "event": "backfill",
-      "family": "ha",
-      "id": "history_chunk::timeout::none::post_proof::H::backfill::ha",
+      "family": "client",
+      "id": "history_chunk::truncated_json::none::post_proof::S::backfill::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "history_chunk",
+      "kind": "truncated_json",
+      "cookie": "sid",
+      "position": "post_proof",
+      "flow": "H",
+      "event": "poll",
+      "family": "client",
+      "id": "history_chunk::truncated_json::sid::post_proof::H::poll::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "history_chunk",
+      "kind": "unrelated",
+      "cookie": "remember_me",
+      "position": "post_proof",
+      "flow": "R",
+      "event": "backfill",
+      "family": "client",
+      "id": "history_chunk::unrelated::remember_me::post_proof::R::backfill::client",
       "tier": "slow"
     },
     {
       "stage": "history_chunk",
       "kind": "valid_success",
-      "cookie": "aux",
+      "cookie": "sid",
       "position": "post_proof",
-      "flow": "L",
+      "flow": "S",
       "event": "backfill",
-      "family": "ha",
-      "id": "history_chunk::valid_success::aux::post_proof::L::backfill::ha",
+      "family": "client",
+      "id": "history_chunk::valid_success::sid::post_proof::S::backfill::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "hourly_chart",
+      "kind": "302_login",
+      "cookie": "none",
+      "position": "optional",
+      "flow": "H",
+      "event": "setup",
+      "family": "client",
+      "id": "hourly_chart::302_login::none::optional::H::setup::client",
       "tier": "slow"
     },
     {
@@ -1294,42 +1541,42 @@
       "cookie": "aux",
       "position": "optional",
       "flow": "S",
-      "event": "poll",
-      "family": "client",
-      "id": "hourly_chart::307::aux::optional::S::poll::client",
+      "event": "setup",
+      "family": "ha",
+      "id": "hourly_chart::307::aux::optional::S::setup::ha",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart",
       "kind": "307",
       "cookie": "remember_me",
-      "position": "post_proof",
+      "position": "optional",
       "flow": "H",
-      "event": "poll",
-      "family": "ha",
-      "id": "hourly_chart::307::remember_me::post_proof::H::poll::ha",
+      "event": "setup",
+      "family": "client",
+      "id": "hourly_chart::307::remember_me::optional::H::setup::client",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart",
       "kind": "307",
       "cookie": "sid",
-      "position": "optional",
+      "position": "post_proof",
       "flow": "R",
       "event": "setup",
       "family": "ha",
-      "id": "hourly_chart::307::sid::optional::R::setup::ha",
+      "id": "hourly_chart::307::sid::post_proof::R::setup::ha",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart",
       "kind": "308",
       "cookie": "aux",
-      "position": "optional",
-      "flow": "S",
-      "event": "setup",
-      "family": "ha",
-      "id": "hourly_chart::308::aux::optional::S::setup::ha",
+      "position": "post_proof",
+      "flow": "R",
+      "event": "poll",
+      "family": "client",
+      "id": "hourly_chart::308::aux::post_proof::R::poll::client",
       "tier": "slow"
     },
     {
@@ -1338,9 +1585,9 @@
       "cookie": "remember_me",
       "position": "optional",
       "flow": "H",
-      "event": "poll",
-      "family": "client",
-      "id": "hourly_chart::308::remember_me::optional::H::poll::client",
+      "event": "setup",
+      "family": "ha",
+      "id": "hourly_chart::308::remember_me::optional::H::setup::ha",
       "tier": "slow"
     },
     {
@@ -1348,54 +1595,65 @@
       "kind": "308",
       "cookie": "sid",
       "position": "optional",
-      "flow": "R",
+      "flow": "S",
       "event": "poll",
-      "family": "client",
-      "id": "hourly_chart::308::sid::optional::R::poll::client",
+      "family": "ha",
+      "id": "hourly_chart::308::sid::optional::S::poll::ha",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart",
       "kind": "401",
-      "cookie": "none",
-      "position": "post_proof",
-      "flow": "L",
-      "event": "poll",
-      "family": "client",
-      "id": "hourly_chart::401::none::post_proof::L::poll::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "hourly_chart",
-      "kind": "403",
-      "cookie": "sid",
-      "position": "optional",
-      "flow": "S",
-      "event": "setup",
-      "family": "client",
-      "id": "hourly_chart::403::sid::optional::S::setup::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "hourly_chart",
-      "kind": "429",
-      "cookie": "remember_me",
-      "position": "post_proof",
-      "flow": "L",
-      "event": "setup",
-      "family": "ha",
-      "id": "hourly_chart::429::remember_me::post_proof::L::setup::ha",
-      "tier": "slow"
-    },
-    {
-      "stage": "hourly_chart",
-      "kind": "500",
       "cookie": "remember_me",
       "position": "post_proof",
       "flow": "R",
       "event": "setup",
       "family": "client",
-      "id": "hourly_chart::500::remember_me::post_proof::R::setup::client",
+      "id": "hourly_chart::401::remember_me::post_proof::R::setup::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "hourly_chart",
+      "kind": "403",
+      "cookie": "remember_me",
+      "position": "post_proof",
+      "flow": "L",
+      "event": "setup",
+      "family": "ha",
+      "id": "hourly_chart::403::remember_me::post_proof::L::setup::ha",
+      "tier": "slow"
+    },
+    {
+      "stage": "hourly_chart",
+      "kind": "404",
+      "cookie": "sid",
+      "position": "post_proof",
+      "flow": "S",
+      "event": "setup",
+      "family": "ha",
+      "id": "hourly_chart::404::sid::post_proof::S::setup::ha",
+      "tier": "slow"
+    },
+    {
+      "stage": "hourly_chart",
+      "kind": "429",
+      "cookie": "none",
+      "position": "optional",
+      "flow": "L",
+      "event": "setup",
+      "family": "client",
+      "id": "hourly_chart::429::none::optional::L::setup::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "hourly_chart",
+      "kind": "500",
+      "cookie": "sid",
+      "position": "optional",
+      "flow": "H",
+      "event": "setup",
+      "family": "client",
+      "id": "hourly_chart::500::sid::optional::H::setup::client",
       "tier": "slow"
     },
     {
@@ -1403,87 +1661,65 @@
       "kind": "503",
       "cookie": "none",
       "position": "optional",
-      "flow": "H",
+      "flow": "S",
       "event": "setup",
       "family": "ha",
-      "id": "hourly_chart::503::none::optional::H::setup::ha",
+      "id": "hourly_chart::503::none::optional::S::setup::ha",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart",
       "kind": "connection_error",
-      "cookie": "remember_me",
+      "cookie": "aux",
       "position": "post_proof",
-      "flow": "R",
-      "event": "setup",
-      "family": "client",
-      "id": "hourly_chart::connection_error::remember_me::post_proof::R::setup::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "hourly_chart",
-      "kind": "timeout",
-      "cookie": "remember_me",
-      "position": "optional",
       "flow": "L",
-      "event": "setup",
-      "family": "ha",
-      "id": "hourly_chart::timeout::remember_me::optional::L::setup::ha",
+      "event": "poll",
+      "family": "client",
+      "id": "hourly_chart::connection_error::aux::post_proof::L::poll::client",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart_data",
       "kind": "302_login",
       "cookie": "none",
-      "position": "optional",
-      "flow": "H",
+      "position": "post_proof",
+      "flow": "R",
       "event": "setup",
       "family": "client",
-      "id": "hourly_chart_data::302_login::none::optional::H::setup::client",
+      "id": "hourly_chart_data::302_login::none::post_proof::R::setup::client",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart_data",
       "kind": "403",
       "cookie": "none",
-      "position": "post_proof",
-      "flow": "H",
-      "event": "poll",
-      "family": "ha",
-      "id": "hourly_chart_data::403::none::post_proof::H::poll::ha",
-      "tier": "slow"
-    },
-    {
-      "stage": "hourly_chart_data",
-      "kind": "404",
-      "cookie": "remember_me",
       "position": "optional",
       "flow": "H",
-      "event": "poll",
-      "family": "client",
-      "id": "hourly_chart_data::404::remember_me::optional::H::poll::client",
+      "event": "setup",
+      "family": "ha",
+      "id": "hourly_chart_data::403::none::optional::H::setup::ha",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart_data",
       "kind": "429",
       "cookie": "aux",
-      "position": "optional",
-      "flow": "R",
+      "position": "post_proof",
+      "flow": "H",
       "event": "setup",
       "family": "client",
-      "id": "hourly_chart_data::429::aux::optional::R::setup::client",
+      "id": "hourly_chart_data::429::aux::post_proof::H::setup::client",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart_data",
       "kind": "all_invalid",
-      "cookie": "aux",
+      "cookie": "none",
       "position": "optional",
-      "flow": "L",
+      "flow": "S",
       "event": "setup",
-      "family": "client",
-      "id": "hourly_chart_data::all_invalid::aux::optional::L::setup::client",
+      "family": "ha",
+      "id": "hourly_chart_data::all_invalid::none::optional::S::setup::ha",
       "tier": "slow"
     },
     {
@@ -1491,65 +1727,87 @@
       "kind": "connection_error",
       "cookie": "aux",
       "position": "optional",
-      "flow": "R",
+      "flow": "H",
       "event": "setup",
-      "family": "client",
-      "id": "hourly_chart_data::connection_error::aux::optional::R::setup::client",
+      "family": "ha",
+      "id": "hourly_chart_data::connection_error::aux::optional::H::setup::ha",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart_data",
       "kind": "empty",
-      "cookie": "none",
+      "cookie": "aux",
       "position": "optional",
-      "flow": "R",
+      "flow": "S",
       "event": "setup",
       "family": "ha",
-      "id": "hourly_chart_data::empty::none::optional::R::setup::ha",
+      "id": "hourly_chart_data::empty::aux::optional::S::setup::ha",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart_data",
       "kind": "maintenance",
-      "cookie": "remember_me",
-      "position": "optional",
-      "flow": "L",
-      "event": "poll",
-      "family": "client",
-      "id": "hourly_chart_data::maintenance::remember_me::optional::L::poll::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "hourly_chart_data",
-      "kind": "missing_token",
-      "cookie": "remember_me",
-      "position": "optional",
-      "flow": "H",
-      "event": "poll",
-      "family": "client",
-      "id": "hourly_chart_data::missing_token::remember_me::optional::H::poll::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "hourly_chart_data",
-      "kind": "root_array",
       "cookie": "none",
       "position": "optional",
       "flow": "S",
       "event": "poll",
       "family": "ha",
-      "id": "hourly_chart_data::root_array::none::optional::S::poll::ha",
+      "id": "hourly_chart_data::maintenance::none::optional::S::poll::ha",
+      "tier": "slow"
+    },
+    {
+      "stage": "hourly_chart_data",
+      "kind": "missing_token",
+      "cookie": "sid",
+      "position": "optional",
+      "flow": "R",
+      "event": "setup",
+      "family": "client",
+      "id": "hourly_chart_data::missing_token::sid::optional::R::setup::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "hourly_chart_data",
+      "kind": "root_array",
+      "cookie": "aux",
+      "position": "optional",
+      "flow": "L",
+      "event": "poll",
+      "family": "client",
+      "id": "hourly_chart_data::root_array::aux::optional::L::poll::client",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart_data",
       "kind": "root_null",
-      "cookie": "sid",
+      "cookie": "none",
+      "position": "post_proof",
+      "flow": "R",
+      "event": "poll",
+      "family": "ha",
+      "id": "hourly_chart_data::root_null::none::post_proof::R::poll::ha",
+      "tier": "slow"
+    },
+    {
+      "stage": "hourly_chart_data",
+      "kind": "root_null",
+      "cookie": "remember_me",
       "position": "optional",
       "flow": "H",
       "event": "setup",
+      "family": "client",
+      "id": "hourly_chart_data::root_null::remember_me::optional::H::setup::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "hourly_chart_data",
+      "kind": "root_number",
+      "cookie": "none",
+      "position": "optional",
+      "flow": "L",
+      "event": "poll",
       "family": "ha",
-      "id": "hourly_chart_data::root_null::sid::optional::H::setup::ha",
+      "id": "hourly_chart_data::root_number::none::optional::L::poll::ha",
       "tier": "slow"
     },
     {
@@ -1557,54 +1815,43 @@
       "kind": "root_number",
       "cookie": "sid",
       "position": "optional",
-      "flow": "L",
+      "flow": "R",
       "event": "setup",
       "family": "ha",
-      "id": "hourly_chart_data::root_number::sid::optional::L::setup::ha",
+      "id": "hourly_chart_data::root_number::sid::optional::R::setup::ha",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart_data",
       "kind": "root_string",
-      "cookie": "remember_me",
+      "cookie": "aux",
       "position": "optional",
-      "flow": "L",
-      "event": "setup",
+      "flow": "S",
+      "event": "poll",
       "family": "ha",
-      "id": "hourly_chart_data::root_string::remember_me::optional::L::setup::ha",
+      "id": "hourly_chart_data::root_string::aux::optional::S::poll::ha",
+      "tier": "slow"
+    },
+    {
+      "stage": "hourly_chart_data",
+      "kind": "root_string",
+      "cookie": "none",
+      "position": "post_proof",
+      "flow": "R",
+      "event": "poll",
+      "family": "ha",
+      "id": "hourly_chart_data::root_string::none::post_proof::R::poll::ha",
       "tier": "slow"
     },
     {
       "stage": "hourly_chart_data",
       "kind": "timeout",
-      "cookie": "sid",
+      "cookie": "aux",
       "position": "post_proof",
-      "flow": "H",
-      "event": "setup",
-      "family": "client",
-      "id": "hourly_chart_data::timeout::sid::post_proof::H::setup::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "hourly_chart_data",
-      "kind": "truncated_json",
-      "cookie": "none",
-      "position": "optional",
-      "flow": "H",
-      "event": "setup",
-      "family": "ha",
-      "id": "hourly_chart_data::truncated_json::none::optional::H::setup::ha",
-      "tier": "slow"
-    },
-    {
-      "stage": "hourly_chart_data",
-      "kind": "truncated_json",
-      "cookie": "sid",
-      "position": "post_proof",
-      "flow": "S",
+      "flow": "L",
       "event": "poll",
-      "family": "client",
-      "id": "hourly_chart_data::truncated_json::sid::post_proof::S::poll::client",
+      "family": "ha",
+      "id": "hourly_chart_data::timeout::aux::post_proof::L::poll::ha",
       "tier": "slow"
     },
     {
@@ -1612,98 +1859,131 @@
       "kind": "unrelated",
       "cookie": "sid",
       "position": "optional",
-      "flow": "L",
+      "flow": "H",
       "event": "poll",
       "family": "client",
-      "id": "hourly_chart_data::unrelated::sid::optional::L::poll::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "login_form_get",
-      "kind": "500",
-      "cookie": "aux",
-      "position": "post_proof",
-      "flow": "L",
-      "event": "poll",
-      "family": "client",
-      "id": "login_form_get::500::aux::post_proof::L::poll::client",
+      "id": "hourly_chart_data::unrelated::sid::optional::H::poll::client",
       "tier": "slow"
     },
     {
       "stage": "login_form_get",
       "kind": "503",
-      "cookie": "none",
+      "cookie": "sid",
       "position": "post_proof",
       "flow": "L",
       "event": "poll",
       "family": "client",
-      "id": "login_form_get::503::none::post_proof::L::poll::client",
+      "id": "login_form_get::503::sid::post_proof::L::poll::client",
       "tier": "slow"
     },
     {
       "stage": "login_form_get",
+      "kind": "timeout",
+      "cookie": "aux",
+      "position": "pre_proof",
+      "flow": "L",
+      "event": "poll",
+      "family": "ha",
+      "id": "login_form_get::timeout::aux::pre_proof::L::poll::ha",
+      "tier": "slow"
+    },
+    {
+      "stage": "login_form_get",
+      "kind": "valid_success",
+      "cookie": "none",
+      "position": "pre_proof",
+      "flow": "L",
+      "event": "poll",
+      "family": "ha",
+      "id": "login_form_get::valid_success::none::pre_proof::L::poll::ha",
+      "tier": "slow"
+    },
+    {
+      "stage": "login_post",
+      "kind": "500",
+      "cookie": "remember_me",
+      "position": "pre_proof",
+      "flow": "L",
+      "event": "poll",
+      "family": "ha",
+      "id": "login_post::500::remember_me::pre_proof::L::poll::ha",
+      "tier": "slow"
+    },
+    {
+      "stage": "login_post",
+      "kind": "503",
+      "cookie": "remember_me",
+      "position": "post_proof",
+      "flow": "L",
+      "event": "poll",
+      "family": "client",
+      "id": "login_post::503::remember_me::post_proof::L::poll::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "login_post",
       "kind": "captcha",
       "cookie": "none",
       "position": "pre_proof",
       "flow": "L",
       "event": "poll",
-      "family": "ha",
-      "id": "login_form_get::captcha::none::pre_proof::L::poll::ha",
-      "tier": "slow"
-    },
-    {
-      "stage": "login_form_get",
-      "kind": "timeout",
-      "cookie": "sid",
-      "position": "pre_proof",
-      "flow": "L",
-      "event": "poll",
       "family": "client",
-      "id": "login_form_get::timeout::sid::pre_proof::L::poll::client",
+      "id": "login_post::captcha::none::pre_proof::L::poll::client",
       "tier": "slow"
     },
     {
-      "stage": "login_form_get",
-      "kind": "valid_success",
-      "cookie": "sid",
+      "stage": "login_post",
+      "kind": "connection_error",
+      "cookie": "aux",
       "position": "post_proof",
       "flow": "L",
       "event": "poll",
       "family": "ha",
-      "id": "login_form_get::valid_success::sid::post_proof::L::poll::ha",
+      "id": "login_post::connection_error::aux::post_proof::L::poll::ha",
+      "tier": "slow"
+    },
+    {
+      "stage": "login_post",
+      "kind": "valid_success",
+      "cookie": "remember_me",
+      "position": "pre_proof",
+      "flow": "L",
+      "event": "poll",
+      "family": "client",
+      "id": "login_post::valid_success::remember_me::pre_proof::L::poll::client",
       "tier": "slow"
     },
     {
       "stage": "saml_acs",
       "kind": "401",
       "cookie": "none",
-      "position": "post_proof",
+      "position": "pre_proof",
       "flow": "S",
-      "event": "poll",
-      "family": "ha",
-      "id": "saml_acs::401::none::post_proof::S::poll::ha",
+      "event": "keepalive",
+      "family": "client",
+      "id": "saml_acs::401::none::pre_proof::S::keepalive::client",
       "tier": "slow"
     },
     {
       "stage": "saml_acs",
       "kind": "403",
-      "cookie": "none",
+      "cookie": "aux",
       "position": "pre_proof",
       "flow": "S",
       "event": "poll",
-      "family": "ha",
-      "id": "saml_acs::403::none::pre_proof::S::poll::ha",
+      "family": "client",
+      "id": "saml_acs::403::aux::pre_proof::S::poll::client",
       "tier": "slow"
     },
     {
       "stage": "saml_acs",
       "kind": "404",
-      "cookie": "none",
+      "cookie": "aux",
       "position": "post_proof",
       "flow": "S",
-      "event": "poll",
-      "family": "ha",
-      "id": "saml_acs::404::none::post_proof::S::poll::ha",
+      "event": "keepalive",
+      "family": "client",
+      "id": "saml_acs::404::aux::post_proof::S::keepalive::client",
       "tier": "slow"
     },
     {
@@ -1713,41 +1993,41 @@
       "position": "post_proof",
       "flow": "S",
       "event": "poll",
-      "family": "client",
-      "id": "saml_acs::429::sid::post_proof::S::poll::client",
-      "tier": "slow"
-    },
-    {
-      "stage": "saml_acs",
-      "kind": "500",
-      "cookie": "sid",
-      "position": "post_proof",
-      "flow": "S",
-      "event": "poll",
       "family": "ha",
-      "id": "saml_acs::500::sid::post_proof::S::poll::ha",
+      "id": "saml_acs::429::sid::post_proof::S::poll::ha",
       "tier": "slow"
     },
     {
       "stage": "saml_acs",
       "kind": "503",
-      "cookie": "none",
+      "cookie": "aux",
       "position": "post_proof",
       "flow": "S",
       "event": "poll",
-      "family": "ha",
-      "id": "saml_acs::503::none::post_proof::S::poll::ha",
+      "family": "client",
+      "id": "saml_acs::503::aux::post_proof::S::poll::client",
       "tier": "slow"
     },
     {
       "stage": "saml_acs",
       "kind": "connection_error",
-      "cookie": "sid",
+      "cookie": "none",
+      "position": "pre_proof",
+      "flow": "S",
+      "event": "keepalive",
+      "family": "client",
+      "id": "saml_acs::connection_error::none::pre_proof::S::keepalive::client",
+      "tier": "slow"
+    },
+    {
+      "stage": "saml_acs",
+      "kind": "timeout",
+      "cookie": "aux",
       "position": "post_proof",
       "flow": "S",
-      "event": "poll",
+      "event": "keepalive",
       "family": "ha",
-      "id": "saml_acs::connection_error::sid::post_proof::S::poll::ha",
+      "id": "saml_acs::timeout::aux::post_proof::S::keepalive::ha",
       "tier": "slow"
     }
   ]
