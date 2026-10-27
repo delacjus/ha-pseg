@@ -25,6 +25,13 @@ from custom_components.pseg.const import (
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
 from custom_components.pseg.pseg_client import PsegClient, PsegTransientError
 from custom_components.pseg.renewal_admission import RenewalAdmission
+from tests.support.synchronization import (
+    ObservedLock,
+    join_thread,
+    wait_event,
+    wait_event_async,
+    wait_task,
+)
 
 METER = "12345"
 TOKEN_HTML = '<input name="__RequestVerificationToken" value="synthetic-af"/>'
@@ -198,6 +205,7 @@ def test_real_adapter_same_client_poll_waits_for_keepalive_transaction():
     portal = Portal(block_chart=True)
     c = client_with(portal)
     outcomes = []
+    c._lock = ObservedLock(c._lock, "keepalive/poll client lock")
     keep = threading.Thread(target=lambda: outcomes.append(c.keepalive()))
     poll_started = threading.Event()
     def poll():
@@ -210,14 +218,13 @@ def test_real_adapter_same_client_poll_waits_for_keepalive_transaction():
         before = len(portal.events)
         poll_thread.start()
         assert poll_started.wait(2)
-        poll_thread.join(.1)
+        wait_event(c._lock.contended, "poll waiting on keepalive transaction")
         assert poll_thread.is_alive()
         assert len(portal.events) == before
     finally:
         portal.release_all()
-        keep.join(5)
-        if poll_thread.ident:
-            poll_thread.join(5)
+        join_thread(keep, "keepalive transaction")
+        join_thread(poll_thread, "poll transaction")
     assert outcomes == [True, True]
     assert c._renewal_admission.sequences == 1
 
@@ -241,6 +248,8 @@ async def test_actual_entry_reload_does_not_overlap_old_and_new_renewal(hass, mo
     def factory(**kwargs):
         c = real_client(**kwargs)
         p = Portal(block_probe=not clients, block_renew=True)
+        if clients:
+            p.renew_entered = replacement_renewal
         c.session.mount("https://", p)
         clients.append(c)
         adapters.append(p)
@@ -265,18 +274,18 @@ async def test_actual_entry_reload_does_not_overlap_old_and_new_renewal(hass, mo
     old_task = asyncio.create_task(old._async_keepalive(None))
     new_task = None
     overlap = False
+    replacement_renewal = threading.Event()
+    # The adapter signals at the actual second Dashboard request, not setup entry.
     try:
         assert await asyncio.to_thread(adapters[0].probe_entered.wait, 4)
         assert await hass.config_entries.async_unload(entry.entry_id)
         assert old._stopped
         new_task = asyncio.create_task(hass.config_entries.async_setup(entry.entry_id))
-        for _ in range(100):
-            if len(adapters) > 1 and adapters[1].renew_entered.is_set():
-                break
-            await asyncio.sleep(.02)
+        await wait_event_async(replacement_renewal, "replacement renewal Dashboard arrival")
         assert len(adapters) == 2 and adapters[1].renew_entered.is_set()
         adapters[0].probe_release.set()
-        overlap = await asyncio.to_thread(adapters[0].renew_entered.wait, 3)
+        await wait_task(old_task, "retired keepalive completion")
+        overlap = adapters[0].renew_entered.is_set()
         print("RELOAD_PROOF", {"old_retired": old._stopped,
             "different_clients": clients[0] is not clients[1],
             "different_admissions": clients[0]._renewal_admission is not clients[1]._renewal_admission,

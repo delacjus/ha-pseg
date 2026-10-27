@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 import threading
-import time
 from unittest.mock import AsyncMock, patch
 import urllib.parse
 
@@ -16,6 +15,14 @@ import requests_mock
 from custom_components.pseg.const import PORTAL_BASE_URL
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
 from custom_components.pseg.pseg_client import PsegClient, PsegTransientError
+from tests.support.synchronization import (
+    ObservedAsyncLock,
+    ObservedLock,
+    join_thread,
+    wait_event,
+    wait_event_async,
+    wait_task,
+)
 
 DASHBOARD = '<input name="__RequestVerificationToken" value="t"/>Dashboard'
 
@@ -24,11 +31,15 @@ def test_concurrent_chart_requests_do_not_interleave() -> None:
     """MyMeter keeps the chart range server-side: poll and backfill must not interleave."""
     client = PsegClient(portal_cookies="MM_SID=x")
     state: dict = {}
+    client._lock = ObservedLock(client._lock, "poll/backfill client lock")
+    chart_arrived = threading.Event()
+    chart_release = threading.Event()
+    data_arrived = threading.Event()
+    data_release = threading.Event()
 
     def chart(req, ctx):
         q = urllib.parse.parse_qs(req.text)
         state["range"] = (q["Start"][0], q["End"][0])
-        time.sleep(0.05)
         return ""
 
     def data(req, ctx):
@@ -39,7 +50,6 @@ def test_concurrent_chart_requests_do_not_interleave() -> None:
         while d <= d1:
             pts.append({"y": 1.0, "hs": {"start": d.strftime("%m/%d/%Y")}})
             d += timedelta(days=1)
-        time.sleep(0.05)
         return {"Data": {"series": [{"name": "Meter #1", "data": pts}]}}
 
     out: dict = {}
@@ -53,11 +63,36 @@ def test_concurrent_chart_requests_do_not_interleave() -> None:
             )
         )
         t2 = threading.Thread(target=lambda: out.setdefault("poll", client.fetch_energy_data(14)))
-        t1.start()
-        time.sleep(0.03)
-        t2.start()
-        t1.join()
-        t2.join()
+        real_send = client.session.send
+
+        def send(request, **kwargs):
+            response = real_send(request, **kwargs)
+            # Pause outside requests_mock's callback lock, at the real response
+            # boundaries where the old sleeps tried to let the poll interleave.
+            if threading.current_thread() is t1:
+                path = urllib.parse.urlparse(request.url).path
+                if path == "/Dashboard/Chart" and not chart_arrived.is_set():
+                    chart_arrived.set()
+                    wait_event(chart_release, "backfill Chart response release")
+                elif path == "/Dashboard/ChartData" and not data_arrived.is_set():
+                    data_arrived.set()
+                    wait_event(data_release, "backfill ChartData response release")
+            return response
+
+        with patch.object(client.session, "send", side_effect=send):
+            t1.start()
+            try:
+                wait_event(chart_arrived, "backfill Chart response arrival")
+                t2.start()
+                wait_event(client._lock.contended, "poll waiting on backfill client lock")
+                chart_release.set()
+                wait_event(data_arrived, "backfill ChartData response arrival")
+                data_release.set()
+            finally:
+                chart_release.set()
+                data_release.set()
+                join_thread(t1, "backfill")
+                join_thread(t2, "poll")
 
     poll = out["poll"]["history_14d"]
     bf_dates = [r["date"] for r in out["bf"]]
@@ -74,13 +109,18 @@ async def test_coordinator_serializes_poll_and_backfill(hass: HomeAssistant) -> 
     active = 0
     max_active = 0
     guard = threading.Lock()
+    entered = threading.Event()
+    release = threading.Event()
+    coord._update_lock = ObservedAsyncLock(coord._update_lock, "coordinator update lock")
 
     def _enter() -> None:
         nonlocal active, max_active
         with guard:
             active += 1
             max_active = max(max_active, active)
-        time.sleep(0.05)
+        if not entered.is_set():
+            entered.set()
+            wait_event(release, "first coordinator fetch release")
 
     def _leave() -> None:
         nonlocal active
@@ -100,15 +140,25 @@ async def test_coordinator_serializes_poll_and_backfill(hass: HomeAssistant) -> 
         _leave()
 
     with (
-        patch.object(client, "fetch_energy_data", side_effect=fake_poll),
-        patch.object(client, "fetch_history_range", side_effect=fake_history),
+        # Plain functions retain the real executor boundary; HA runs Mock jobs
+        # inline, where a blocking handshake would stop the event loop.
+        patch.object(client, "fetch_energy_data", new=fake_poll),
+        patch.object(client, "fetch_history_range", new=fake_history),
         patch.object(coord, "async_record_statistics", AsyncMock(side_effect=fake_record)),
     ):
-        await asyncio.gather(
-            coord._async_update_data(),
-            coord.async_backfill_history("2026-10-01", "2026-10-20"),
-            coord._async_update_data(),
-        )
+        tasks = [asyncio.create_task(coord._async_update_data())]
+        try:
+            await wait_event_async(entered, "first coordinator fetch arrival")
+            tasks.extend([
+                asyncio.create_task(coord.async_backfill_history("2026-10-01", "2026-10-20")),
+                asyncio.create_task(coord._async_update_data()),
+            ])
+            await wait_event_async(coord._update_lock.contended, "queued coordinator update")
+            release.set()
+            await wait_task(asyncio.gather(*tasks), "serialized coordinator operations")
+        finally:
+            release.set()
+            await wait_task(asyncio.gather(*tasks, return_exceptions=True), "coordinator cleanup")
 
     assert max_active == 1
 
@@ -203,6 +253,7 @@ def test_keepalive_holds_the_client_lock_across_a_renewal() -> None:
     client.set_expected_meter_ids({"12345"})
     parked = threading.Event()
     release = threading.Event()
+    client._lock = ObservedLock(client._lock, "renewal client lock")
     calls = {"n": 0}
     guard = threading.Lock()
 
@@ -236,16 +287,19 @@ def test_keepalive_holds_the_client_lock_across_a_renewal() -> None:
         first = threading.Thread(
             target=lambda: outcome.setdefault("keepalive", client.keepalive())
         )
-        first.start()
-        assert parked.wait(5)
         second = threading.Thread(target=client.renew_remember_me)
-        second.start()
-        time.sleep(0.5)
-        # Parked inside the renewal: the second caller must not send a request yet.
-        assert dash.call_count == 1
-        release.set()
-        first.join(10)
-        second.join(10)
+        first.start()
+        try:
+            wait_event(parked, "keepalive Dashboard arrival")
+            assert parked.wait(5)
+            second.start()
+            wait_event(client._lock.contended, "renewal waiting on keepalive client lock")
+            # Parked inside the renewal: the second caller must not send a request yet.
+            assert dash.call_count == 1
+        finally:
+            release.set()
+            join_thread(first, "keepalive")
+            join_thread(second, "renewal")
 
     assert dash.call_count >= 2
     assert outcome["keepalive"] is True
@@ -254,6 +308,7 @@ def test_keepalive_holds_the_client_lock_across_a_renewal() -> None:
 def test_public_renewal_entry_point_waits_for_the_client_lock() -> None:
     """The RLock is what makes the shared admission non-racy between entry points."""
     client = PsegClient(portal_cookies="MM_SID=dead; MM_RememberMe=remember-token")
+    client._lock = ObservedLock(client._lock, "renewal entry-point client lock")
     assert client._lock.acquire(timeout=1)
     done = threading.Event()
     started = threading.Event()
@@ -273,6 +328,7 @@ def test_public_renewal_entry_point_waits_for_the_client_lock() -> None:
         thread.start()
         try:
             assert started.wait(5)
+            wait_event(client._lock.contended, "renewal waiting on held client lock")
             # While another portal operation holds the lock, no request may start.
             assert not done.wait(0.25)
         finally:
