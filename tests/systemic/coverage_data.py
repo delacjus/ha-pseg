@@ -27,6 +27,10 @@ NEW_MODULES = frozenset(
         "tests/systemic/test_coverage_meta.py",
         "tests/systemic/test_auth_systemic_catalog.py",
         "tests/systemic/test_gate_b_generator_regressions.py",
+        # Gate B B1/B6/B7 live-driver regressions: a new module in this phase, so
+        # its fast nodes are declared here rather than written into the pre-phase
+        # BASELINE_FAST fingerprint.
+        "tests/systemic/test_gate_b_oracle_regressions.py",
     }
 )
 

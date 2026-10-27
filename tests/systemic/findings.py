@@ -2055,3 +2055,61 @@ GENERATOR_FIX_CLOSURES = (
     },
 )
 
+# Gate B is a harness soundness review, separate from the production R1-R9 lineage.
+GATE_B_ORACLE_CLOSURES = (
+    {
+        "id": "B1",
+        "source_kb": "8e261d0b-ae95-4f56-bbf9-905173bebf5c",
+        "invariants": ("I7", "I8"),
+        "cases": (
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_live_i7",
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_live_i7_healthy_single_sequence",
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_live_i7_transient_retry_across_cold_restart",
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_live_i7_success_with_intermediate_transient_earns_no_retry",
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_live_i8_terminal_sends",
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_live_i8_terminal_history_survives_unhuman_disk_clear",
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_live_i8_human_rearm_sends_are_exempt",
+        ),
+        "evidence": (
+            "I7 counts the driver's observed Remember-Me renewal attempts per MM_RememberMe "
+            "generation and human epoch, spaced by the driver clock, with a retry earned only by "
+            "a whole-sequence settlement of transient failure: an eventual success settles the "
+            "sequence even when an intermediate reply was transient. I8 is raised at step time by "
+            "an actual Login/ACS/renewal send while a terminal reason was persisted at send time "
+            "or while the oracle's own per-entry terminal history is latched; disk state alone "
+            "cannot clear that history, only a completed human rearm can. No production "
+            "admission, validity or confirmation predicate is called."
+        ),
+    },
+    {
+        "id": "B6",
+        "source_kb": "8e261d0b-ae95-4f56-bbf9-905173bebf5c",
+        "invariants": ("I12",),
+        "cases": (
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_recorder_error_is_invalid",
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_run_case_rejects_unavailable_recorder_without_oracle",
+        ),
+        "evidence": (
+            "A recorder read exception yields rows=None with recorder_error set, never an empty "
+            "series; evaluate_i12 and observe_step raise INVALID I12, and run_case rejects the "
+            "case at its first and every later snapshot even with no oracle attached."
+        ),
+    },
+    {
+        "id": "B7",
+        "source_kb": "8e261d0b-ae95-4f56-bbf9-905173bebf5c",
+        "invariants": (),
+        "cases": (
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_primary_error_attempts_ending_and_cleans_up",
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_primary_error_survives_ending_and_cleanup_errors",
+            "tests/systemic/test_gate_b_oracle_regressions.py::test_consumed_pre_fence_gate_is_drained_on_body_failure",
+        ),
+        "evidence": (
+            "A failing case still attempts and records all four ending steps, keeps the primary "
+            "exception object, notes secondary ending/cleanup failures on it, and releases "
+            "gates, tasks and the loaded entry in finally. A pre-fence gate the factory consumed "
+            "and cleared is retained by the driver and drained in finally, so a body fault after "
+            "arrival is released by cleanup (measured well under the gate's 10s timeout)."
+        ),
+    },
+)
