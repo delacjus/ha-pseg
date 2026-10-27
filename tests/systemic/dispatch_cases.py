@@ -103,6 +103,14 @@ def _case(
 #: fence controls the acceptance command repeats ten times.
 FAST_CASES: tuple[FenceCase, ...] = (
     _case(
+        "fast_setup_chartdata_unload",
+        "L",
+        "setup",
+        _stage_boundary("L", "setup", "GET", "/Dashboard/ChartData"),
+        "unload",
+        "retire the active constructing owner at setup's third request, then unload",
+    ),
+    _case(
         "fast_first_poll_unload",
         "L",
         "poll",
@@ -232,7 +240,7 @@ def slow_case_matrix() -> tuple[FenceCase, ...]:
     cases: list[FenceCase] = []
     for flow in FLOWS:
         for index, (operation, boundary) in enumerate(sweepable_boundaries(flow)):
-            transition = slow_transition(flow, index)
+            transition = "unload" if operation == "setup" else slow_transition(flow, index)
             cases.append(
                 FenceCase(
                     case_id=f"slow_{flow}_{operation}_{boundary.method.lower()}"
@@ -251,7 +259,7 @@ def slow_case_matrix() -> tuple[FenceCase, ...]:
 SLOW_CASES: tuple[FenceCase, ...] = slow_case_matrix()
 
 #: Boundaries that are inventoried but cannot be retirement-fenced in flight.
-EXCLUDED_OPERATIONS: tuple[str, ...] = ("setup", "reauth", "reconfigure")
+EXCLUDED_OPERATIONS: tuple[str, ...] = ("reauth", "reconfigure")
 
 
 def inventory_summary() -> dict[str, dict[str, int]]:

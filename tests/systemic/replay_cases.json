@@ -36,8 +36,8 @@
               "message": "retired generation",
               "statement": {
                 "file": "tests/support/boundaries.py",
-                "lineno": 1043,
-                "end_lineno": 1046
+                "lineno": 1268,
+                "end_lineno": 1271
               }
             },
             {
@@ -46,8 +46,8 @@
               "message": "retired generation",
               "statement": {
                 "file": "tests/support/boundaries.py",
-                "lineno": 1043,
-                "end_lineno": 1046
+                "lineno": 1268,
+                "end_lineno": 1271
               }
             }
           ],

@@ -23,13 +23,15 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping, Sequence
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
+from http.cookies import SimpleCookie
 import threading
 from types import MappingProxyType
 from typing import Any
 import urllib.parse
 
+from freezegun import freeze_time
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -39,13 +41,16 @@ from custom_components.pseg.const import (
     CONF_METER_ID,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
+    CONF_RENEWAL_ADMISSION,
     DOMAIN,
     OKTA_HOST,
     PORTAL_HOST,
 )
 
-from .expectation import Checkpoint, ExpectationState
+from .corpus import Stage
+from .expectation import Checkpoint, ExpectationState, apply_step
 from .factory import ClientFactory, ClientRegistry
+from .flows import FlowStep
 from .lifecycle import LifecycleDriver, Snapshot, run_case, script_healthy_portal
 from .oracle import Oracle
 from .portal import Dispatch, Gate, Reply, ScriptedPortal
@@ -72,6 +77,10 @@ CHART_JSON = (
 
 BACKFILL_START = "2026-10-01"
 BACKFILL_END = "2026-10-10"
+
+#: Frozen declared clock for every fence case. Admission timestamps are declared
+#: data, so the expected policy bytes stay exact instead of reading the run's clock.
+DECLARED_CLOCK = "2026-10-26T12:00:00+00:00"
 
 
 class BoundaryClass(StrEnum):
@@ -235,9 +244,9 @@ OPERATIONS: tuple[str, ...] = (
 )
 
 #: Operations whose boundaries are swept by parking a real dispatch and retiring its
-#: owning generation. Setup is covered by the pre-fence factory gate case; reauth and
+#: owning generation. Setup is also swept in flight; reauth and
 #: reconfigure run on unattached human/options generations (see EXCLUSIONS).
-SWEEP_OPERATIONS: tuple[str, ...] = ("poll", "auth_renewal", "keepalive", "backfill")
+SWEEP_OPERATIONS: tuple[str, ...] = ("poll", "auth_renewal", "keepalive", "backfill", "setup")
 
 RETIREMENT_TRANSITIONS: tuple[str, ...] = ("unload", "reload", "stop", "cancel", "handoff")
 
@@ -246,13 +255,6 @@ ATTACHED_TRANSITIONS: tuple[str, ...] = RETIREMENT_TRANSITIONS
 
 EXCLUSIONS: Mapping[str, str] = MappingProxyType(
     {
-        "setup": (
-            "Initial-setup boundaries after the first request are not reachable for "
-            "retirement: once the owner is retired before the first request, the "
-            "production fence refuses it and HA aborts setup (SETUP_RETRY), so no later "
-            "setup dispatch exists. The first-request boundary is covered by the "
-            "pre-fence factory-gate case instead."
-        ),
         "reauth": (
             "Human reauth verification generations are unattached: no coordinator owns "
             "them, no renewal token exists, and I1's explicit unattached-human exemption "
@@ -542,7 +544,6 @@ def model_partial_live_jar(driver: LifecycleDriver, name: str = "MM_SID") -> Non
         cookies.clear(cookie.domain, cookie.path, cookie.name)
 
 
-
 def _portal_cookie(name: str, value: str, domain: str) -> dict[str, Any]:
     return {"name": name, "value": value, "domain": domain, "path": "/", "secure": True}
 
@@ -613,7 +614,13 @@ def register_initial_jar(oracle: Oracle, entry: MockConfigEntry) -> None:
 
 
 def register_scripted_eligibility(oracle: Oracle, portal: ScriptedPortal) -> None:
-    """Declare eligible scripted replies' cookies as provenance sources."""
+    """Register completed eligible G1 replies; retain other suites' declarations."""
+    if isinstance(portal, FencePortal):
+        for _, reply in portal.completed_replies:
+            if reply.valid and reply.cookie_eligible:
+                for name, value in _reply_cookies(reply).items():
+                    oracle.register_eligible_cookie(name, value)
+        return
     for name, value in declared_eligible_cookies(portal):
         oracle.register_eligible_cookie(name, value)
 
@@ -700,6 +707,12 @@ class FencePortal(ScriptedPortal):
         self._fence_target: tuple[str | None, str, str, int] | None = None
         self._fence_seen = 0
         self._fence_gate = Gate("dispatch_fence", default_timeout=10.0)
+        self.completed_replies: list[tuple[Dispatch, Reply]] = []
+
+    def _match_reply(self, method: str, url: str) -> Reply:
+        reply = super()._match_reply(method, url)
+        self._tls.reply = reply
+        return reply
 
     @property
     def fence_gate(self) -> Gate:
@@ -729,8 +742,18 @@ class FencePortal(ScriptedPortal):
         timeout: Any = None,
     ) -> Any:
         self._tls.generation_id = generation_id
+        self._tls.reply = None
         try:
-            return super().handle_send(generation_id, request, stream=stream, timeout=timeout)
+            response = super().handle_send(generation_id, request, stream=stream, timeout=timeout)
+            # The case's in-flight rule permits completion but forbids promotion
+            # from an owner already retired when that response completed.
+            if self._tls.reply is not None and not self.is_retired(generation_id):
+                dispatch = next(
+                    d for d in self.dispatches if d.sequence == response._portal_dispatch_seq
+                )
+                with self._lock:
+                    self.completed_replies.append((dispatch, self._tls.reply))
+            return response
         finally:
             self._tls.generation_id = None
 
@@ -799,6 +822,16 @@ async def apply_transition(driver: LifecycleDriver, transition: str) -> Transiti
     """Apply a retirement transition to the current owner while a send is parked."""
     detail: dict[str, Any] = {}
     needs_successor = False
+    if driver.entry.state is ConfigEntryState.SETUP_IN_PROGRESS:
+        # HA serializes unload behind setup. Retire at the parked boundary with
+        # the exact production primitive stop_keepalive uses, then unload once
+        # the in-flight setup has drained. The pre-first case uses this seam too.
+        assert transition == "unload"
+        owner = driver.client
+        assert owner is not None and owner._renewal_runtime is not None
+        driver._retire_current_generation()
+        owner._renewal_runtime.retire(owner._renewal_token)
+        return TransitionOutcome(transition, MappingProxyType({"setup_retired": True}), True)
     if transition == "unload":
         detail["unloaded"] = await driver.unload()
         needs_successor = True
@@ -884,7 +917,9 @@ class FenceEvidence:
 
 
 async def _start_operation(driver: LifecycleDriver, operation: str) -> None:
-    if operation in ("poll", "auth_renewal"):
+    if operation == "setup":
+        await driver.setup()
+    elif operation in ("poll", "auth_renewal"):
         await driver.poll()
     elif operation == "keepalive":
         await driver.keepalive_tick()
@@ -894,19 +929,188 @@ async def _start_operation(driver: LifecycleDriver, operation: str) -> None:
         raise KeyError(operation)
 
 
-def _latest_checkpoint(driver: LifecycleDriver, snapshot: Snapshot) -> ExpectationState:
-    jar = {str(cookie["name"]): str(cookie["value"]) for cookie in snapshot.persisted_jar}
-    generation = driver.client.generation_id if driver.client is not None else "gen_unknown"
+def _reply_cookies(reply: Reply) -> dict[str, str]:
+    """Declared cookies of one reply, including its Set-Cookie headers."""
+    cookies = dict(reply.cookies)
+    headers = reply.headers.get("Set-Cookie", ())
+    for header in headers if isinstance(headers, (list, tuple)) else (headers,):
+        parsed = SimpleCookie()
+        parsed.load(str(header))
+        cookies.update({name: morsel.value for name, morsel in parsed.items()})
+    return cookies
+
+
+def _initial_checkpoint(driver: LifecycleDriver) -> ExpectationState:
+    """Declare a whole jar and nonempty policy before any production operation."""
+    admission = {
+        "sequences": 0,
+        "last_sequence_at": None,
+        "terminal_reason": None,
+        "retry_eligible": False,
+    }
+    driver.hass.config_entries.async_update_entry(
+        driver.entry, data={**driver.entry.data, CONF_RENEWAL_ADMISSION: admission}
+    )
+    jar = {str(c["name"]): str(c["value"]) for c in driver.entry.data["cookies"]}
     return ExpectationState(
-        generation_id=generation,
+        generation_id="initial",
+        settled_admission=MappingProxyType(admission),
         latest_checkpoint=Checkpoint(
-            generation_id=generation,
+            generation_id="initial",
             sequence=0,
             jar=MappingProxyType(jar),
-            admission=MappingProxyType({}),
+            admission=MappingProxyType(admission),
             timestamp=0.0,
         ),
     )
+
+
+def _expected_admission(
+    case: FenceCase,
+    initial: ExpectationState,
+    operation_dispatches: Sequence[Dispatch],
+    generation: str,
+) -> dict[str, Any]:
+    """Declare the settled admission this case must persist, without reading it.
+
+    Only the case declaration and the sends this operation already attempted feed
+    this model; the persisted bytes are never an input. The reviewed rules are:
+
+    * A fresh entry starts from :func:`_initial_checkpoint`'s zero-generation
+      admission. Only an automatic renewal reserve or a human rearm may change it.
+    * Flow R owns the Remember-Me credential, so ``auth_renewal`` reserves its one
+      sequence immediately before the *second* ``/Dashboard`` send: the first send
+      is the signed-out bounce the renewal reacts to. The reservation is durable
+      metadata even when the owner is retired before its proof completes, and the
+      frozen declared clock fixes its timestamp.
+    * Retirement between the proof ``POST /Dashboard/Chart`` and its ``ChartData``
+      read leaves the declared proof transient, which earns the single allowed
+      retry. A completion that is later refused publication (every other boundary)
+      settles without one.
+    * A same-cookie human handoff starts a new generation: the sequence count
+      returns to zero while the generated-at timestamp is retained, because the
+      minimum gap spans generations.
+    """
+    admission = dict(initial.settled_admission)
+    dashboards = [
+        dispatch
+        for dispatch in operation_dispatches
+        if dispatch.generation_id == generation and normalize_path(dispatch.url) == "/Dashboard"
+    ]
+    if case.flow == "R" and case.operation == "auth_renewal" and len(dashboards) >= 2:
+        admission.update(sequences=1, last_sequence_at=DECLARED_CLOCK)
+        if (case.boundary.method, case.boundary.path, case.boundary.leg) == (
+            "POST",
+            "/Dashboard/Chart",
+            1,
+        ):
+            admission["retry_eligible"] = True
+    if case.transition == "handoff":
+        admission.update(sequences=0, terminal_reason=None, retry_eligible=False)
+    return admission
+
+
+def _expected_checkpoint(
+    initial: ExpectationState,
+    replies: Sequence[tuple[Dispatch, Reply]],
+    flow: str,
+    admission: Mapping[str, Any],
+) -> ExpectationState:
+    """Replay declarations only: no persisted/live production jar or policy reads."""
+    state = initial
+    sso_dashboards: dict[str, int] = {}
+    for dispatch, reply in replies:
+        if not (reply.valid and reply.cookie_eligible):
+            continue
+        if state.generation_id != dispatch.generation_id:
+            state = replace(
+                state,
+                generation_id=dispatch.generation_id,
+                pending_session_jar=state.latest_checkpoint.jar,
+                dashboard_validated=False,
+                daily_validated=False,
+                hourly_validated=False,
+            )
+        cookies = _reply_cookies(reply)
+        declared = replace(reply, cookies=cookies)
+        path = normalize_path(dispatch.url)
+        if reply.status_code in (301, 302, 303, 307, 308):
+            if "/Acs" in path:
+                sso_dashboards[dispatch.generation_id] = 0
+            state = replace(
+                state,
+                pending_session_jar={
+                    **(state.pending_session_jar or state.latest_checkpoint.jar),
+                    **cookies,
+                },
+            )
+            continue
+        stage = (
+            Stage.DASHBOARD_VERIFY_TOKEN
+            if path == "/Dashboard"
+            else Stage.DAILY_CHART_DATA
+            if path.endswith("/ChartData")
+            # A plain leg (for example the Chart selection POST) can add cookies
+            # to the pending jar but never confirms a checkpoint by itself.
+            else "unconfirmed_leg"
+        )
+        state = apply_step(state, FlowStep(stage=stage, reply=declared, flow_mode=flow))
+        # The declared SSO handshake ends with the redirect Dashboard followed
+        # by its explicit verification Dashboard. It confirms the whole jar.
+        if flow == "S" and path == "/Dashboard" and dispatch.generation_id in sso_dashboards:
+            sso_dashboards[dispatch.generation_id] += 1
+            if sso_dashboards[dispatch.generation_id] == 2:
+                state = replace(
+                    state,
+                    latest_checkpoint=Checkpoint(
+                        generation_id=state.generation_id,
+                        sequence=state.sequence,
+                        jar=state.pending_session_jar,
+                        admission=state.settled_admission,
+                        timestamp=0.0,
+                    ),
+                )
+    settled = dict(admission)
+    return replace(
+        state,
+        settled_admission=settled,
+        latest_checkpoint=replace(state.latest_checkpoint, admission=settled),
+    )
+
+
+def _latest_checkpoint(driver: LifecycleDriver, snapshot: Snapshot) -> ExpectationState:
+    """Return the predeclared expectation; snapshot is exclusively observed state.
+
+    Keep this seam separate from the pure model so the Gate B negative proof can
+    restore the historical snapshot-copy implementation without changing a case.
+    """
+    return driver.g1_expected_state
+
+
+class _FenceOracleObserver:
+    """Forward the oracle's portal metadata hooks except eager eligibility.
+
+    ScriptedPortal finds metadata callbacks on ``observer.__self__``. Quarantine
+    (I3) and retirement must still reach the oracle; only eager eligible-cookie
+    registration is withheld, because a retired in-flight reply may complete
+    late. Completion evidence is registered explicitly instead.
+    """
+
+    def __init__(self, oracle: Oracle) -> None:
+        self._oracle = oracle
+
+    def observe_send(self, dispatch: Dispatch) -> Any:
+        return self._oracle.observe_send(dispatch)
+
+    def register_quarantined_cookie(self, name: str, value: str) -> None:
+        self._oracle.register_quarantined_cookie(name, value)
+
+    def retire_generation(self, generation_id: str) -> None:
+        self._oracle.retire_generation(generation_id)
+
+
+def _attach_fence_oracle(portal: FencePortal, oracle: Oracle) -> None:
+    portal.add_observer(_FenceOracleObserver(oracle).observe_send)
 
 
 def _live_i9_facts(driver: LifecycleDriver) -> dict[str, Any]:
@@ -973,7 +1177,7 @@ async def run_fence_case(
     entry = create_flow_entry(hass, case.flow)
     driver = LifecycleDriver(hass, entry, portal, factory=factory)
     oracle = Oracle()
-    oracle.attach_portal(portal)
+    _attach_fence_oracle(portal, oracle)
     oracle.attach_registry(factory.registry)
     driver.add_observer(oracle)
     register_initial_jar(oracle, entry)
@@ -982,17 +1186,19 @@ async def run_fence_case(
         driver.attach_caplog(caplog)
         oracle.attach_caplog(caplog)
 
+    initial = _initial_checkpoint(driver)
     facts: dict[str, Any] = {}
 
     async def body(current: LifecycleDriver) -> None:
-        assert await current.setup() is True, f"{case.case_id}: setup failed"
-        await current.poll()
+        if case.operation != "setup":
+            assert await current.setup() is True, f"{case.case_id}: setup failed"
+            await current.poll()
         prepare_operation(portal, case.operation)
         register_scripted_eligibility(oracle, portal)
 
+        operation_start = len(portal.dispatches)
         owner = current.client
-        assert owner is not None, f"{case.case_id}: no client generation after setup"
-        generation = owner.generation_id
+        generation = owner.generation_id if owner is not None else None
         gate = portal.arm(
             generation_id=generation,
             method=case.boundary.method,
@@ -1000,15 +1206,34 @@ async def run_fence_case(
             leg=case.boundary.leg,
         )
         task = asyncio.ensure_future(_start_operation(current, case.operation))
-        await hass.async_add_executor_job(gate.wait_arrived)
-
-        parked_sequence = max(dispatch.sequence for dispatch in portal.dispatches)
-        old_coordinator = current.coordinator
-        outcome = await apply_transition(current, case.transition)
-
-        gate.proceed()
-        await asyncio.gather(task, return_exceptions=True)
+        try:
+            await hass.async_add_executor_job(gate.wait_arrived)
+            owner = current.client
+            assert owner is not None, f"{case.case_id}: no constructing owner"
+            generation = owner.generation_id
+            if case.operation == "setup":
+                assert current.entry.state is ConfigEntryState.SETUP_IN_PROGRESS
+                assert owner._renewal_runtime.is_active(owner._renewal_token)
+            parked_sequence = max(dispatch.sequence for dispatch in portal.dispatches)
+            old_coordinator = current.coordinator
+            admission = _expected_admission(
+                case,
+                initial,
+                tuple(portal.dispatches[operation_start:]),
+                generation,
+            )
+            current.g1_expected_state = _expected_checkpoint(
+                initial, tuple(portal.completed_replies), case.flow, admission
+            )
+            oracle.expectation_state = current.g1_expected_state
+            register_scripted_eligibility(oracle, portal)
+            outcome = await apply_transition(current, case.transition)
+        finally:
+            gate.proceed()
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 20)
         await hass.async_block_till_done()
+        if case.operation == "setup":
+            await current.unload()
 
         parked = next(
             dispatch for dispatch in portal.dispatches if dispatch.sequence == parked_sequence
@@ -1068,7 +1293,23 @@ async def run_fence_case(
             )
 
         snapshot = await current.snapshot()
+        register_scripted_eligibility(oracle, portal)
+        if not outcome.needs_successor:
+            # An authorized successor's confirmed responses can advance the
+            # checkpoint, so replay those declarations too. The snapshot is still
+            # never an input: the parked retired response is absent from
+            # completed_replies, and every cookie comes from a declared reply.
+            current.g1_expected_state = _expected_checkpoint(
+                initial, tuple(portal.completed_replies), case.flow, admission
+            )
+            oracle.expectation_state = current.g1_expected_state
         oracle.expectation_state = _latest_checkpoint(current, snapshot)
+        failures = oracle.evaluate_i5(snapshot)
+        assert not failures, (
+            f"I5 latest checkpoint at retirement: {[dict(v.facts) for v in failures]}; "
+            f"admission expected={dict(oracle.expectation_state.latest_checkpoint.admission)} "
+            f"actual={dict(snapshot.renewal_admission)}"
+        )
         facts.update(
             {
                 "generation": generation,
@@ -1085,7 +1326,7 @@ async def run_fence_case(
         )
 
     stopped = case.transition in ("unload", "stop")
-    with factory:
+    with freeze_time(DECLARED_CLOCK, real_asyncio=True), factory:
         result = await run_case(
             driver,
             body,
@@ -1133,7 +1374,7 @@ async def run_fence_case(
 
 async def run_pre_fence_case(hass: HomeAssistant, *, caplog: Any = None) -> dict[str, Any]:
     """Retire before the first request; the production fence must refuse it."""
-    portal = ScriptedPortal()
+    portal = FencePortal()
     script_portal(portal)
     gate = Gate("pre_first_request", default_timeout=10.0)
     gate.hold()
@@ -1141,7 +1382,7 @@ async def run_pre_fence_case(hass: HomeAssistant, *, caplog: Any = None) -> dict
     entry = create_flow_entry(hass, "L")
     driver = LifecycleDriver(hass, entry, portal, factory=factory)
     oracle = Oracle()
-    oracle.attach_portal(portal)
+    _attach_fence_oracle(portal, oracle)
     oracle.attach_registry(factory.registry)
     driver.add_observer(oracle)
     register_initial_jar(oracle, entry)
@@ -1150,28 +1391,31 @@ async def run_pre_fence_case(hass: HomeAssistant, *, caplog: Any = None) -> dict
         driver.attach_caplog(caplog)
         oracle.attach_caplog(caplog)
 
+    initial = _initial_checkpoint(driver)
     facts: dict[str, Any] = {}
 
     async def body(current: LifecycleDriver) -> None:
         setup_task = asyncio.ensure_future(current.setup())
-        await hass.async_add_executor_job(gate.wait_arrived)
-        owner = current.client
-        assert owner is not None, "pre-fence case has no constructing generation"
-        generation = owner.generation_id
-        assert factory.pre_fence_hits == 1
-        assert len(portal.dispatches) == 0, (
-            "the first request escaped before the ownership fence ran: "
-            f"{[(d.method, d.url) for d in portal.dispatches]}"
-        )
+        try:
+            await hass.async_add_executor_job(gate.wait_arrived)
+            owner = current.client
+            assert owner is not None, "pre-fence case has no constructing generation"
+            generation = owner.generation_id
+            assert factory.pre_fence_hits == 1
+            assert len(portal.dispatches) == 0, (
+                "the first request escaped before the ownership fence ran: "
+                f"{[(d.method, d.url) for d in portal.dispatches]}"
+            )
 
-        runtime = owner._renewal_runtime
-        assert runtime is not None, "constructed client has no production renewal runtime"
-        # The same production call coordinator.stop_keepalive() makes.
-        runtime.retire(owner._renewal_token)
-        portal.retire(generation)
+            runtime = owner._renewal_runtime
+            assert runtime is not None, "constructed client has no production renewal runtime"
+            # The same production call coordinator.stop_keepalive() makes.
+            runtime.retire(owner._renewal_token)
+            portal.retire(generation)
 
-        gate.proceed()
-        result = await asyncio.gather(setup_task, return_exceptions=True)
+        finally:
+            gate.proceed()
+            result = await asyncio.wait_for(asyncio.gather(setup_task, return_exceptions=True), 20)
         await hass.async_block_till_done()
 
         assert result[0] is False, f"setup unexpectedly succeeded: {result[0]!r}"
@@ -1187,6 +1431,9 @@ async def run_pre_fence_case(hass: HomeAssistant, *, caplog: Any = None) -> dict
         assert successor_ok is True
         successor = current.client
         assert successor is not None and successor.generation_id != generation
+        current.g1_expected_state = _expected_checkpoint(
+            initial, portal.completed_replies, "L", initial.settled_admission
+        )
         oracle.expectation_state = _latest_checkpoint(current, await current.snapshot())
         facts.update(
             {
@@ -1208,13 +1455,13 @@ async def run_pre_fence_case(hass: HomeAssistant, *, caplog: Any = None) -> dict
 
 async def run_human_exemption_case(hass: HomeAssistant, *, caplog: Any = None) -> dict[str, Any]:
     """An unattached human verification keeps dispatching under the I1 exemption."""
-    portal = ScriptedPortal()
+    portal = FencePortal()
     script_portal(portal)
     factory = ClientFactory(portal, registry=ClientRegistry())
     entry = create_flow_entry(hass, "H")
     driver = LifecycleDriver(hass, entry, portal, factory=factory)
     oracle = Oracle()
-    oracle.attach_portal(portal)
+    _attach_fence_oracle(portal, oracle)
     oracle.attach_registry(factory.registry)
     driver.add_observer(oracle)
     register_initial_jar(oracle, entry)
@@ -1223,6 +1470,7 @@ async def run_human_exemption_case(hass: HomeAssistant, *, caplog: Any = None) -
         driver.attach_caplog(caplog)
         oracle.attach_caplog(caplog)
 
+    initial = _initial_checkpoint(driver)
     facts: dict[str, Any] = {}
 
     async def body(current: LifecycleDriver) -> None:
@@ -1283,7 +1531,11 @@ async def run_human_exemption_case(hass: HomeAssistant, *, caplog: Any = None) -
         reconfigure_dispatches = len(portal.dispatches) - before_reconfigure
         assert reconfigure_dispatches > 0
 
+        register_scripted_eligibility(oracle, portal)
         snapshot = await current.snapshot()
+        current.g1_expected_state = _expected_checkpoint(
+            initial, portal.completed_replies, "H", initial.settled_admission
+        )
         oracle.expectation_state = _latest_checkpoint(current, snapshot)
         facts.update(
             {
@@ -1309,7 +1561,7 @@ async def run_current_owner_307_control(
     hass: HomeAssistant, *, caplog: Any = None
 ) -> dict[str, Any]:
     """A current owner's 307 re-POST still succeeds and is recorded as a redirect hop."""
-    portal = ScriptedPortal()
+    portal = FencePortal()
     script_portal(portal)
     replace_route(
         portal,
@@ -1335,7 +1587,7 @@ async def run_current_owner_307_control(
     entry = create_flow_entry(hass, "S")
     driver = LifecycleDriver(hass, entry, portal, factory=factory)
     oracle = Oracle()
-    oracle.attach_portal(portal)
+    _attach_fence_oracle(portal, oracle)
     oracle.attach_registry(factory.registry)
     driver.add_observer(oracle)
     register_initial_jar(oracle, entry)
@@ -1344,6 +1596,7 @@ async def run_current_owner_307_control(
         driver.attach_caplog(caplog)
         oracle.attach_caplog(caplog)
 
+    initial = _initial_checkpoint(driver)
     facts: dict[str, Any] = {}
 
     async def body(current: LifecycleDriver) -> None:
@@ -1383,7 +1636,11 @@ async def run_current_owner_307_control(
         assert portal.get_retirement(generation) is None
         assert client._renewal_runtime.is_active(client._renewal_token)
 
+        register_scripted_eligibility(oracle, portal)
         snapshot = await current.snapshot()
+        current.g1_expected_state = _expected_checkpoint(
+            initial, portal.completed_replies, "S", initial.settled_admission
+        )
         oracle.expectation_state = _latest_checkpoint(current, snapshot)
         facts.update(
             {
@@ -1483,7 +1740,7 @@ async def run_old_status_control(hass: HomeAssistant, *, caplog: Any = None) -> 
     entry = create_flow_entry(hass, "L")
     driver = LifecycleDriver(hass, entry, portal, factory=factory)
     oracle = Oracle()
-    oracle.attach_portal(portal)
+    _attach_fence_oracle(portal, oracle)
     oracle.attach_registry(factory.registry)
     driver.add_observer(oracle)
     register_initial_jar(oracle, entry)
@@ -1492,6 +1749,7 @@ async def run_old_status_control(hass: HomeAssistant, *, caplog: Any = None) -> 
         driver.attach_caplog(caplog)
         oracle.attach_caplog(caplog)
 
+    initial = _initial_checkpoint(driver)
     facts: dict[str, Any] = {}
 
     async def body(current: LifecycleDriver) -> None:
@@ -1506,13 +1764,15 @@ async def run_old_status_control(hass: HomeAssistant, *, caplog: Any = None) -> 
 
         gate = portal.arm(generation_id=generation, method="GET", path="/Dashboard", leg=1)
         task = asyncio.ensure_future(current.poll())
-        await hass.async_add_executor_job(gate.wait_arrived)
-        parked_sequence = max(dispatch.sequence for dispatch in portal.dispatches)
+        try:
+            await hass.async_add_executor_job(gate.wait_arrived)
+            parked_sequence = max(dispatch.sequence for dispatch in portal.dispatches)
 
-        await current.cancel_inflight()
-        assert await current.reload() is True
-        gate.proceed()
-        await asyncio.gather(task, return_exceptions=True)
+            await current.cancel_inflight()
+            assert await current.reload() is True
+        finally:
+            gate.proceed()
+            await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 20)
         await hass.async_block_till_done()
 
         successor = current.coordinator
@@ -1534,7 +1794,11 @@ async def run_old_status_control(hass: HomeAssistant, *, caplog: Any = None) -> 
         )
         assert current.entry.state is ConfigEntryState.LOADED
 
+        register_scripted_eligibility(oracle, portal)
         snapshot = await current.snapshot()
+        current.g1_expected_state = _expected_checkpoint(
+            initial, portal.completed_replies, "L", initial.settled_admission
+        )
         oracle.expectation_state = _latest_checkpoint(current, snapshot)
         facts.update(
             {
