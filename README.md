@@ -13,7 +13,7 @@ Includes a built-in Lovelace card with 7-day and 14-day history views and kWh / 
 
 ## About This Fork (`delacjus/ha-pseg`)
 
-This project (`delacjus/ha-pseg`, current release **1.7.0**) is an independent fork of `sidprax/ha-pseg`. It hardens the integration for security, authentication reliability, and long-term statistics integrity:
+This project (`delacjus/ha-pseg`) is an independent fork of `sidprax/ha-pseg`. It hardens the integration for security, authentication reliability, and long-term statistics integrity:
 
 - **Direct local MyMeter sign-in**: Home Assistant signs into MyMeter directly. There is no companion add-on, and credentials are never sent over HTTP to a `localhost:8000` helper.
 - **Strict host allowlist**: Every HTTP request, redirect, and form submission is strictly restricted to `{mysmartenergy.nj.pseg.com, id.myaccount.pseg.com}`. When signing in with a MyMeter email and password, requests are narrowed to `mysmartenergy.nj.pseg.com` only, preventing any credentials or tokens from being sent to Okta.
