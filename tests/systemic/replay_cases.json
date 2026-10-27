@@ -79,8 +79,8 @@
               "message": "oracle violations",
               "statement": {
                 "file": "tests/systemic/response_cases.py",
-                "lineno": 985,
-                "end_lineno": 988
+                "lineno": 1253,
+                "end_lineno": 1256
               }
             },
             {
@@ -89,8 +89,8 @@
               "message": "oracle violations",
               "statement": {
                 "file": "tests/systemic/response_cases.py",
-                "lineno": 985,
-                "end_lineno": 988
+                "lineno": 1253,
+                "end_lineno": 1256
               }
             },
             {
@@ -99,8 +99,8 @@
               "message": "oracle violations",
               "statement": {
                 "file": "tests/systemic/response_cases.py",
-                "lineno": 985,
-                "end_lineno": 988
+                "lineno": 1253,
+                "end_lineno": 1256
               }
             }
           ],

@@ -410,7 +410,7 @@ def apply_step(
     # 2. Terminal latch fence: stops any automatic credential POST
     # Production ref: pseg_client.py:631-650 (_refuse_if_captcha_latched, _refuse_if_security_step_latched)
     if state.is_terminal and (
-        step.stage in (Stage.LOGIN_FORM_GET, Stage.SAML_ACS)
+        step.stage in (Stage.LOGIN_FORM_GET, Stage.LOGIN_POST, Stage.SAML_ACS)
         or bool(reply.metadata.get("credential_post"))
     ):
         return ExpectationState(
