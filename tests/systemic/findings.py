@@ -18,6 +18,53 @@ the setup-only legacy control. R3 P8 is a hypothesis, not a
 ranked finding. No vendor behaviour or production defect is inferred here.
 """
 
+# Gate B generator findings are additional review findings, separate from the
+# frozen R1-R9 source/provenance inventory below. Pins are exact node IDs; the
+# checkpoint regression module asserts these literals resolve to live cases.
+GATE_B_DISPATCH_FINDINGS = {
+    "B2": {
+        "source_kb": "8e261d0b-ae95-4f56-bbf9-905173bebf5c",
+        "invariant": "I5",
+        "status": "covered",
+        "fast_cases": (
+            "tests/systemic/test_dispatch_checkpoint.py::test_stale_write_is_rejected_at_i5[cookies]",
+            "tests/systemic/test_dispatch_checkpoint.py::test_stale_write_is_rejected_at_i5[admission]",
+            "tests/systemic/test_dispatch_checkpoint.py::test_completed_rotation_is_the_independent_latest_checkpoint",
+            "tests/systemic/test_dispatch_checkpoint.py::test_retired_in_flight_reply_cannot_advance_the_checkpoint",
+        ),
+        "resolution": (
+            "boundaries.py::_initial_checkpoint declares the initial jar and a nonempty "
+            "admission from case data; boundaries.py::_expected_admission and "
+            "boundaries.py::_expected_checkpoint replay only declared eligible replies at "
+            "the arm point; boundaries.py::_latest_checkpoint returns that expectation "
+            "instead of copying snapshot.persisted_jar. FencePortal records a reply as "
+            "completed only when its generation is still live, so an in-flight response "
+            "that completes after retirement can neither advance the checkpoint nor "
+            "register provenance. A stale jar or admission seeded after the transition "
+            "fails I5, and the negative proof restoring the snapshot copy makes it pass."
+        ),
+    },
+    "B5": {
+        "source_kb": "8e261d0b-ae95-4f56-bbf9-905173bebf5c",
+        "invariant": "I1",
+        "status": "covered",
+        "fast_cases": (
+            "tests/systemic/test_dispatch_fence.py::test_fast_dispatch_fence_representative[fast_setup_chartdata_unload]",
+            "tests/systemic/test_dispatch_checkpoint.py::test_each_setup_boundary_has_a_real_sweep_case",
+        ),
+        "resolution": (
+            "boundaries.py::SWEEP_OPERATIONS includes setup and EXCLUSIONS has no setup "
+            "entry. All five setup requests of each L/R/S/H flow (20 cases) are parked "
+            "independently with SETUP_IN_PROGRESS and an active production renewal token, "
+            "retired through the same runtime.retire(token) primitive as the accepted "
+            "pre-first-request case, unloaded, then followed by the mandatory ending. "
+            "boundaries.py::apply_transition retires a constructing owner without waiting "
+            "for HA to serialize unload behind setup."
+        ),
+    },
+}
+
+
 SLOW_R3_N1 = (
     "tests/systemic/test_exit_checkpoint.py::test_slow_exit_checkpoint_sweep[before:fetch_energy_data::cancel::no-renewal::MM_RememberMe]",
     "tests/systemic/test_exit_checkpoint.py::test_slow_exit_checkpoint_sweep[before:fetch_energy_data::cancel::no-renewal::MM_AuxUtil]",

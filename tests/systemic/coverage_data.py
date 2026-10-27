@@ -451,9 +451,13 @@ BASELINE_FAST = {
         3,
         "20014ee1a3c84640f2654a73534ee0ef52e233848de2d0c56a503975f6669e42",
     ),
+    "tests/systemic/test_dispatch_checkpoint.py": (
+        9,
+        "fd7d775084de97179844cfc681f8c8df41d8e17dc8183cc958db272c98299dc4",
+    ),
     "tests/systemic/test_dispatch_fence.py": (
-        27,
-        "b7f82cf146604a92223c38180487eae534b969069fbbee31c81b6b60c1ae89fb",
+        28,
+        "a0af91e1d93cddfb67ada070c426c91825603ce906f35186bafb7ff328ffba86",
     ),
     "tests/systemic/test_exit_checkpoint.py": (
         18,
@@ -655,8 +659,8 @@ BASELINE_FAST = {
 
 GENERATED_INVENTORY = {
     "tests/systemic/test_dispatch_fence.py": (
-        97,
-        "e65ee3c8885d332a6945acca50810327caad5b2a33eeaa09aae95405db6d3ad2",
+        118,
+        "9e220b347c525a3be33e68b32e1511df467dea7947125eec7ace4fa70461bcb6",
     ),
     "tests/systemic/test_exit_checkpoint.py": (
         180,
