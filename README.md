@@ -295,3 +295,7 @@ For complete testing details, see [Testing Documentation](docs/testing.md).
 ## License
 
 MIT
+
+## HVAC calibration check
+
+Compare an HVAC energy estimate with your hourly grid meter using the read-only [HVAC calibration check](docs/hvac-calibration.md).

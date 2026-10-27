@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 EXCLUDED_MARKS = frozenset({"slow", "nightly", "quarantine"})
 NEW_MODULES = frozenset(
     {
+        "tests/test_hvac_calibration_check.py",
         "tests/systemic/test_policy_properties.py",
         "tests/systemic/test_findings_registry.py",
         "tests/systemic/test_coverage_meta.py",
