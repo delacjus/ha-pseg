@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+import math
 import re
 import time
 from typing import Any, Dict, Optional
@@ -39,6 +40,25 @@ def portal_time_to_utc(x_ms: float, fold: int = 0) -> datetime:
         tzinfo=PORTAL_TIMEZONE, fold=fold
     )
     return wall_clock.astimezone(timezone.utc)
+
+
+def point_value(pt: Dict[str, Any]) -> Optional[float]:
+    """Return a chart point's `y` as a float, or None when it has no reading.
+
+    A missing, null, non-numeric or non-finite `y` means the portal has no
+    value for that interval. It must not be read as 0, which would record zero
+    usage for an hour or day the portal has not reported yet.
+    """
+    y = pt.get("y")
+    if y is None or isinstance(y, bool):
+        return None
+    try:
+        value = float(y)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
 
 
 class PsegAuthError(Exception):
@@ -207,7 +227,10 @@ class PsegClient:
                 pts = meter_series.get("data", [])
                 for pt in pts:
                     if isinstance(pt, dict):
-                        kwh = round(float(pt.get("y", 0.0) or 0.0), 4)
+                        value = point_value(pt)
+                        if value is None:
+                            continue
+                        kwh = round(value, 4)
                         hs = pt.get("hs", {})
                         p_start = hs.get("start", "")
                         try:
@@ -331,7 +354,10 @@ class PsegClient:
                 # the clocks go back.
                 start_utc = portal_time_to_utc(x, fold=1 if x == prev_x else 0)
                 prev_x = x
-                kwh = round(float(pt.get("y", 0.0) or 0.0), 4)
+                value = point_value(pt)
+                if value is None:
+                    continue
+                kwh = round(value, 4)
 
                 hs = pt.get("hs", {})
                 start_str = hs.get("start", "")
@@ -399,6 +425,7 @@ class PsegClient:
 
         latest_temp = temp_pts[-1] if temp_pts else {}
         temp_range = latest_temp.get("tr", "")
+        temp_value = point_value(latest_temp)
 
         return {
             "meter": meter_name,
@@ -413,7 +440,7 @@ class PsegClient:
             "history_14d": history_14d,
             "hourly_records": hourly_records,
             "temperature_range": temp_range,
-            "temperature_avg": round(latest_temp.get("y", 0.0), 1) if "y" in latest_temp else None,
+            "temperature_avg": round(temp_value, 1) if temp_value is not None else None,
             "total_records": len(nav_series),
             "effective_rate": effective_rate,
             "rate_source": rate_source,
