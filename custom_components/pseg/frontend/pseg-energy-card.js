@@ -18,6 +18,15 @@
  * - Tapping anywhere opens detailed popup (`#pseg_energy_popup`).
  */
 
+// Older default entity IDs the card falls back to when it is set to one of them.
+const LEGACY_ENTITY_IDS = [
+  "sensor.pseg_electricity_consumption",
+  "sensor.pseg_electricity_yesterday",
+  "sensor.pseg_smart_energy_meter_electricity_yesterday",
+];
+// Older versions of the card shared one cache entry, whichever account it showed.
+const SHARED_CACHE_KEY = "pseg_last_valid_entity";
+
 function escapeHtml(str) {
   if (str === null || str === undefined) return "";
   return String(str)
@@ -50,7 +59,8 @@ class PsegEnergyCard extends HTMLElement {
       last_cycle_kwh: null,
       toggle_entity: "input_boolean.pseg_display_dollars",
       range_toggle_entity: "input_boolean.pseg_chart_14d",
-      next_update_entity: "sensor.pseg_next_update",
+      next_update_entity: null,
+      connection_status_entity: null,
       show_next_update: false,
       popup_hash: null,
       ...config
@@ -72,14 +82,14 @@ class PsegEnergyCard extends HTMLElement {
       const e1 = this.config.entity;
       const e2 = this.config.toggle_entity;
       const e3 = this.config.range_toggle_entity;
-      const e4 = this.config.next_update_entity;
-      const e5 = "sensor.pseg_connection_status";
+      const e4 = this.config.next_update_entity || this._accountEntity("next_update");
+      const e5 = this.config.connection_status_entity || this._accountEntity("connection_status");
 
       const sameE1 = !e1 || oldHass.states[e1] === hass.states[e1];
       const sameE2 = !e2 || oldHass.states[e2] === hass.states[e2];
       const sameE3 = !e3 || oldHass.states[e3] === hass.states[e3];
       const sameE4 = !e4 || oldHass.states[e4] === hass.states[e4];
-      const sameE5 = !hass.states[e5] || oldHass.states[e5] === hass.states[e5];
+      const sameE5 = !e5 || !hass.states[e5] || oldHass.states[e5] === hass.states[e5];
 
       if (sameE1 && sameE2 && sameE3 && sameE4 && sameE5) {
         return;
@@ -97,6 +107,21 @@ class PsegEnergyCard extends HTMLElement {
 
   getCardSize() {
     return 2;
+  }
+
+  // Find this account's own copy of a PSE&G sensor such as "connection_status".
+  // A second account's sensors get a "_2" suffix, so the fixed ID would show
+  // the first account's status on the second account's card.
+  _accountEntity(key) {
+    const fixedId = `sensor.pseg_${key}`;
+    const entities = this._hass && this._hass.entities;
+    const own = entities && entities[this._entityId || this.config.entity];
+    if (!own || !own.device_id) return fixedId;
+    const pattern = new RegExp(`^sensor\\.pseg_${key}(_\\d+)?$`);
+    const match = Object.values(entities).find(
+      (e) => e.device_id === own.device_id && pattern.test(e.entity_id)
+    );
+    return match ? match.entity_id : null;
   }
 
   getGridOptions() {
@@ -161,12 +186,23 @@ class PsegEnergyCard extends HTMLElement {
     if (!this.shadowRoot || !this._hass || !this.config) return;
 
     try {
-      let entity = this._hass.states[this.config.entity];
-      if (!entity) {
-        entity = this._hass.states["sensor.pseg_electricity_consumption"] ||
-                 this._hass.states["sensor.pseg_electricity_yesterday"] || 
-                 this._hass.states["sensor.pseg_smart_energy_meter_electricity_yesterday"];
+      this._entityId = this.config.entity;
+      let entity = this._hass.states[this._entityId];
+      // Only fall back to the other default IDs when the card is set to one of
+      // them: a card for a second account must never show the first account.
+      if (!entity && LEGACY_ENTITY_IDS.includes(this.config.entity)) {
+        const fallbackId = LEGACY_ENTITY_IDS.find((id) => this._hass.states[id]);
+        if (fallbackId) {
+          this._entityId = fallbackId;
+          entity = this._hass.states[fallbackId];
+        }
       }
+
+      // Each card caches its own entity, so an unavailable account can't show another's data
+      const cacheKey = `${SHARED_CACHE_KEY}:${this.config.entity}`;
+      try {
+        localStorage.removeItem(SHARED_CACHE_KEY);
+      } catch (_) {}
 
       // 1. Cache valid entity attributes if present
       if (entity && entity.attributes && Array.isArray(entity.attributes.history_14d) && entity.attributes.history_14d.length > 0) {
@@ -175,7 +211,7 @@ class PsegEnergyCard extends HTMLElement {
           attributes: { ...entity.attributes }
         };
         try {
-          localStorage.setItem("pseg_last_valid_entity", JSON.stringify(this._cachedEntity));
+          localStorage.setItem(cacheKey, JSON.stringify(this._cachedEntity));
         } catch (_) {}
       }
 
@@ -184,7 +220,7 @@ class PsegEnergyCard extends HTMLElement {
       if (isUnavailable) {
         if (!this._cachedEntity) {
           try {
-            const stored = localStorage.getItem("pseg_last_valid_entity");
+            const stored = localStorage.getItem(cacheKey);
             if (stored) this._cachedEntity = JSON.parse(stored);
           } catch (_) {}
         }
@@ -212,7 +248,8 @@ class PsegEnergyCard extends HTMLElement {
         return;
       }
 
-      const connectionStatus = this._hass.states["sensor.pseg_connection_status"]?.state;
+      const connectionEnt = this.config.connection_status_entity || this._accountEntity("connection_status");
+      const connectionStatus = connectionEnt ? this._hass.states[connectionEnt]?.state : undefined;
       const isAuthRequired = isUnavailable ||
                             entity.attributes.auth_required === true ||
                             connectionStatus === "auth_required";
@@ -326,8 +363,8 @@ class PsegEnergyCard extends HTMLElement {
     // Format Next Update timestamp
     let nextUpdateInline = "";
     let nextUpdateTooltip = "";
-    const nextUpdateEntId = this.config.next_update_entity || "sensor.pseg_next_update";
-    const nextEnt = this._hass.states[nextUpdateEntId];
+    const nextUpdateEntId = this.config.next_update_entity || this._accountEntity("next_update");
+    const nextEnt = nextUpdateEntId ? this._hass.states[nextUpdateEntId] : undefined;
     const nextVal = (nextEnt && nextEnt.state) ? nextEnt.state : (entity.attributes.next_update || "");
     if (nextVal && nextVal !== "unknown" && nextVal !== "unavailable") {
       try {

@@ -158,6 +158,8 @@ entity: sensor.pseg_electricity_consumption
 | `toggle_entity` | string | `input_boolean.pseg_display_dollars` | Optional helper entity to switch between kWh and dollar view |
 | `range_toggle_entity` | string | `input_boolean.pseg_chart_14d` | Optional helper entity to switch between 7-day and 14-day chart view |
 | `show_next_update` | boolean | `false` | Display the next scheduled fetch timestamp beside the meter label |
+| `connection_status_entity` | string | same account as `entity` | Connection status sensor for the sign-in warning. By default the card uses the one from the same account as `entity`, so with two accounts each card shows its own status. |
+| `next_update_entity` | string | same account as `entity` | Next update sensor for `show_next_update`. Defaults to the one from the same account as `entity`. |
 | `popup_hash` | string | `null` | URL hash to open a custom popup card on tap. When omitted, tapping opens the standard entity dialog. |
 
 ## Entities Provided
