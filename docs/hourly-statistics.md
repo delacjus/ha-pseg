@@ -162,6 +162,11 @@ reason to clear history.
 | `Conflicting daily readings from the portal ...` | The portal returned two different totals for one meter and day | Nothing was written. Wait for the portal to settle; see "Conflicting daily readings" below. |
 | `hourly` shows 23 or 25 rows | A DST day | Expected: 23 hours in spring, 25 in fall, always at New York midnights. |
 
+### Date labels and fall-back DST
+
+- Date-only labels (`MM/DD/YYYY`) from the vendor portal may be unpadded (for example `11/1/2026`). These are accepted when the parsed calendar date matches the expected interval.
+- On the fall-back DST day (such as Nov 1, 2026), the vendor portal sends 24 wall-clock points (not 25) with both 1 AM hours merged into a single 01:00 point, so that day stays daily (`dst_ambiguous`) by design rather than guessing how to split the hour.
+
 ## Conflicting daily readings
 
 Since the daily-reading validation was added, the integration refuses to guess
