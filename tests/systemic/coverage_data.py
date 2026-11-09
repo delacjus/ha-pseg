@@ -601,7 +601,7 @@ BASELINE_FAST = {
         92,
         "e5865ae29d34d7ceefc2ab9a16537c1df676703342a8df75b5984b40adfcfb4c",
     ),
-    "tests/test_init.py": (10, "9d3814bcdf596b3d307135fe0c75cd2b21a4ef02556f226455b968cacf360d09"),
+    "tests/test_init.py": (14, "d7f5537f83ea16923143828b4c2add27b226760e97fa4888be0b6302eb09e311"),
     "tests/test_local_keepalive.py": (
         27,
         "6f488d265ce6a5a60c3e1826af95cb07828da3217041d05b7ddfd23ce73c976d",

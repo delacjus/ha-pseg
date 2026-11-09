@@ -4,6 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.pseg import (
@@ -53,17 +55,18 @@ async def test_migration_v1_to_v2_strips_credentials(hass: HomeAssistant) -> Non
 
 
 async def test_backfill_service_registered_once(hass: HomeAssistant) -> None:
-    """Test pseg.backfill_history is registered once in async_setup and handles no active entries."""
+    """Test pseg.backfill_history is registered once in async_setup and surfaces no active entries."""
     assert await async_setup(hass, {}) is True
     assert hass.services.has_service(DOMAIN, "backfill_history")
 
-    # Calling with zero active entries logs warning, does not crash
-    await hass.services.async_call(
-        DOMAIN,
-        "backfill_history",
-        {"start_date": "2026-01-01", "end_date": "2026-01-10"},
-        blocking=True,
-    )
+    # Calling with zero active entries reports the failure to the caller
+    with pytest.raises(HomeAssistantError, match="No active PSE&G integration entry"):
+        await hass.services.async_call(
+            DOMAIN,
+            "backfill_history",
+            {"start_date": "2026-01-01", "end_date": "2026-01-10"},
+            blocking=True,
+        )
 
 
 async def test_backfill_service_multiple_entries(hass: HomeAssistant) -> None:
@@ -79,6 +82,84 @@ async def test_backfill_service_multiple_entries(hass: HomeAssistant) -> None:
         "entry_1": coord1,
         "entry_2": coord2,
     }
+
+    await hass.services.async_call(
+        DOMAIN,
+        "backfill_history",
+        {"start_date": "2026-01-01", "end_date": "2026-01-10"},
+        blocking=True,
+    )
+
+    coord1.async_backfill_history.assert_awaited_once_with(
+        start_date="2026-01-01", end_date="2026-01-10"
+    )
+    coord2.async_backfill_history.assert_awaited_once_with(
+        start_date="2026-01-01", end_date="2026-01-10"
+    )
+
+
+async def test_backfill_service_reports_partial_failure(hass: HomeAssistant) -> None:
+    """A failing entry still runs the rest and the service raises one summary error."""
+    assert await async_setup(hass, {}) is True
+
+    coord1 = MagicMock()
+    coord1.async_backfill_history = AsyncMock(side_effect=RuntimeError("portal unavailable"))
+    coord2 = MagicMock()
+    coord2.async_backfill_history = AsyncMock(return_value=15)
+
+    hass.data[DOMAIN] = {
+        "entry_1": coord1,
+        "entry_2": coord2,
+    }
+
+    with pytest.raises(HomeAssistantError, match="1 of 2") as excinfo:
+        await hass.services.async_call(
+            DOMAIN,
+            "backfill_history",
+            {"start_date": "2026-01-01", "end_date": "2026-01-10"},
+            blocking=True,
+        )
+
+    assert "portal unavailable" in str(excinfo.value)
+    coord1.async_backfill_history.assert_awaited_once_with(
+        start_date="2026-01-01", end_date="2026-01-10"
+    )
+    coord2.async_backfill_history.assert_awaited_once_with(
+        start_date="2026-01-01", end_date="2026-01-10"
+    )
+
+
+@pytest.mark.parametrize("invalid_date", ["2026-13-45", "not-a-date"])
+async def test_backfill_service_rejects_invalid_dates(
+    hass: HomeAssistant, invalid_date: str
+) -> None:
+    """An unparseable date is reported before any coordinator runs."""
+    assert await async_setup(hass, {}) is True
+
+    coord = MagicMock()
+    coord.async_backfill_history = AsyncMock(return_value=10)
+    hass.data[DOMAIN] = {"entry_1": coord}
+
+    with pytest.raises(HomeAssistantError, match="expected YYYY-MM-DD"):
+        await hass.services.async_call(
+            DOMAIN,
+            "backfill_history",
+            {"start_date": invalid_date},
+            blocking=True,
+        )
+
+    coord.async_backfill_history.assert_not_awaited()
+
+
+async def test_backfill_service_all_entries_succeed(hass: HomeAssistant) -> None:
+    """The service completes without error when every entry succeeds."""
+    assert await async_setup(hass, {}) is True
+
+    coord1 = MagicMock()
+    coord1.async_backfill_history = AsyncMock(return_value=10)
+    coord2 = MagicMock()
+    coord2.async_backfill_history = AsyncMock(return_value=15)
+    hass.data[DOMAIN] = {"entry_1": coord1, "entry_2": coord2}
 
     await hass.services.async_call(
         DOMAIN,
