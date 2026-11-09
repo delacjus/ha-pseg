@@ -17,7 +17,7 @@ This project (`delacjus/ha-pseg`) is an independent fork of `sidprax/ha-pseg`. I
 
 - **Direct local MyMeter sign-in**: Home Assistant signs into MyMeter directly. There is no companion add-on, and credentials are never sent over HTTP to a `localhost:8000` helper.
 - **Strict host allowlist**: Every HTTP request, redirect, and form submission is strictly restricted to `{mysmartenergy.nj.pseg.com, id.myaccount.pseg.com}`. When signing in with a MyMeter email and password, requests are narrowed to `mysmartenergy.nj.pseg.com` only, preventing any credentials or tokens from being sent to Okta.
-- **Bounded cookie-only keepalive**: The integration runs a credential-free `GET /Dashboard` check every 3 minutes. If the session has lapsed, this timer performs a bounded cookie renewal (at most 2 attempts per cookie generation, spaced at least 15 minutes apart) and verifies access with a read-only meter check before saving cookies. Regular data polling can fall back to submitting the saved MyMeter email and password when the renewal policy permits it; the keepalive timer never submits them.
+- **Bounded cookie-only keepalive**: The integration runs a credential-free `GET /Dashboard` check after a random 4 to 5 minutes, under the 6 to 8 minute idle timeout measured on the real portal. If the session has lapsed, this timer performs a bounded cookie renewal (at most 2 attempts per cookie generation, spaced at least 15 minutes apart) and verifies access with a read-only meter check before saving cookies. Regular data polling can fall back to submitting the saved MyMeter email and password when the renewal policy permits it; the keepalive timer never submits them.
 - **Diagnostics redaction**: Diagnostic downloads automatically redact email addresses, passwords, session cookies, and meter serial numbers.
 - **Stable statistics with correction guards**: Uses Home Assistant External Statistics (`pseg:<meter_id>_energy_consumption` and `pseg:<meter_id>_energy_cost`) with strict cumulative sum preservation across rolling windows and backfills. Gaps are preserved and existing data is never wiped out.
 - **Hourly statistics**: Live since release 1.6.0. Promotes complete recent days to hourly resolution while safely falling back to daily rows when data is incomplete.
@@ -158,7 +158,7 @@ You can download the helper extension ZIP in either of two ways:
 ### How Background Renewal Works
 
 Once signed in, Home Assistant maintains the session in the background:
-1. **Keepalive probe**: Every 3 minutes, Home Assistant sends a credential-free `GET /Dashboard` request to check if the session is alive.
+1. **Keepalive probe**: After a random 4 to 5 minutes, Home Assistant sends a credential-free `GET /Dashboard` request to check if the session is alive.
 2. **Cookie renewal**: If the portal prompts for a renewed session and a `MM_RememberMe` cookie is present, Home Assistant requests a refreshed session cookie without re-sending your password. Renewals are bounded to at most 2 attempts per cookie generation, spaced at least 15 minutes apart, and verified with a read-only meter reading before being saved.
 3. **Re-authentication prompt**: If a session expires completely, or if PSE&G demands a new CAPTCHA or security question, automatic attempts stop safely. Home Assistant alerts you to re-authenticate rather than risking account lockout.
 

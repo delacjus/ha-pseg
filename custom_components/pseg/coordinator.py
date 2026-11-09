@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 import functools
 import logging
 import math
+import random
 import re
 from typing import Any
 
@@ -27,7 +28,7 @@ from homeassistant.const import UnitOfEnergy
 from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.recorder import DATA_INSTANCE
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -50,7 +51,8 @@ from .const import (
     DEFAULT_STATISTICS_IMPORT_ENABLED,
     DOMAIN,
     KEEPALIVE_INTERVAL_MINUTES,
-    LOCAL_KEEPALIVE_INTERVAL_MINUTES,
+    LOCAL_KEEPALIVE_MAX_SECONDS,
+    LOCAL_KEEPALIVE_MIN_SECONDS,
     SESSION_COOKIE_NAMES,
     STATISTICS_PRECISION,
     classify_price_per_kwh,
@@ -433,6 +435,7 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # itself is re-read and re-sanitized on every poll; only the log is deduped.
         self._invalid_rate_warned = False
         self._unsub_keepalive: Callable[[], None] | None = None
+        self._keepalive_timer: Callable[[], None] | None = None
         # Set on unload. A keepalive/poll still in the executor at that point belongs
         # to a dead coordinator and must not write to the entry or start reauth.
         self._stopped = False
@@ -491,28 +494,48 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
     def keepalive_interval(self) -> timedelta:
-        """Return the per-mode keepalive period.
+        """Return the delay before the next keepalive, per mode.
 
         Okta sessions tolerate a 10-minute SSO round trip. A local portal session is
-        touched every 3 minutes with a credential-free GET: one observed lapse
-        happened after ~9 minutes without an accepted request (2026-10-23), but the
-        server's real rule is unknown, so this is a product cadence, not a TTL claim.
+        touched after a random 4 to 5 minutes with a credential-free GET, under the
+        ~6 to 8 minute idle timeout measured on 2026-10-31 (see const.py). That is a
+        product cadence, not a vendor TTL claim. Each call draws a new delay.
         """
-        minutes = (
-            LOCAL_KEEPALIVE_INTERVAL_MINUTES
-            if self.client.is_local_mode
-            else KEEPALIVE_INTERVAL_MINUTES
-        )
-        return timedelta(minutes=minutes)
+        if self.client.is_local_mode:
+            return timedelta(
+                seconds=random.uniform(LOCAL_KEEPALIVE_MIN_SECONDS, LOCAL_KEEPALIVE_MAX_SECONDS)
+            )
+        return timedelta(minutes=KEEPALIVE_INTERVAL_MINUTES)
 
     def start_keepalive(self) -> None:
-        """Start the recurring, per-mode keepalive (see keepalive_interval)."""
-        if self._unsub_keepalive is None:
-            self._unsub_keepalive = async_track_time_interval(
-                self.hass,
-                self._async_keepalive,
-                self.keepalive_interval(),
-            )
+        """Start the recurring, per-mode keepalive (see keepalive_interval).
+
+        Each run schedules the next one with a fresh delay, so the local cadence is
+        not a fixed period. _unsub_keepalive stays set (it cancels whichever timer
+        is pending) from start until stop_keepalive.
+        """
+        if self._unsub_keepalive is None and not self._stopped:
+            self._unsub_keepalive = self._cancel_keepalive_timer
+            self._schedule_keepalive()
+
+    def _schedule_keepalive(self) -> None:
+        self._keepalive_timer = async_call_later(
+            self.hass, self.keepalive_interval(), self._async_keepalive_timer
+        )
+
+    def _cancel_keepalive_timer(self) -> None:
+        if self._keepalive_timer is not None:
+            self._keepalive_timer()
+            self._keepalive_timer = None
+
+    async def _async_keepalive_timer(self, now: datetime) -> None:
+        """Run one keepalive, then schedule the next unless the keepalive stopped."""
+        self._keepalive_timer = None
+        try:
+            await self._async_keepalive(now)
+        finally:
+            if self._unsub_keepalive is not None and not self._stopped:
+                self._schedule_keepalive()
 
     def stop_keepalive(self) -> None:
         """Cancel recurring keepalive timer and retire this coordinator's session."""
@@ -531,9 +554,8 @@ class PsegDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_keepalive(self, _now: datetime) -> None:
         """Run keepalive check, persist rotated cookies and settle auth state."""
-        minutes = int(self.keepalive_interval().total_seconds() // 60)
         mode = "local" if self.client.is_local_mode else "okta"
-        _LOGGER.debug("Running %d-minute PSE&G keepalive (%s mode)", minutes, mode)
+        _LOGGER.debug("Running PSE&G keepalive (%s mode)", mode)
         expired = False
         recovered = False
         try:

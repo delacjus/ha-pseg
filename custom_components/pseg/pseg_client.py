@@ -1058,7 +1058,7 @@ class PsegClient:
         authority, and such a client is narrowed to the portal host, so only a
         credential-free portal GET can keep it alive. A jar holding both an Okta
         session cookie and a saved local login (or MM_RememberMe) is therefore
-        local: it needs the 3-minute GET, not a 10-minute SSO round trip it cannot
+        local: it needs the 4-5 minute GET, not a 10-minute SSO round trip it cannot
         perform. Okta mode is only for a jar with no local renewal credential,
         including a pasted portal-only jar (no Okta session at all).
         """
@@ -1678,7 +1678,7 @@ class PsegClient:
         minutes, which resets Okta's idle timer and leaves a fresh portal session
         for the poll.
 
-        Local (portal-only) mode gets one GET /Dashboard every 3 minutes instead.
+        Local (portal-only) mode gets one GET /Dashboard after a random 4 to 5 minutes instead.
         That includes a mixed jar (Okta cookie plus a saved login or MM_RememberMe):
         its usable renewal path is the portal, and it is host-restricted to it, so
         an SSO keepalive could only fail.

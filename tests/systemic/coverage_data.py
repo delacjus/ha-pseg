@@ -603,8 +603,8 @@ BASELINE_FAST = {
     ),
     "tests/test_init.py": (14, "d7f5537f83ea16923143828b4c2add27b226760e97fa4888be0b6302eb09e311"),
     "tests/test_local_keepalive.py": (
-        27,
-        "6f488d265ce6a5a60c3e1826af95cb07828da3217041d05b7ddfd23ce73c976d",
+        29,
+        "3fc3a18f58953a088f5d5f706c98aeca07e47540c584686768fe579b9080922a",
     ),
     "tests/test_mutation_check.py": (
         43,

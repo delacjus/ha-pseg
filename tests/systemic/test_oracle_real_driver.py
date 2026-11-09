@@ -153,7 +153,7 @@ async def run_scenario_probe(
             facts = {"retired_client_sent": bad, "portal_retired": portal.is_retired(old_gen)}
         elif scenario == "dead_schedule":
             prior = len(portal.dispatches)
-            await driver.advance(timedelta(minutes=3))
+            await driver.advance(timedelta(minutes=5))
             bad = len(portal.dispatches) == prior
             facts = {"timer_dispatches": len(portal.dispatches) - prior}
         elif scenario == "latest_checkpoint":

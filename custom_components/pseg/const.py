@@ -52,10 +52,14 @@ DEFAULT_SCAN_INTERVAL_HOURS = 4
 # Okta mode: must stay below the observed Okta idle interval (~30 min, 2026-10-21).
 # The vendor's actual timeout is not documented.
 KEEPALIVE_INTERVAL_MINUTES = 10
-# Local (portal-only) mode: one observed session lapse happened after ~9 minutes
-# without an accepted request (2026-10-23), but the server's real rule is unknown.
-# A credential-free GET every 3 minutes is a probe, not a vendor TTL contract.
-LOCAL_KEEPALIVE_INTERVAL_MINUTES = 3
+# Local (portal-only) mode: a stepped idle test (2026-10-31) kept a session alive
+# after 5.7 minutes without a request and lost it after 7.7, so the portal's idle
+# timeout is about 6 to 8 minutes; the vendor documents no rule. The credential-free
+# GET runs after a random 4 to 5 minutes (as upstream sidprax/ha-pseg does since
+# v1.1.2): under that timeout, with fewer and less regular requests than a fixed
+# 3-minute timer.
+LOCAL_KEEPALIVE_MIN_SECONDS = 4 * 60
+LOCAL_KEEPALIVE_MAX_SECONDS = 5 * 60
 
 # Non-secret bookkeeping for bounded Remember Me renewals, stored in entry.data next
 # to the cookie jar so an options reload cannot reset the vendor-load budget. Never
