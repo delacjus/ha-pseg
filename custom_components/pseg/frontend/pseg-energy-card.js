@@ -55,8 +55,8 @@ class PsegEnergyCard extends HTMLElement {
       last_cycle_kwh: null,
       toggle_entity: "input_boolean.pseg_display_dollars",
       range_toggle_entity: "input_boolean.pseg_chart_14d",
-      next_update_entity: "sensor.pseg_next_update",
-      connection_status_entity: "sensor.pseg_connection_status",
+      next_update_entity: null,
+      connection_status_entity: null,
       show_next_update: false,
       popup_hash: null,
       ...config
@@ -78,14 +78,14 @@ class PsegEnergyCard extends HTMLElement {
       const e1 = this.config.entity;
       const e2 = this.config.toggle_entity;
       const e3 = this.config.range_toggle_entity;
-      const e4 = this.config.next_update_entity;
-      const e5 = this.config.connection_status_entity;
+      const e4 = this.config.next_update_entity || this._accountEntity("next_update");
+      const e5 = this.config.connection_status_entity || this._accountEntity("connection_status");
 
       const sameE1 = !e1 || oldHass.states[e1] === hass.states[e1];
       const sameE2 = !e2 || oldHass.states[e2] === hass.states[e2];
       const sameE3 = !e3 || oldHass.states[e3] === hass.states[e3];
       const sameE4 = !e4 || oldHass.states[e4] === hass.states[e4];
-      const sameE5 = !hass.states[e5] || oldHass.states[e5] === hass.states[e5];
+      const sameE5 = !e5 || !hass.states[e5] || oldHass.states[e5] === hass.states[e5];
 
       if (sameE1 && sameE2 && sameE3 && sameE4 && sameE5) {
         return;
@@ -99,6 +99,22 @@ class PsegEnergyCard extends HTMLElement {
     if (this._hass && this.config) {
       this.render();
     }
+  }
+
+  // Find this account's own copy of a PSE&G sensor such as "connection_status".
+  // A second account's sensors get a "_2" suffix, so the fixed ID would show
+  // the first account's status on the second account's card. Without the
+  // entity registry (older HA) the card keeps the fixed ID.
+  _accountEntity(key) {
+    const fixedId = `sensor.pseg_${key}`;
+    const entities = this._hass && this._hass.entities;
+    const own = entities && entities[this.config.entity];
+    if (!own || !own.device_id) return fixedId;
+    const pattern = new RegExp(`^sensor\\.pseg_${key}(_\\d+)?$`);
+    const match = Object.values(entities).find(
+      (e) => e.device_id === own.device_id && pattern.test(e.entity_id)
+    );
+    return match ? match.entity_id : null;
   }
 
   getCardSize() {
@@ -185,8 +201,8 @@ class PsegEnergyCard extends HTMLElement {
         return;
       }
 
-      const connectionStatusEnt = this.config.connection_status_entity || "sensor.pseg_connection_status";
-      const connectionStatus = this._hass.states[connectionStatusEnt]?.state;
+      const connectionStatusEnt = this.config.connection_status_entity || this._accountEntity("connection_status");
+      const connectionStatus = connectionStatusEnt ? this._hass.states[connectionStatusEnt]?.state : undefined;
       const isAuthRequired = isUnavailable ||
                             entity.attributes.auth_required === true ||
                             connectionStatus === "auth_required";
@@ -272,8 +288,8 @@ class PsegEnergyCard extends HTMLElement {
     // Format Next Update timestamp
     let nextUpdateInline = "";
     let nextUpdateTooltip = "";
-    const nextUpdateEntId = this.config.next_update_entity || "sensor.pseg_next_update";
-    const nextEnt = this._hass.states[nextUpdateEntId];
+    const nextUpdateEntId = this.config.next_update_entity || this._accountEntity("next_update");
+    const nextEnt = nextUpdateEntId ? this._hass.states[nextUpdateEntId] : undefined;
     const nextVal = (nextEnt && nextEnt.state) ? nextEnt.state : (entity.attributes.next_update || "");
     if (nextVal && nextVal !== "unknown" && nextVal !== "unavailable") {
       try {

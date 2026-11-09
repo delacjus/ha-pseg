@@ -118,3 +118,83 @@ test("denied browser storage does not prevent rendering", () => {
   const instance = card(Card, "sensor.a", { "sensor.a": reading("11112222") });
   assert.match(instance.shadowRoot.innerHTML, /Meter \.\.\.2222/);
 });
+
+function twoAccounts() {
+  const states = {
+    "sensor.pseg_electricity_consumption": reading("11112222"),
+    "sensor.pseg_connection_status": { state: "auth_required", attributes: {} },
+    "sensor.pseg_electricity_consumption_2": reading("33334444"),
+    "sensor.pseg_connection_status_2": { state: "connected", attributes: {} },
+  };
+  const entities = {};
+  for (const [id, device] of [
+    ["sensor.pseg_electricity_consumption", "dev1"],
+    ["sensor.pseg_connection_status", "dev1"],
+    ["sensor.pseg_electricity_consumption_2", "dev2"],
+    ["sensor.pseg_connection_status_2", "dev2"],
+  ]) {
+    entities[id] = { entity_id: id, device_id: device };
+  }
+  return { states, entities };
+}
+
+function cardWithRegistry(Card, config, hass) {
+  const instance = new Card();
+  instance.setConfig(config);
+  instance.hass = hass;
+  return instance;
+}
+
+test("a second account's card uses its own connection status, not the first account's", () => {
+  const { Card } = environment();
+  const hass = twoAccounts();
+  const second = cardWithRegistry(Card, { entity: "sensor.pseg_electricity_consumption_2" }, hass);
+  assert.match(second.shadowRoot.innerHTML, /Meter \.\.\.4444/);
+  assert.doesNotMatch(second.shadowRoot.innerHTML, /Re-authentication required/);
+  const first = cardWithRegistry(Card, { entity: "sensor.pseg_electricity_consumption" }, hass);
+  assert.match(first.shadowRoot.innerHTML, /Re-authentication required/);
+});
+
+test("a card whose account has no status sensor never borrows another account's", () => {
+  const { Card } = environment();
+  const hass = twoAccounts();
+  delete hass.states["sensor.pseg_connection_status_2"];
+  delete hass.entities["sensor.pseg_connection_status_2"];
+  const second = cardWithRegistry(Card, { entity: "sensor.pseg_electricity_consumption_2" }, hass);
+  assert.doesNotMatch(second.shadowRoot.innerHTML, /Re-authentication required/);
+});
+
+test("without the entity registry the card keeps the fixed status sensor", () => {
+  const { Card } = environment();
+  const { states } = twoAccounts();
+  const instance = card(Card, "sensor.pseg_electricity_consumption", states);
+  assert.match(instance.shadowRoot.innerHTML, /Re-authentication required/);
+});
+
+test("an explicit connection_status_entity still wins over the account lookup", () => {
+  const { Card } = environment();
+  const hass = twoAccounts();
+  const second = cardWithRegistry(Card, {
+    entity: "sensor.pseg_electricity_consumption_2",
+    connection_status_entity: "sensor.pseg_connection_status",
+  }, hass);
+  assert.match(second.shadowRoot.innerHTML, /Re-authentication required/);
+});
+
+test("the next update time comes from the card's own account", () => {
+  const { Card } = environment();
+  const hass = twoAccounts();
+  hass.states["sensor.pseg_next_update"] = { state: "2026-01-01T09:00:00Z", attributes: {} };
+  hass.states["sensor.pseg_next_update_2"] = { state: "2026-01-01T17:00:00Z", attributes: {} };
+  hass.entities["sensor.pseg_next_update"] = { entity_id: "sensor.pseg_next_update", device_id: "dev1" };
+  hass.entities["sensor.pseg_next_update_2"] = { entity_id: "sensor.pseg_next_update_2", device_id: "dev2" };
+  const config = (entity) => ({ entity, show_next_update: true });
+  const first = cardWithRegistry(Card, config("sensor.pseg_electricity_consumption"), hass);
+  const second = cardWithRegistry(Card, config("sensor.pseg_electricity_consumption_2"), hass);
+  assert.match(first.shadowRoot.innerHTML, /↻/);
+  assert.match(second.shadowRoot.innerHTML, /↻/);
+  assert.notEqual(
+    first.shadowRoot.innerHTML.match(/↻ [^<"]*/)[0],
+    second.shadowRoot.innerHTML.match(/↻ [^<"]*/)[0],
+  );
+});

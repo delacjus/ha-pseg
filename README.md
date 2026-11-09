@@ -230,8 +230,8 @@ entity: sensor.pseg_electricity_consumption
 | `toggle_entity` | string | `input_boolean.pseg_display_dollars` | Optional helper entity to switch between kWh and dollar view |
 | `range_toggle_entity` | string | `input_boolean.pseg_chart_14d` | Optional helper entity to switch between 7-day and 14-day chart view |
 | `cost_per_kwh` | number | `0.247` | Override effective rate in card calculations |
-| `next_update_entity` | string | `sensor.pseg_next_update` | Entity holding the next scheduled fetch timestamp |
-| `connection_status_entity` | string | `sensor.pseg_connection_status` | Connection status entity; shows re-authentication banner when `auth_required` |
+| `next_update_entity` | string | same account as `entity` | Entity holding the next scheduled fetch timestamp. Defaults to the one from the same account as `entity`. |
+| `connection_status_entity` | string | same account as `entity` | Connection status entity; shows re-authentication banner when `auth_required`. Defaults to the one from the same account as `entity`, so with two accounts each card shows its own status. |
 | `show_next_update` | boolean | `false` | Display next scheduled fetch timestamp beside the meter label |
 | `popup_hash` | string | `null` | URL hash to open a custom popup card on tap. When omitted, tapping opens standard entity dialog. |
 
