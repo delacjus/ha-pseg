@@ -20,7 +20,9 @@ from .const import (
     CONF_MYMETER_PASSWORD,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
+    CONF_PORTAL_URL,
     CONF_PRICE_PER_KWH,
+    DEFAULT_PORTAL_URL,
     DEFAULT_PRICE_PER_KWH,
     DOMAIN,
     sanitized_price_per_kwh,
@@ -197,6 +199,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         price_per_kwh=price_per_kwh,
         email=entry.data.get(CONF_MYMETER_EMAIL, ""),
         password=entry.data.get(CONF_MYMETER_PASSWORD, ""),
+        # Entries created before portal selection have none and stay on New Jersey.
+        portal_url=entry.data.get(CONF_PORTAL_URL, DEFAULT_PORTAL_URL),
     )
     coordinator = PsegDataUpdateCoordinator(hass, client, dict(entry.data), config_entry=entry)
 

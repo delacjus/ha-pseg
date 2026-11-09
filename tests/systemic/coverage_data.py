@@ -614,6 +614,10 @@ BASELINE_FAST = {
         23,
         "e3a6b0f968eee7d91efdefd2678c50be9a1dbd7885948c0146eb5a1bb4c581d7",
     ),
+    "tests/test_portal_select.py": (
+        14,
+        "e0c813ec30a21225954210def6ec45558dad8c3b243adf2d8925d265b040e363",
+    ),
     "tests/test_pseg_client.py": (
         128,
         "90ee90aa08fd190d420275621fcea4c605d7c178fb2f3f89d65300023747e4af",
@@ -742,6 +746,7 @@ BASELINE_MODULE_MARKS = {
     "tests/test_local_keepalive.py": (),
     "tests/test_mutation_check.py": (),
     "tests/test_price_sanitizing.py": (),
+    "tests/test_portal_select.py": (),
     "tests/test_pseg_client.py": (),
     "tests/test_release_check.py": (),
     "tests/test_release_snapshot.py": (),

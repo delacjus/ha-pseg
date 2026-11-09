@@ -89,8 +89,11 @@ After installing and restarting, click the button above to start setup directly,
 
 1. In Home Assistant, go to **Settings** > **Devices & Services** > **Add Integration**.
 2. Search for **PSE&G Energy (New Jersey)**.
-3. Enter your MyMeter **Email** and **Password** (the login credentials from `https://mysmartenergy.nj.pseg.com`).
-4. Click **Submit**.
+3. Select your portal: **PSE&G New Jersey** (default) or **PSEG Long Island (experimental)**.
+4. Enter your MyMeter **Email** and **Password** (the login credentials from your MyMeter portal: `https://mysmartenergy.nj.pseg.com`, or `https://mysmartenergy.psegliny.com` for Long Island).
+5. Click **Submit**.
+
+**PSEG Long Island is experimental.** It has not been tested against the real Long Island portal. A Long Island entry supports MyMeter email/password sign-in and pasted portal cookies. It does not support Okta sign-in, and the CAPTCHA helper extension only works on the New Jersey portal, so if Long Island asks for a CAPTCHA, use a browser cookie instead.
 
 ### Getting a MyMeter email login
 

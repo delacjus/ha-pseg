@@ -3,8 +3,9 @@
     "step": {
       "user": {
         "title": "Connect PSE&G Account",
-        "description": "Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant stores that login in this integration's config and uses it for MyMeter's own sign-in, not Okta, so Okta's two-factor prompt is not used. How long that keeps working without you is not verified: PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
+        "description": "Easiest: choose your MyMeter portal, then enter the email and password of your MyMeter login (the Email/Password boxes on your MyMeter portal: mysmartenergy.nj.pseg.com, or mysmartenergy.psegliny.com on Long Island). Home Assistant stores that login in this integration's config and uses it for MyMeter's own sign-in, not Okta, so Okta's two-factor prompt is not used. How long that keeps working without you is not verified: PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
         "data": {
+          "portal_url": "Portal",
           "mymeter_email": "MyMeter email",
           "mymeter_password": "MyMeter password",
           "okta_cookies": "Okta Cookies (optional, old method)",
@@ -13,7 +14,7 @@
       },
       "reauth_confirm": {
         "title": "Re-authenticate PSE&G",
-        "description": "PSE&G needs you to sign in again. Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant stores that login in this integration's config and uses it for MyMeter's own sign-in, not Okta, so Okta's two-factor prompt is not used. How long that keeps working without you is not verified: PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
+        "description": "PSE&G needs you to sign in again. Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on your MyMeter portal: mysmartenergy.nj.pseg.com, or mysmartenergy.psegliny.com on Long Island). Home Assistant stores that login in this integration's config and uses it for MyMeter's own sign-in, not Okta, so Okta's two-factor prompt is not used. How long that keeps working without you is not verified: PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
         "data": {
           "mymeter_email": "MyMeter email",
           "mymeter_password": "MyMeter password",
@@ -23,7 +24,7 @@
       },
       "reconfigure": {
         "title": "Reconfigure PSE&G Connection",
-        "description": "Update how Home Assistant signs in to PSE&G. Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on mysmartenergy.nj.pseg.com). Home Assistant stores that login in this integration's config and uses it for MyMeter's own sign-in, not Okta, so Okta's two-factor prompt is not used. How long that keeps working without you is not verified: PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
+        "description": "Update how Home Assistant signs in to PSE&G. Easiest: enter the email and password of your MyMeter login (the Email/Password boxes on your MyMeter portal: mysmartenergy.nj.pseg.com, or mysmartenergy.psegliny.com on Long Island). Home Assistant stores that login in this integration's config and uses it for MyMeter's own sign-in, not Okta, so Okta's two-factor prompt is not used. How long that keeps working without you is not verified: PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
         "data": {
           "mymeter_email": "MyMeter email",
           "mymeter_password": "MyMeter password",
@@ -42,13 +43,15 @@
     },
     "error": {
       "missing_credentials": "Enter your MyMeter email and password.",
+      "okta_nj_only": "Okta sign-in is PSE&G New Jersey only. Clear the Okta Cookies field, or choose the PSE&G New Jersey portal.",
+      "captcha_nj_only": "The CAPTCHA helper works only on the PSE&G New Jersey portal. Sign in with a MyMeter email and password, or paste a browser cookie from the Long Island portal.",
       "okta_session_invalid": "The Okta session cookies provided are expired or invalid.",
       "okta_no_session": "These Okta cookies cannot sign in on their own. On mysmartenergy.nj.pseg.com, use the 'Sign in Via My Account' link (not the email/password boxes), then copy the Cookie header from the id.myaccount.pseg.com /sso/saml request. It should contain idx=.",
       "cannot_connect": "Failed to connect to PSE&G. Please check your network connection.",
       "unknown": "An unexpected error occurred while communicating with PSE&G.",
       "remember_me_failed": "The Portal Cookies contain MM_RememberMe, but MyMeter did not sign in with it on its own. Sign out, sign in again with the Email/Password boxes and Remember Me ON, then copy the Cookie header from a Dashboard request.",
-      "login_failed": "MyMeter did not accept that email/password. Check it on mysmartenergy.nj.pseg.com, then try again.",
-      "security_step_unsupported": "MyMeter asked for a security question or a password change, which Home Assistant cannot answer. Complete it at mysmartenergy.nj.pseg.com, then try again.",
+      "login_failed": "MyMeter did not accept that email/password. Check it on your MyMeter portal (mysmartenergy.nj.pseg.com, or mysmartenergy.psegliny.com on Long Island), then try again.",
+      "security_step_unsupported": "MyMeter asked for a security question or a password change, which Home Assistant cannot answer. Complete it at your MyMeter portal (mysmartenergy.nj.pseg.com, or mysmartenergy.psegliny.com on Long Island), then try again.",
       "captcha_response_required": "Paste the CAPTCHA proof from the helper page.",
       "captcha_proof_used": "That CAPTCHA proof was already sent. Capture a fresh one with the helper and paste it here.",
       "captcha_rejected": "PSE&G did not accept that CAPTCHA proof. Capture a fresh one with the helper and try again.",

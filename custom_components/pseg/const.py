@@ -91,11 +91,32 @@ AUTH_REASONS = frozenset(
     }
 )
 
+CONF_PORTAL_URL = "portal_url"
+# Every MyMeter portal the integration can sign in to. Entries created before
+# portal selection have no portal stored and stay on the New Jersey default.
+PORTAL_URL_NJ = "https://mysmartenergy.nj.pseg.com"
+PORTAL_URL_LI = "https://mysmartenergy.psegliny.com"
+DEFAULT_PORTAL_URL = PORTAL_URL_NJ
+PORTALS = {
+    PORTAL_URL_NJ: "PSE&G New Jersey",
+    PORTAL_URL_LI: "PSEG Long Island (experimental)",
+}
+
 PORTAL_HOST = "mysmartenergy.nj.pseg.com"
 OKTA_HOST = "id.myaccount.pseg.com"
 ALLOWED_HOSTS = {PORTAL_HOST, OKTA_HOST}
 
-PORTAL_BASE_URL = f"https://{PORTAL_HOST}"
+PORTAL_BASE_URL = PORTAL_URL_NJ
+
+
+def resolve_portal_url(value: object) -> str:
+    """Return a known portal base URL; unknown, empty or missing means New Jersey.
+
+    A stored value only ever names a key of PORTALS, so a hand-edited entry or a
+    malformed form submission can never point the client at an arbitrary URL.
+    """
+    return value if isinstance(value, str) and value in PORTALS else DEFAULT_PORTAL_URL
+
 
 ATTR_METER = "meter"
 ATTR_LATEST_DATE = "latest_date"
