@@ -566,8 +566,8 @@ BASELINE_FAST = {
         "9ebfe57fed27279468894d3d3a24b2d654cdf4412ab058ad057ed00fa0926fbb",
     ),
     "tests/test_cost_contract_usagetype3.py": (
-        15,
-        "f71cecc99e3940b8855b719f5854a8ec2a976738d886252f9265fd70cdc6b248",
+        21,
+        "b3aef26024903540d14d63f229467887e5bff7a46ec1b068dac4c442730c7f63",
     ),
     "tests/test_cost_contract_usagetype3_review.py": (
         3,
