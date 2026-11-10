@@ -134,6 +134,27 @@ DOLLAR_TOKENS = ("USD", "$")
 # Unit keys nothing in the observed cost chart emits. Kept as refutation-only signals.
 _LEGACY_UNIT_KEYS = ("unit", "unitOfMeasure", "yAxisTitle")
 
+# Unit words a rejected sample may echo into diagnostics so the cause is visible.
+# Any other text is reported as "other": a unit field is portal-controlled and is
+# never copied out verbatim.
+_SAFE_UNIT_TOKENS = frozenset(
+    {"USD", "usd", "$", "Dollar", "dollar", "kWh", "KWH", "kwh", "EUR", "Therms", "CCF", "°F"}
+)
+# Cookie names a rejected sample may echo. Only names, never values; others are "other".
+_SAFE_COOKIE_NAMES = frozenset(
+    {
+        "MM_SID",
+        "MM_RememberMe",
+        "ASP.NET_SessionId",
+        "__RequestVerificationToken",
+        ".ASPXAUTH",
+        "ARRAffinity",
+        "ARRAffinitySameSite",
+    }
+)
+MAX_UNIT_SIGNALS = 8
+MAX_COOKIE_NAMES = 8
+
 
 @dataclass(frozen=True)
 class PermitRegistryEntry:
@@ -875,6 +896,72 @@ def _meter_series_prefix(series_item: dict[str, Any]) -> str | None:
     return _text_token(tooltip.get("valuePrefix"))
 
 
+def _unit_signals(
+    data_block: dict[str, Any], raw_series: list[Any]
+) -> list[tuple[str, str | None]]:
+    """Every unit signal the currency gate reads, as (field code, token or None)."""
+    tooltip_options = data_block.get("tooltipOptions")
+    if not isinstance(tooltip_options, dict):
+        tooltip_options = {}
+    return [
+        ("currency", _text_token(tooltip_options.get("currency"))),
+        ("usage_type", _text_token(data_block.get("usageType"))),
+        ("usage_type_display_name", _text_token(tooltip_options.get("usageTypeDisplayName"))),
+        ("y_axis_title", _axis_unit_token(data_block)),
+        *((f"legacy_{key}", _text_token(data_block.get(key))) for key in _LEGACY_UNIT_KEYS),
+        *(
+            ("meter_prefix", _meter_series_prefix(item))
+            for item in raw_series
+            if isinstance(item, dict) and _METER_SERIES.match(str(item.get("name") or ""))
+        ),
+    ]
+
+
+def unit_signal_summary(data_block: dict[str, Any], raw_series: list[Any]) -> list[dict[str, str]]:
+    """Explain a unit rejection without copying portal text into diagnostics.
+
+    The three proof fields are always listed (``absent`` when missing); corroborating
+    fields only when present. A token outside a short list of unit words is ``other``.
+    """
+    proof_fields = {"currency", "usage_type", "usage_type_display_name"}
+    summary: list[dict[str, str]] = []
+    for field, token in _unit_signals(data_block, raw_series):
+        if token is None:
+            if field in proof_fields:
+                summary.append({"field": field, "token": "absent"})
+            continue
+        summary.append({"field": field, "token": token if token in _SAFE_UNIT_TOKENS else "other"})
+    return summary[:MAX_UNIT_SIGNALS]
+
+
+def set_cookie_names(resp: Any) -> list[str]:
+    """Names of the cookies a response tried to set; values are never read.
+
+    The cost session rejects every response cookie (RejectingCookieJar), so this
+    records what the portal sent so a diagnosis can tell whether the portal keeps
+    chart state in a cookie the sampler drops. Unknown names become ``other``.
+    """
+    try:
+        raw = getattr(resp, "raw", None)
+        headers = getattr(raw, "headers", None)
+        values: list[str] = []
+        if headers is not None and hasattr(headers, "getlist"):
+            values = list(headers.getlist("Set-Cookie"))
+        if not values and getattr(resp, "headers", None):
+            joined = resp.headers.get("Set-Cookie")
+            values = [joined] if isinstance(joined, str) and joined else []
+    except Exception:
+        return []
+    names: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        name = value.split("=", 1)[0].strip()
+        if name:
+            names.add(name if name in _SAFE_COOKIE_NAMES else "other")
+    return sorted(names)[:MAX_COOKIE_NAMES]
+
+
 def currency_reason(data_block: dict[str, Any], raw_series: list[Any]) -> str | None:
     """Judge the observed dollar contract for one ChartData ``Data`` block.
 
@@ -892,23 +979,9 @@ def currency_reason(data_block: dict[str, Any], raw_series: list[Any]) -> str | 
     Corroborating strings (axis title, meter-series prefix) can only reject: the chart
     is dollar-denominated only when the block says so itself.
     """
-    tooltip_options = data_block.get("tooltipOptions")
-    if not isinstance(tooltip_options, dict):
-        tooltip_options = {}
-
-    currency = _text_token(tooltip_options.get("currency"))
-    usage_type = _text_token(data_block.get("usageType"))
-    display_name = _text_token(tooltip_options.get("usageTypeDisplayName"))
-
-    signals: list[str | None] = [
-        _axis_unit_token(data_block),
-        *(_text_token(data_block.get(key)) for key in _LEGACY_UNIT_KEYS),
-        *(
-            _meter_series_prefix(item)
-            for item in raw_series
-            if isinstance(item, dict) and _METER_SERIES.match(str(item.get("name") or ""))
-        ),
-    ]
+    fields = _unit_signals(data_block, raw_series)
+    currency, usage_type, display_name = (token for _field, token in fields[:3])
+    signals: list[str | None] = [token for _field, token in fields[3:]]
 
     contradicted = (
         any(token is not None and token not in DOLLAR_TOKENS for token in signals)
@@ -990,7 +1063,11 @@ def validate_and_sanitize_cost_payload(
     if unit_reason is not None:
         return (
             CostEvidenceStatus.WRONG_UNIT,
-            {"status": CostEvidenceStatus.WRONG_UNIT.value, "reason": unit_reason},
+            {
+                "status": CostEvidenceStatus.WRONG_UNIT.value,
+                "reason": unit_reason,
+                "unit_signals": unit_signal_summary(data_block, raw_series),
+            },
             False,
         )
 
@@ -1763,6 +1840,7 @@ def execute_cost_sampler(
             timeout=req_timeout,
         )
         in_flight_resp = resp_post
+        post_cookie_names = set_cookie_names(resp_post)
 
         body_post, err_post = _stream_response_body(resp_post, deadline, MAX_COST_BYTES)
         try:
@@ -1851,6 +1929,7 @@ def execute_cost_sampler(
             timeout=req_timeout_get,
         )
         in_flight_resp = resp_get
+        get_cookie_names = set_cookie_names(resp_get)
 
         body_get, err_get = _stream_response_body(resp_get, deadline, MAX_COST_BYTES)
         try:
@@ -1940,13 +2019,19 @@ def execute_cost_sampler(
                 False,
             )
 
-        return validate_and_sanitize_cost_payload(
+        status, sample, promotable = validate_and_sanitize_cost_payload(
             payload=payload,
             authoritative_meters=authoritative_meters,
             meter_placeholders=meter_placeholders,
             permit=permit,
             paired_kwh_anchors=paired_kwh_anchors,
         )
+        if status == CostEvidenceStatus.WRONG_UNIT:
+            # Cookie names the pair dropped: tells a kWh-chart reply caused by lost
+            # chart state apart from a portal that does not serve dollars here.
+            sample["post_set_cookies"] = post_cookie_names
+            sample["get_set_cookies"] = get_cookie_names
+        return status, sample, promotable
 
     except PsegTransientError:
         # Lifecycle exit (e.g. entry owner retired) must NOT be suppressed
