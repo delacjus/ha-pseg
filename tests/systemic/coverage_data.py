@@ -501,6 +501,10 @@ BASELINE_FAST = {
         56,
         "0d29415f3ad812c2c6f5d3d8ee3bfe10dede3ea386df14e5fc2f721d5337ec40",
     ),
+    "tests/test_auth_menu.py": (
+        14,
+        "941dd48edc0b3b392b2ffa603394358ed3de0b37f58b50773496b327c88e5768",
+    ),
     "tests/test_auth_mutation_catalog.py": (
         3,
         "903aecebecdc8cb24db5f0905d1d91f193877b12fb6721bac2c1f6ba9d652a40",
@@ -717,6 +721,7 @@ BASELINE_MODULE_MARKS = {
     "tests/systemic/test_pairwise.py": (),
     "tests/systemic/test_portal_factory.py": (),
     "tests/systemic/test_response_corpus.py": (),
+    "tests/test_auth_menu.py": (),
     "tests/test_auth_mutation_catalog.py": (),
     "tests/test_auth_reason.py": (),
     "tests/test_auth_review_r2_regressions.py": (),

@@ -2,14 +2,41 @@
   "config": {
     "step": {
       "user": {
-        "title": "Connect PSE&G Account",
-        "description": "Easiest: choose your MyMeter portal, then enter the email and password of your MyMeter login (the Email/Password boxes on your MyMeter portal: mysmartenergy.nj.pseg.com, or mysmartenergy.psegliny.com on Long Island). Home Assistant stores that login in this integration's config and uses it for MyMeter's own sign-in, not Okta, so Okta's two-factor prompt is not used. How long that keeps working without you is not verified: PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Use a password you do not use anywhere else. The cookie fields are only for the older paste method and can stay empty.",
+        "title": "Choose your PSE&G portal",
+        "description": "Pick the MyMeter portal for this account: PSE&G New Jersey, or PSEG Long Island. The next step asks how you want to sign in.",
         "data": {
-          "portal_url": "Portal",
+          "portal_url": "Portal"
+        }
+      },
+      "auth_method": {
+        "title": "Choose how to sign in",
+        "description": "Easiest: MyMeter email and password. Use a password you do not use anywhere else. PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Okta cookies work only on the New Jersey portal and expire in about an hour.",
+        "menu_options": {
+          "mymeter_login": "MyMeter email and password (recommended)",
+          "mymeter_cookie": "Paste a MyMeter cookie",
+          "okta_cookies": "Paste Okta cookies (New Jersey only)"
+        }
+      },
+      "mymeter_login": {
+        "title": "Sign in with your MyMeter login",
+        "description": "Enter the email and password of your MyMeter login (the Email/Password boxes on your MyMeter portal: mysmartenergy.nj.pseg.com, or mysmartenergy.psegliny.com on Long Island). Home Assistant stores that login in this integration's config and uses it for MyMeter's own sign-in, not Okta, so Okta's two-factor prompt is not used. How long that keeps working without you is not verified: PSE&G can still ask for another check, for example a CAPTCHA, and the dialog then asks you. Use a password you do not use anywhere else.",
+        "data": {
           "mymeter_email": "MyMeter email",
-          "mymeter_password": "MyMeter password",
-          "okta_cookies": "Okta Cookies (optional, old method)",
-          "portal_cookies": "Portal Cookies (optional, old method)"
+          "mymeter_password": "MyMeter password"
+        }
+      },
+      "mymeter_cookie": {
+        "title": "Sign in with a MyMeter cookie",
+        "description": "Paste the MM_RememberMe value, or the full Cookie header, from a signed-in MyMeter Dashboard request. Sign in with Remember Me on, then copy it from your browser's developer tools. Setup accepts the cookie only if MM_RememberMe can renew the session by itself, so it can be rejected even while your browser is still signed in. If it is rejected, sign in with your MyMeter email and password instead.",
+        "data": {
+          "portal_cookies": "MyMeter cookie (MM_RememberMe or Cookie header)"
+        }
+      },
+      "okta_cookies": {
+        "title": "Sign in with Okta cookies",
+        "description": "PSE&G New Jersey only. Click 'Sign in Via My Account', then paste the Cookie header from the id.myaccount.pseg.com /sso/saml request; it should contain idx=. Okta sessions expire in about an hour and need periodic manual pasting, so use this only if the MyMeter methods do not work.",
+        "data": {
+          "okta_cookies": "Okta cookies (Cookie header from the /sso/saml request)"
         }
       },
       "reauth_confirm": {
@@ -43,6 +70,7 @@
     },
     "error": {
       "missing_credentials": "Enter your MyMeter email and password.",
+      "missing_cookie": "Paste the cookie into the field above.",
       "okta_nj_only": "Okta sign-in is PSE&G New Jersey only. Clear the Okta Cookies field.",
       "captcha_nj_only": "The CAPTCHA helper works only on the PSE&G New Jersey portal. Sign in with a MyMeter email and password, or paste a browser cookie from the Long Island portal.",
       "okta_session_invalid": "The Okta session cookies provided are expired or invalid.",
