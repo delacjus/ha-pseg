@@ -74,12 +74,19 @@ class PsegEnergyCard extends HTMLElement {
     this._hass = hass;
     if (!this.config) return;
 
-    if (oldHass && oldHass.states && hass.states) {
+    // The entity registry can arrive after the first render; when it changes
+    // which status sensors belong to this account, render again even if no
+    // state object changed.
+    const e4 = this.config.next_update_entity || this._accountEntity("next_update");
+    const e5 = this.config.connection_status_entity || this._accountEntity("connection_status");
+    const accountIds = `${e4}|${e5}`;
+    const sameIds = this._accountIds === accountIds;
+    this._accountIds = accountIds;
+
+    if (sameIds && oldHass && oldHass.states && hass.states) {
       const e1 = this.config.entity;
       const e2 = this.config.toggle_entity;
       const e3 = this.config.range_toggle_entity;
-      const e4 = this.config.next_update_entity || this._accountEntity("next_update");
-      const e5 = this.config.connection_status_entity || this._accountEntity("connection_status");
 
       const sameE1 = !e1 || oldHass.states[e1] === hass.states[e1];
       const sameE2 = !e2 || oldHass.states[e2] === hass.states[e2];

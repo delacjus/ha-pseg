@@ -164,6 +164,15 @@ test("a card whose account has no status sensor never borrows another account's"
   assert.doesNotMatch(second.shadowRoot.innerHTML, /Re-authentication required/);
 });
 
+test("a registry that arrives after the first render re-resolves the account's status", () => {
+  const { Card } = environment();
+  const { states, entities } = twoAccounts();
+  const second = cardWithRegistry(Card, { entity: "sensor.pseg_electricity_consumption_2" }, { states });
+  assert.match(second.shadowRoot.innerHTML, /Re-authentication required/);
+  second.hass = { states, entities };
+  assert.doesNotMatch(second.shadowRoot.innerHTML, /Re-authentication required/);
+});
+
 test("without the entity registry the card keeps the fixed status sensor", () => {
   const { Card } = environment();
   const { states } = twoAccounts();

@@ -151,6 +151,24 @@ async def test_backfill_service_rejects_invalid_dates(
     coord.async_backfill_history.assert_not_awaited()
 
 
+async def test_backfill_service_treats_blank_dates_as_default(hass: HomeAssistant) -> None:
+    """A blank date field still means the default range, not an error."""
+    assert await async_setup(hass, {}) is True
+
+    coord = MagicMock()
+    coord.async_backfill_history = AsyncMock(return_value=10)
+    hass.data[DOMAIN] = {"entry_1": coord}
+
+    await hass.services.async_call(
+        DOMAIN,
+        "backfill_history",
+        {"start_date": "", "end_date": "  "},
+        blocking=True,
+    )
+
+    coord.async_backfill_history.assert_awaited_once_with(start_date=None, end_date=None)
+
+
 async def test_backfill_service_all_entries_succeed(hass: HomeAssistant) -> None:
     """The service completes without error when every entry succeeds."""
     assert await async_setup(hass, {}) is True

@@ -41,6 +41,9 @@ def _validated_backfill_date(value: object, name: str) -> object:
     """Validate an optional backfill date argument before any coordinator runs."""
     if isinstance(value, str):
         stripped = value.strip()
+        if not stripped:
+            # A blank field from the UI means "use the default range", as before.
+            return None
         try:
             datetime.strptime(stripped, "%Y-%m-%d")
         except ValueError:
