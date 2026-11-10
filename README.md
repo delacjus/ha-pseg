@@ -32,7 +32,7 @@ From upstream `sidprax/ha-pseg`, this fork has adopted:
 This fork deliberately does **not** adopt:
 - **Companion auth server**: Upstream transmits plaintext credentials over unencrypted HTTP to a local helper server. This fork communicates directly with PSE&G over encrypted HTTPS.
 - **Mixed cost statistic**: Upstream (1.0.2) mixes portal-reported dollars with a rate-based estimate inside one cost statistic, and derives a floating 7-day average rate. This fork keeps its cost statistic a stable configured-rate estimate until real portal cost has been verified, and will then add real cost as a **separate** series (see the cost roadmap below).
-- **Auth-type menu and pasted MyMeter cookies** (upstream 1.1.0): The new "Direct MyMeter" sign-in options either send your password to the companion add-on, or ask you to paste a browser `MM_SID` cookie. This fork already signs in to MyMeter directly with renewal, and its testing found browser-exported cookies often fail outside the browser.
+- **Auth-type menu and pasted MyMeter cookies** (upstream 1.1.0): The new "Direct MyMeter" sign-in options either send your password to the companion add-on, or ask you to paste a browser `MM_SID` cookie. This fork already signs in to MyMeter directly with renewal, so it doesn't need them. (Pasted cookies do work while something keeps the session busy: in October 2026 testing of upstream's keep-alive, one pasted MyMeter cookie stayed signed in for about 49 hours. Without requests, a MyMeter session expires after about 6 to 8 minutes.)
 - **OptionsFlow update listeners** (upstream 1.0.3): The fork already uses `OptionsFlowWithReload` to reload configuration cleanly on save without update listener races.
 
 ## Features
@@ -70,7 +70,7 @@ Install `delacjus/ha-pseg` as a custom repository in HACS:
    ```
 4. Set the **Category** to **Integration** and click **Add**.
 5. Find **PSE&G Energy (New Jersey)** in the integrations list.
-6. Click **Download**, select the latest release (**1.7.0** or newer), and click **Download**.
+6. Click **Download**, select the latest release (**1.7.2** or newer), and click **Download**.
 7. Restart Home Assistant.
 
 > **Note**: Do not search for or install the default upstream listing (`sidprax/ha-pseg`). This fork must be added as a custom repository using the URL above.
@@ -168,7 +168,7 @@ The regular data poll has a separate saved-password fallback when the renewal po
 
 The integration retains backward-compatible support for legacy login methods:
 - **Okta cookies**: Paste cookies obtained after signing in via "Sign in Via My Account". These sessions expire after approximately one hour and require periodic manual pasting.
-- **MyMeter cookie paste (`MM_RememberMe`)**: Browser-exported `MM_RememberMe` cookies often fail outside the browser. If rejected, Home Assistant prompts for your MyMeter email and password.
+- **MyMeter cookie paste (`MM_RememberMe`)**: Setup accepts a pasted cookie only if `MM_RememberMe` can renew the session by itself. Home Assistant drops the session cookie (`MM_SID`) and requires one successful renewal before it creates the entry, so a cookie that cannot renew is rejected even while your browser is still signed in. This differs from the upstream test above, where a pasted `MM_SID` stayed signed in because requests kept it busy. In the October 2026 test, `MM_RememberMe` did not restore the expired session. If the cookie is rejected or the session later expires, Home Assistant prompts for your MyMeter email and password.
 
 ## Hourly and Daily Statistics
 
