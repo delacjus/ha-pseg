@@ -948,6 +948,8 @@ def set_cookie_names(resp: Any) -> list[str]:
         if headers is not None and hasattr(headers, "getlist"):
             values = list(headers.getlist("Set-Cookie"))
         if not values and getattr(resp, "headers", None):
+            # Fallback only: requests joins repeated Set-Cookie headers into one
+            # string, so this reads just the first name and can under-report.
             joined = resp.headers.get("Set-Cookie")
             values = [joined] if isinstance(joined, str) and joined else []
     except Exception:
