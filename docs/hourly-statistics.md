@@ -56,7 +56,7 @@ timezone and zero semantics are still unverified.
 
 ## Rollout (repeatable)
 
-1. In HACS, update **PSE&G Energy (New Jersey)** to **1.5.0** (or install the
+1. In HACS, update **PSE&G Energy (NJ and Long Island)** to **1.5.0** (or install the
    reviewed build). Confirm the manifest shows `1.5.0`.
 2. Restart Home Assistant when the maintenance window allows it.
 3. Open **Settings** > **Devices & Services** > **PSE&G**. Confirm the entry is
