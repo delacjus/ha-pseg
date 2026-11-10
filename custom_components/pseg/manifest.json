@@ -1,21 +1,21 @@
 {
   "domain": "pseg",
-  "name": "PSE&G Energy (New Jersey)",
+  "name": "PSE&G Energy (NJ and Long Island)",
   "after_dependencies": [
     "frontend",
     "recorder"
   ],
   "codeowners": [
-    "@sidprax"
+    "@delacjus"
   ],
   "config_flow": true,
   "dependencies": [
     "http"
   ],
-  "documentation": "https://github.com/sidprax/ha-pseg",
+  "documentation": "https://github.com/delacjus/ha-pseg",
   "integration_type": "service",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/sidprax/ha-pseg/issues",
+  "issue_tracker": "https://github.com/delacjus/ha-pseg/issues",
   "requirements": [
     "beautifulsoup4>=4.11.0"
   ],

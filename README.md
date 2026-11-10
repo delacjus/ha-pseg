@@ -1,4 +1,4 @@
-# PSE&G Energy (New Jersey) — Home Assistant Integration
+# PSE&G Energy (NJ and Long Island): Home Assistant Integration
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Validate with hassfest](https://github.com/delacjus/ha-pseg/actions/workflows/hassfest.yaml/badge.svg)](https://github.com/delacjus/ha-pseg/actions/workflows/hassfest.yaml)
@@ -13,7 +13,7 @@ Includes a built-in Lovelace card with 7-day and 14-day history views and kWh / 
 
 ## About This Fork (`delacjus/ha-pseg`)
 
-This project (`delacjus/ha-pseg`) is an independent fork of `sidprax/ha-pseg`. It hardens the integration for security, authentication reliability, and long-term statistics integrity:
+This project (`delacjus/ha-pseg`) is an independent fork of `sidprax/ha-pseg`, maintained separately with its own version numbers (1.7.x here, unrelated to upstream's 1.1.x). Report problems with this version at [delacjus/ha-pseg issues](https://github.com/delacjus/ha-pseg/issues), not upstream. It hardens the integration for security, authentication reliability, and long-term statistics integrity:
 
 - **Direct local MyMeter sign-in**: Home Assistant signs into MyMeter directly. There is no companion add-on, and credentials are never sent over HTTP to a `localhost:8000` helper.
 - **Strict host allowlist**: Every HTTP request, redirect, and form submission is strictly restricted to `{mysmartenergy.nj.pseg.com, id.myaccount.pseg.com}` for a New Jersey entry. When signing in with a MyMeter email and password, requests are narrowed to `mysmartenergy.nj.pseg.com` only, preventing any credentials or tokens from being sent to Okta. A Long Island entry is restricted to `mysmartenergy.psegliny.com` only.
@@ -69,7 +69,7 @@ Install `delacjus/ha-pseg` as a custom repository in HACS:
    https://github.com/delacjus/ha-pseg
    ```
 4. Set the **Category** to **Integration** and click **Add**.
-5. Find **PSE&G Energy (New Jersey)** in the integrations list.
+5. Find **PSE&G Energy (NJ and Long Island)** in the integrations list.
 6. Click **Download**, select the latest release (**1.7.2** or newer), and click **Download**.
 7. Restart Home Assistant.
 
@@ -88,7 +88,7 @@ Install `delacjus/ha-pseg` as a custom repository in HACS:
 After installing and restarting, click the button above to start setup directly, or:
 
 1. In Home Assistant, go to **Settings** > **Devices & Services** > **Add Integration**.
-2. Search for **PSE&G Energy (New Jersey)**.
+2. Search for **PSE&G Energy (NJ and Long Island)**.
 3. Choose your portal: **PSE&G New Jersey** (default) or **PSEG Long Island (experimental)**.
 4. Choose how to sign in:
    - **MyMeter email and password** (recommended): the Email/Password boxes on your MyMeter portal.
