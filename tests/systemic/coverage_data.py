@@ -502,8 +502,8 @@ BASELINE_FAST = {
         "0d29415f3ad812c2c6f5d3d8ee3bfe10dede3ea386df14e5fc2f721d5337ec40",
     ),
     "tests/test_auth_menu.py": (
-        12,
-        "244cc6c8de8ab04bd0868a9f354228092752ce322193f52493e38edb40bc6529",
+        14,
+        "941dd48edc0b3b392b2ffa603394358ed3de0b37f58b50773496b327c88e5768",
     ),
     "tests/test_auth_mutation_catalog.py": (
         3,

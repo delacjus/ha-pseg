@@ -208,6 +208,25 @@ async def test_okta_step_on_long_island_is_refused(hass: HomeAssistant) -> None:
     assert hass.config_entries.async_entries(DOMAIN) == []
 
 
+@pytest.mark.parametrize(
+    ("method", "field"),
+    [("mymeter_cookie", CONF_PORTAL_COOKIES), ("okta_cookies", CONF_OKTA_COOKIES)],
+)
+async def test_empty_cookie_form_asks_for_a_cookie(
+    hass: HomeAssistant, method: str, field: str
+) -> None:
+    """An empty cookie form asks for the cookie, not for an email and password."""
+    form = await _method_form(hass, method)
+
+    result = await hass.config_entries.flow.async_configure(
+        form["flow_id"], user_input={field: "  "}
+    )
+
+    assert result["type"] == FlowResultType.FORM
+    assert result["step_id"] == method
+    assert result["errors"] == {"base": "missing_cookie"}
+
+
 async def test_failed_login_reshows_only_that_methods_form(
     hass: HomeAssistant,
 ) -> None:

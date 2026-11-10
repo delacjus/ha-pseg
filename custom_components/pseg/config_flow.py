@@ -214,6 +214,11 @@ def _okta_cookies_schema() -> vol.Schema:
     return vol.Schema({vol.Optional(CONF_OKTA_COOKIES, default=""): str})
 
 
+def _cookie_form_error(error: str) -> str:
+    """A cookie-only form has no email/password fields, so ask for the cookie."""
+    return "missing_cookie" if error == "missing_credentials" else error
+
+
 def _has_sign_in_fields(user_input: dict[str, Any]) -> bool:
     """True when this submit carries any sign-in field (the legacy one-shot form)."""
     return any(key in user_input for key in _SIGN_IN_FIELDS)
@@ -1047,7 +1052,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             portal_cookies = _normalize_portal_cookies(user_input.get(CONF_PORTAL_COOKIES, ""))
             error = self._sign_in_error("", portal_cookies, "", "")
             if error is not None:
-                errors["base"] = error
+                errors["base"] = _cookie_form_error(error)
             else:
                 return await self._async_guarded_sign_in(
                     _MYMETER_COOKIE_STEP, None, "", portal_cookies, "", ""
@@ -1069,7 +1074,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
             error = self._sign_in_error(okta_cookies, "", "", "")
             if error is not None:
-                errors["base"] = error
+                errors["base"] = _cookie_form_error(error)
             else:
                 return await self._async_guarded_sign_in(
                     _OKTA_COOKIES_STEP, None, okta_cookies, "", "", ""

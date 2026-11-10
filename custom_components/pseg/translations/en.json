@@ -70,6 +70,7 @@
     },
     "error": {
       "missing_credentials": "Enter your MyMeter email and password.",
+      "missing_cookie": "Paste the cookie into the field above.",
       "okta_nj_only": "Okta sign-in is PSE&G New Jersey only. Clear the Okta Cookies field.",
       "captcha_nj_only": "The CAPTCHA helper works only on the PSE&G New Jersey portal. Sign in with a MyMeter email and password, or paste a browser cookie from the Long Island portal.",
       "okta_session_invalid": "The Okta session cookies provided are expired or invalid.",
