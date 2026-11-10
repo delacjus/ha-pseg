@@ -252,6 +252,15 @@ async def test_li_busy_retry_keeps_the_li_portal(hass: HomeAssistant) -> None:
     assert result["errors"]
     assert flow._portal_url == PORTAL_URL_LI
 
+    # A second submit naming New Jersey while the Long Island sign-in is still
+    # running is refused as busy and leaves that sign-in's portal alone.
+    flow._sign_in_operation = object()
+    result = await flow.async_step_user(
+        {CONF_PORTAL_URL: PORTAL_URL_NJ, CONF_PORTAL_COOKIES: "MM_SID=a; MM_RememberMe=b"}
+    )
+    assert result["errors"] == {"base": "sign_in_busy"}
+    assert flow._portal_url == PORTAL_URL_LI
+
 
 async def test_li_with_okta_cookies_is_refused(hass: HomeAssistant) -> None:
     """Okta cookies only make sense on New Jersey and are refused before any HTTP."""

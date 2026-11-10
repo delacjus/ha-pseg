@@ -896,7 +896,10 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             # A form without the portal field (an error retry) keeps the portal
             # already chosen; unknown or empty values fall back to New Jersey.
-            if CONF_PORTAL_URL in user_input:
+            # A sign-in still in flight reads the portal across awaits and saves
+            # it, so a second submit must not change it underneath (it is then
+            # refused as busy).
+            if CONF_PORTAL_URL in user_input and self._sign_in_operation is None:
                 self._portal_url = resolve_portal_url(user_input[CONF_PORTAL_URL])
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
             portal_cookies = _normalize_portal_cookies(user_input.get(CONF_PORTAL_COOKIES, ""))
