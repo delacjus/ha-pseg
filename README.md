@@ -168,7 +168,7 @@ The regular data poll has a separate saved-password fallback when the renewal po
 
 The integration retains backward-compatible support for legacy login methods:
 - **Okta cookies**: Paste cookies obtained after signing in via "Sign in Via My Account". These sessions expire after approximately one hour and require periodic manual pasting.
-- **MyMeter cookie paste (`MM_RememberMe`)**: Setup accepts a pasted cookie only if `MM_RememberMe` can renew the session by itself. Home Assistant drops the session cookie (`MM_SID`) and requires one successful renewal before it creates the entry, so a cookie that cannot renew is rejected even while your browser is still signed in. This differs from the upstream test above, where a pasted `MM_SID` stayed signed in because requests kept it busy. `MM_RememberMe` also does not bring back a session that has already expired (tested October 2026). If the cookie is rejected or the session later expires, Home Assistant prompts for your MyMeter email and password.
+- **MyMeter cookie paste (`MM_RememberMe`)**: Setup accepts a pasted cookie only if `MM_RememberMe` can renew the session by itself. Home Assistant drops the session cookie (`MM_SID`) and requires one successful renewal before it creates the entry, so a cookie that cannot renew is rejected even while your browser is still signed in. This differs from the upstream test above, where a pasted `MM_SID` stayed signed in because requests kept it busy. In the October 2026 test, `MM_RememberMe` did not restore the expired session. If the cookie is rejected or the session later expires, Home Assistant prompts for your MyMeter email and password.
 
 ## Hourly and Daily Statistics
 
