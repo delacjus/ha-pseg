@@ -346,3 +346,93 @@ def test_fixture_proof_does_not_depend_on_series_order() -> None:
     assert status == CostEvidenceStatus.OK
     assert [len(s["data"]) for s in sample["series"]] == [0, 15]
     assert sample["total_points"] == 15
+
+
+# ---------------------------------------------------------------------------
+# Rejection detail: which unit field failed, without copying portal text out
+# ---------------------------------------------------------------------------
+
+
+def test_kwh_rejection_names_the_usage_type_field() -> None:
+    """A kWh chart reply says which field contradicted the dollar proof."""
+    payload = _fixture()
+    payload["Data"]["usageType"] = "kWh"
+
+    _status, sample, _ = _validate(payload)
+
+    assert {"field": "usage_type", "token": "kWh"} in sample["unit_signals"]
+    assert {"field": "currency", "token": "USD"} in sample["unit_signals"]
+
+
+def test_unknown_unit_text_is_reported_as_other() -> None:
+    """Portal text outside the short unit list never reaches diagnostics."""
+    payload = _fixture()
+    payload["Data"]["yAxis"][0]["title"]["text"] = "Acct 1234 Smith"
+
+    _status, sample, _ = _validate(payload)
+
+    assert {"field": "y_axis_title", "token": "other"} in sample["unit_signals"]
+    assert "Smith" not in json.dumps(sample)
+
+
+def test_unproven_rejection_lists_absent_proof_fields() -> None:
+    """A reply with no currency fields shows them as absent, not silently missing."""
+    payload = _fixture()
+    del payload["Data"]["tooltipOptions"]["currency"]
+    del payload["Data"]["tooltipOptions"]["usageTypeDisplayName"]
+    del payload["Data"]["usageType"]
+
+    _status, sample, _ = _validate(payload)
+
+    assert sample["reason"] == REASON_CURRENCY_UNPROVEN
+    fields = {item["field"]: item["token"] for item in sample["unit_signals"]}
+    assert fields["currency"] == "absent"
+    assert fields["usage_type"] == "absent"
+    assert fields["usage_type_display_name"] == "absent"
+
+
+def test_accepted_sample_carries_no_rejection_detail() -> None:
+    """Only a rejected sample explains itself; a proven one keeps its shape."""
+    status, sample, _ = _validate(_fixture())
+
+    assert status == CostEvidenceStatus.OK
+    assert "unit_signals" not in sample
+
+
+def test_wrong_unit_sampler_records_dropped_cookie_names_only() -> None:
+    """The pair notes which cookies the portal tried to set, never their values."""
+    payload = _fixture()
+    payload["Data"]["usageType"] = "kWh"
+    with requests_mock.Mocker() as mock:
+        mock.post(
+            f"{PORTAL_BASE_URL}/Dashboard/Chart",
+            text="ok",
+            headers={"Set-Cookie": "MM_SID=secretvalue123; path=/; HttpOnly"},
+        )
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/ChartData",
+            content=json.dumps(payload).encode(),
+            headers={"Set-Cookie": "ChartPref=secretvalue456; path=/"},
+        )
+        status, sample, promotable = execute_cost_sampler(
+            seed_cookies=requests.cookies.RequestsCookieJar(),
+            token="usagetype3_token",
+            permit=_permit(),
+            owner_check=MagicMock(),
+            authoritative_meters=AUTHORITATIVE,
+            meter_placeholders={},
+        )
+
+    assert status == CostEvidenceStatus.WRONG_UNIT
+    assert promotable is False
+    assert sample["post_set_cookies"] == ["MM_SID"]
+    assert sample["get_set_cookies"] == ["other"]
+    assert "secretvalue" not in json.dumps(sample)
+
+
+def test_ok_sampler_result_has_no_cookie_detail() -> None:
+    """A proven sample does not gain the rejection-only cookie fields."""
+    status, sample, _promotable, _body = _run_sampler(USAGE_INTERVAL_DAILY)
+
+    assert status == CostEvidenceStatus.OK
+    assert "post_set_cookies" not in sample

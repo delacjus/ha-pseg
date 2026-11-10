@@ -310,6 +310,16 @@ dropped-field count. Plus, from the same poll, the **paired kWh anchors**: daily
 `{date, kwh}` and hourly `{start, kwh}` entries, their counts and a truncated
 SHA-256 digest of the sorted contributing meter ids.
 
+A sample rejected as `wrong_unit` also carries `unit_signals`: each unit field
+the currency gate read (`currency`, `usage_type`, `usage_type_display_name`,
+`y_axis_title`, legacy unit keys, `meter_prefix`) with its token only when it is
+one of a short list of unit words (`USD`, `$`, `Dollar`, `kWh`, ...); any other
+text is `other`, and a missing proof field is `absent`. It also carries
+`post_set_cookies` / `get_set_cookies`: the **names** of cookies the portal tried
+to set on the pair (which the isolated session drops), from a short known list,
+anything else `other`. Values are never read. This shows whether a rejected reply
+was the kWh chart, and whether lost chart state could explain it.
+
 Never collected or retained: HTML, response headers, cookies, antiforgery
 tokens, arbitrary unknown key names or string values, extra point fields,
 exception text, meter serial numbers, account labels, or any bill content. A
