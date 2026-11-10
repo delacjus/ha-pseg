@@ -117,11 +117,21 @@ class PsegEnergyCard extends HTMLElement {
     const entities = this._hass && this._hass.entities;
     const own = entities && entities[this.config.entity];
     if (!own || !own.device_id) return fixedId;
-    const pattern = new RegExp(`^sensor\\.pseg_${key}(_\\d+)?$`);
-    const match = Object.values(entities).find(
-      (e) => e.device_id === own.device_id && pattern.test(e.entity_id)
-    );
-    return match ? match.entity_id : null;
+    // hass.entities is replaced only when the registry changes, so scan it once
+    // per registry version instead of on every state push.
+    const cache = this._accountCache;
+    if (!cache || cache.entities !== entities || cache.entity !== this.config.entity) {
+      this._accountCache = { entities, entity: this.config.entity, ids: {} };
+    }
+    const ids = this._accountCache.ids;
+    if (!(key in ids)) {
+      const pattern = new RegExp(`^sensor\\.pseg_${key}(_\\d+)?$`);
+      const match = Object.values(entities).find(
+        (e) => e.device_id === own.device_id && pattern.test(e.entity_id)
+      );
+      ids[key] = match ? match.entity_id : null;
+    }
+    return ids[key];
   }
 
   getCardSize() {

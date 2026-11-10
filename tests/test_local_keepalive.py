@@ -113,9 +113,9 @@ def test_three_minute_get_keepalive_keeps_local_session_alive() -> None:
         login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)
         sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAML_AUTOPOST)
 
-        for _ in range(20):  # one hour at the coordinator's 3-minute cadence
-            frozen.tick(timedelta(minutes=3))
-            portal["now"] += 180
+        for _ in range(12):  # one hour at the slowest 5-minute keepalive gap
+            frozen.tick(timedelta(minutes=5))
+            portal["now"] += 300
             assert client.keepalive() is True
 
         # Stop touching the portal: the idle expiry the old 10-min timer hit.
@@ -130,8 +130,8 @@ def test_three_minute_get_keepalive_keeps_local_session_alive() -> None:
     assert client.idle_gap_seconds == 601.0
 
 
-def test_mixed_jar_uses_the_three_minute_get_keepalive() -> None:
-    """Okta cookie + saved MyMeter login is portal-only: 3-min GET, never SSO.
+def test_mixed_jar_uses_the_portal_get_keepalive() -> None:
+    """Okta cookie + saved MyMeter login is portal-only: 4-5 min GET, never SSO.
 
     The client is host-restricted to the portal, so the old 10-minute SSO cadence
     let MM_SID lapse and then reauthed instead of warming the portal session.
@@ -164,9 +164,9 @@ def test_mixed_jar_uses_the_three_minute_get_keepalive() -> None:
         login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)
         sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAML_AUTOPOST)
 
-        for _ in range(20):  # one hour at the coordinator's 3-minute cadence
-            frozen.tick(timedelta(minutes=3))
-            portal["now"] += 180
+        for _ in range(12):  # one hour at the slowest 5-minute keepalive gap
+            frozen.tick(timedelta(minutes=5))
+            portal["now"] += 300
             assert client.keepalive() is True
 
         # Stop touching the portal: the observed ~9-10 minute lapse the old timer hit.

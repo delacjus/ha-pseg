@@ -43,7 +43,7 @@
     },
     "error": {
       "missing_credentials": "Enter your MyMeter email and password.",
-      "okta_nj_only": "Okta sign-in is PSE&G New Jersey only. Clear the Okta Cookies field, or choose the PSE&G New Jersey portal.",
+      "okta_nj_only": "Okta sign-in is PSE&G New Jersey only. Clear the Okta Cookies field.",
       "captcha_nj_only": "The CAPTCHA helper works only on the PSE&G New Jersey portal. Sign in with a MyMeter email and password, or paste a browser cookie from the Long Island portal.",
       "okta_session_invalid": "The Okta session cookies provided are expired or invalid.",
       "okta_no_session": "These Okta cookies cannot sign in on their own. On mysmartenergy.nj.pseg.com, use the 'Sign in Via My Account' link (not the email/password boxes), then copy the Cookie header from the id.myaccount.pseg.com /sso/saml request. It should contain idx=.",

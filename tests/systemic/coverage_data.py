@@ -604,7 +604,7 @@ BASELINE_FAST = {
     "tests/test_init.py": (15, "f348cdb1d28b93d85efc8c693d3c4dad6b09abaeecb245ac349d9201d4effa62"),
     "tests/test_local_keepalive.py": (
         29,
-        "3fc3a18f58953a088f5d5f706c98aeca07e47540c584686768fe579b9080922a",
+        "d66762af0791f0e9c20b687ad958bcf1ce83a2c2c95f783f90e6fb9ee0b288e1",
     ),
     "tests/test_mutation_check.py": (
         43,
@@ -615,8 +615,8 @@ BASELINE_FAST = {
         "e3a6b0f968eee7d91efdefd2678c50be9a1dbd7885948c0146eb5a1bb4c581d7",
     ),
     "tests/test_portal_select.py": (
-        14,
-        "e0c813ec30a21225954210def6ec45558dad8c3b243adf2d8925d265b040e363",
+        15,
+        "71230b3ba553548398c220e5cb34ee76230f6d93bee719a99fd084fdb7ffc36c",
     ),
     "tests/test_pseg_client.py": (
         128,

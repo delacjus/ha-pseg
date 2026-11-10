@@ -231,6 +231,28 @@ async def test_user_flow_creates_a_li_entry_with_li_cookies(
     assert {cookie["domain"] for cookie in result["data"]["cookies"]} == {PORTAL_HOST_LI}
 
 
+async def test_li_busy_retry_keeps_the_li_portal(hass: HomeAssistant) -> None:
+    """The busy/CAPTCHA retry form keeps Long Island, even if a submit omits it."""
+    from custom_components.pseg.config_flow import PsegConfigFlow
+
+    flow = PsegConfigFlow()
+    flow.hass = hass
+    flow._portal_url = PORTAL_URL_LI
+
+    busy = flow._async_show_credentials_form("user", "sign_in_busy")
+    assert busy["errors"] == {"base": "sign_in_busy"}
+    assert CONF_PORTAL_URL in busy["data_schema"].schema
+    reauth = flow._async_show_credentials_form("reauth_confirm", "sign_in_busy")
+    assert CONF_PORTAL_URL not in reauth["data_schema"].schema
+
+    # A submit without the portal field (and nothing to sign in with, so no HTTP)
+    # must not reset the flow to New Jersey.
+    result = await flow.async_step_user({CONF_PORTAL_COOKIES: ""})
+    assert result["type"] == FlowResultType.FORM
+    assert result["errors"]
+    assert flow._portal_url == PORTAL_URL_LI
+
+
 async def test_li_with_okta_cookies_is_refused(hass: HomeAssistant) -> None:
     """Okta cookies only make sense on New Jersey and are refused before any HTTP."""
     result = await hass.config_entries.flow.async_init(

@@ -536,9 +536,12 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def _async_show_credentials_form(
         self, step_id: str, error: str
     ) -> ConfigFlowResult:
+        # The first setup step keeps showing the chosen portal on an error retry;
+        # reauth and reconfigure never offer it.
+        portal_url = self._portal_url if step_id == "user" else None
         return self.async_show_form(
             step_id=step_id,
-            data_schema=_credentials_schema(),
+            data_schema=_credentials_schema(portal_url=portal_url),
             errors={"base": error},
         )
 
@@ -891,8 +894,10 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            # Unknown, empty or missing values stay on the New Jersey default.
-            self._portal_url = resolve_portal_url(user_input.get(CONF_PORTAL_URL))
+            # A form without the portal field (an error retry) keeps the portal
+            # already chosen; unknown or empty values fall back to New Jersey.
+            if CONF_PORTAL_URL in user_input:
+                self._portal_url = resolve_portal_url(user_input[CONF_PORTAL_URL])
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
             portal_cookies = _normalize_portal_cookies(user_input.get(CONF_PORTAL_COOKIES, ""))
             email = user_input.get(CONF_MYMETER_EMAIL, "").strip()
