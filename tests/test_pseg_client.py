@@ -7,6 +7,7 @@ import traceback
 from unittest.mock import patch
 import urllib.parse
 
+from freezegun import freeze_time
 import pytest
 import requests
 import requests_mock
@@ -1470,6 +1471,7 @@ def _daily_chart(day: date, kwh: float) -> dict:
     }
 
 
+@freeze_time("2026-10-22 16:00:00")  # Yesterday-relative days must not land on a DST day.
 def test_fetch_energy_data_requests_hourly_and_keeps_daily_authority() -> None:
     """The poll asks daily then hourly; hourly history is used only when validated."""
     client = PsegClient(portal_cookies="MM_SID=x", price_per_kwh=0.25)
@@ -1634,6 +1636,7 @@ def test_hourly_label_mismatch_blocks_promotion() -> None:
     assert result.reason == "label_mismatch"
 
 
+@freeze_time("2026-10-22 16:00:00")  # Yesterday-relative days must not land on a DST day.
 def test_date_only_labels_prove_interval_start() -> None:
     """Date-only labels now prove interval start under the verified contract."""
     day = (datetime.now(NY_TZ) - timedelta(days=1)).date()
@@ -1672,6 +1675,7 @@ def test_history_range_still_requests_the_daily_interval() -> None:
     assert records == [{"date": "2026-10-18", "kwh": 17.5, "cost": 4.32}]
 
 
+@freeze_time("2026-10-22 16:00:00")  # Yesterday-relative days must not land on a DST day.
 def test_mixed_granularity_when_one_closed_day_is_incomplete() -> None:
     """Granularity is explicit about partial hourly coverage, not just hourly>0."""
     client = PsegClient(portal_cookies="MM_SID=x", price_per_kwh=0.25)

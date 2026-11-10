@@ -420,7 +420,7 @@ BASELINE_FAST = {
     ),
     "tests/independent/nywall/test_independent_nywall_labels.py": (
         34,
-        "fe85d2b951585e79db8f754bfeb87df2eb7f62be61a793ac315b595a447822d5",
+        "4f33fb6688e1378a34092160f942640aa27025929480b108937cae9c53f07bbe",
     ),
     "tests/independent/test_provenance.py": (
         44,
@@ -436,14 +436,14 @@ BASELINE_FAST = {
         "5c811be8589205f143a47098f9ce9924caac433e60d629c7a1c99e658aaedf2c",
     ),
     "tests/stats_suite/test_interval_table.py": (
-        400,
-        "729962938afdee0ed0447035fb56ac1ab1bdcdd646803432733a27261e8026a5",
+        414,
+        "b36a0a1b055a053de3cc21dda526d994cf11f40f2c6619b92476fbd34f08fa1a",
     ),
     # Reviewed fast additions integrated alongside P2-09: P3-07 (KB 5096c307)
     # and P3-06 (KB d8c34961).
     "tests/stats_suite/test_parser_mutation_catalog.py": (
-        15,
-        "c86c81602b0be04f399d7a64bec215aba2c6b56d79690dc120734d2575e0bc43",
+        17,
+        "ff165273d71efec3b873d3c0897be4e2ed8d49fcd430a8358d055889cda1cf48",
     ),
     "tests/stats_suite/test_reference_model.py": (
         13,
@@ -601,10 +601,10 @@ BASELINE_FAST = {
         92,
         "e5865ae29d34d7ceefc2ab9a16537c1df676703342a8df75b5984b40adfcfb4c",
     ),
-    "tests/test_init.py": (10, "9d3814bcdf596b3d307135fe0c75cd2b21a4ef02556f226455b968cacf360d09"),
+    "tests/test_init.py": (15, "f348cdb1d28b93d85efc8c693d3c4dad6b09abaeecb245ac349d9201d4effa62"),
     "tests/test_local_keepalive.py": (
-        27,
-        "6f488d265ce6a5a60c3e1826af95cb07828da3217041d05b7ddfd23ce73c976d",
+        29,
+        "d66762af0791f0e9c20b687ad958bcf1ce83a2c2c95f783f90e6fb9ee0b288e1",
     ),
     "tests/test_mutation_check.py": (
         43,
@@ -613,6 +613,10 @@ BASELINE_FAST = {
     "tests/test_price_sanitizing.py": (
         23,
         "e3a6b0f968eee7d91efdefd2678c50be9a1dbd7885948c0146eb5a1bb4c581d7",
+    ),
+    "tests/test_portal_select.py": (
+        15,
+        "71230b3ba553548398c220e5cb34ee76230f6d93bee719a99fd084fdb7ffc36c",
     ),
     "tests/test_pseg_client.py": (
         128,
@@ -650,8 +654,8 @@ BASELINE_FAST = {
         "22ff641501a44de254d0c7a4874daa0542e7dfdb017d31db0a23eff0c5bde3d7",
     ),
     "tests/test_statistics_hourly.py": (
-        23,
-        "56335aba35163816aab2519adf3a7eeafb2536b751c80281b00f59fda4ddfd47",
+        27,
+        "82805593436adbb78ca54535104dac81ed2160890464232bfa40904b30a2fe92",
     ),
     "tests/test_statistics_recorder.py": (
         60,
@@ -742,6 +746,7 @@ BASELINE_MODULE_MARKS = {
     "tests/test_local_keepalive.py": (),
     "tests/test_mutation_check.py": (),
     "tests/test_price_sanitizing.py": (),
+    "tests/test_portal_select.py": (),
     "tests/test_pseg_client.py": (),
     "tests/test_release_check.py": (),
     "tests/test_release_snapshot.py": (),

@@ -26,7 +26,8 @@ from custom_components.pseg.const import (
     CONF_MYMETER_PASSWORD,
     DOMAIN,
     KEEPALIVE_INTERVAL_MINUTES,
-    LOCAL_KEEPALIVE_INTERVAL_MINUTES,
+    LOCAL_KEEPALIVE_MAX_SECONDS,
+    LOCAL_KEEPALIVE_MIN_SECONDS,
     PORTAL_BASE_URL,
 )
 from custom_components.pseg.coordinator import PsegDataUpdateCoordinator
@@ -278,7 +279,7 @@ async def test_poll_auth_failure_logs_typed_reason_and_idle_gap(
 
 
 def test_keepalive_interval_is_per_mode(hass: HomeAssistant) -> None:
-    """Local portal sessions are touched every 3 min; Okta mode keeps 10 min."""
+    """Local portal sessions are touched after a random 4-5 min; Okta mode keeps 10 min."""
     entry = _entry(hass)
     local = PsegDataUpdateCoordinator(
         hass, PsegClient(portal_cookies="MM_SID=x"), {}, config_entry=entry
@@ -287,17 +288,22 @@ def test_keepalive_interval_is_per_mode(hass: HomeAssistant) -> None:
         hass, PsegClient(okta_cookies="idx=x"), {}, config_entry=entry
     )
 
-    assert local.keepalive_interval() == timedelta(
-        minutes=LOCAL_KEEPALIVE_INTERVAL_MINUTES
+    local_delays = {local.keepalive_interval() for _ in range(50)}
+    assert all(
+        timedelta(seconds=LOCAL_KEEPALIVE_MIN_SECONDS)
+        <= delay
+        <= timedelta(seconds=LOCAL_KEEPALIVE_MAX_SECONDS)
+        for delay in local_delays
     )
+    assert len(local_delays) > 1, "the local delay must vary between runs"
     assert okta.keepalive_interval() == timedelta(minutes=KEEPALIVE_INTERVAL_MINUTES)
 
-    with patch("custom_components.pseg.coordinator.async_track_time_interval") as track:
-        track.return_value = lambda: None
+    with patch("custom_components.pseg.coordinator.async_call_later") as later:
+        later.return_value = lambda: None
         local.start_keepalive()
-    assert track.call_args.args[2] == timedelta(
-        minutes=LOCAL_KEEPALIVE_INTERVAL_MINUTES
-    )
+    delay = later.call_args.args[1]
+    assert timedelta(seconds=LOCAL_KEEPALIVE_MIN_SECONDS) <= delay
+    assert delay <= timedelta(seconds=LOCAL_KEEPALIVE_MAX_SECONDS)
 
 
 def test_first_auth_failure_is_stable_until_recovery_or_a_new_reason() -> None:

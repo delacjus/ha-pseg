@@ -37,7 +37,7 @@ NOW = datetime(2028, 1, 1, tzinfo=UTC)
 def test_parser_catalog_preimages_and_function_ownership():
     rows = load_table(CATALOG)
     coverage = runpy.run_path(str(CATALOG))["COVERAGE"]
-    assert len(rows) == len(coverage) == 8
+    assert len(rows) == len(coverage) == 9
     assert {row["label"] for row in rows} == set(coverage)
     assert len({(row["filename"], row["befores"], row["afters"]) for row in rows}) == len(rows)
     for row in rows:
@@ -56,7 +56,7 @@ def test_parser_catalog_preimages_and_function_ownership():
         segment = ast.get_source_segment(source, functions[0])
         for before in row["befores"]:
             assert source.count(before) == 1, row["label"]
-            if row["label"] == "p02-broaden-date-only":
+            if row["label"] in ("p02-broaden-date-only", "p02b-require-zero-padding"):
                 assert "_DATE_ONLY_LABEL_RE.fullmatch(text)" in segment
                 assignment = next(
                     node
@@ -164,7 +164,7 @@ def test_parser_wall_start_with_conserved_totals(day):
 @pytest.mark.parametrize(
     "case_id",
     [
-        "missing_zero_padding",
+        "two_digit_year",
         "both_aware_wrong_end",
         "aware_iso_basic_wrong_hour",
         "date_start_aware_noon_end",
@@ -198,6 +198,36 @@ def test_parser_label_proof_with_conserved_coverage(case_id, order):
     result = validate_hourly_day(day, records, 24.0, NOW)
     assert result.reason == case.expected_reason, "Day label reason assertion"
     assert result.complete is False, "Day label outcome assertion"
+
+
+@pytest.mark.parametrize("order", ["forward", "reverse"])
+@pytest.mark.parametrize("case_id", ["unpadded_same_date"])
+def test_parser_positive_label_proof_with_conserved_coverage(case_id, order):
+    day = EDT_REFERENCE_DAY
+    case = CASES_BY_ID[case_id]
+    control = make_valid_control_points(day, case, kwh_per_hour=0.5)
+    target = make_case_points(day, case, kwh_per_hour=0.5)
+    assert len(control) == len(target) == 24
+    assert sum(point["y"] for point in control + target) == 24.0
+    healthy = _parse([{"name": "Meter #1", "data": control}, {"name": "Meter #2", "data": control}])
+    healthy_records = _assert_conserved(healthy, 24, 24.0)
+    assert [record["start"] for record in healthy_records] == ny_day_hours_utc(day)
+    result = validate_hourly_day(day, healthy_records, 24.0, NOW)
+    assert result.complete and result.reason is None, "Healthy label control"
+
+    series = [{"name": "Meter #1", "data": control}, {"name": "Meter #2", "data": target}]
+    parsed = _parse(series if order == "forward" else series[::-1])
+    records = _assert_conserved(parsed, 24, 24.0)
+    assert [record["start"] for record in records] == ny_day_hours_utc(day)
+    assert records[0]["interval_reason"] is None, "Parser interval reason assertion"
+    assert all(record["interval_ok"] is True for record in records), (
+        "Parser interval outcome assertion"
+    )
+    expected_meters = ("1", "2") if order == "forward" else ("2", "1")
+    assert all(record.contributing_meter_ids == expected_meters for record in records)
+    result = validate_hourly_day(day, records, 24.0, NOW)
+    assert result.reason is None, "Day label reason assertion"
+    assert result.complete is True, "Day label outcome assertion"
 
 
 def test_parser_ambiguity_precedes_aware_proof():

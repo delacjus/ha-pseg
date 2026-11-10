@@ -213,7 +213,8 @@ def ny_wall_ms_to_utc(ms: float | int) -> tuple[datetime | None, str]:
     return (a0.astimezone(UTC), "ok")
 
 
-_DATE_ONLY_LABEL_RE = re.compile(r"^\s*(\d{2})/(\d{2})/(\d{4})\s*$")
+# The vendor portal does not zero-pad date labels (observed 11/1/2026, 2026-11-03).
+_DATE_ONLY_LABEL_RE = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
 
 
 def parse_date_only_label(label: Any) -> date | None:

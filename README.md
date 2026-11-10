@@ -16,8 +16,8 @@ Includes a built-in Lovelace card with 7-day and 14-day history views and kWh / 
 This project (`delacjus/ha-pseg`) is an independent fork of `sidprax/ha-pseg`. It hardens the integration for security, authentication reliability, and long-term statistics integrity:
 
 - **Direct local MyMeter sign-in**: Home Assistant signs into MyMeter directly. There is no companion add-on, and credentials are never sent over HTTP to a `localhost:8000` helper.
-- **Strict host allowlist**: Every HTTP request, redirect, and form submission is strictly restricted to `{mysmartenergy.nj.pseg.com, id.myaccount.pseg.com}`. When signing in with a MyMeter email and password, requests are narrowed to `mysmartenergy.nj.pseg.com` only, preventing any credentials or tokens from being sent to Okta.
-- **Bounded cookie-only keepalive**: The integration runs a credential-free `GET /Dashboard` check every 3 minutes. If the session has lapsed, this timer performs a bounded cookie renewal (at most 2 attempts per cookie generation, spaced at least 15 minutes apart) and verifies access with a read-only meter check before saving cookies. Regular data polling can fall back to submitting the saved MyMeter email and password when the renewal policy permits it; the keepalive timer never submits them.
+- **Strict host allowlist**: Every HTTP request, redirect, and form submission is strictly restricted to `{mysmartenergy.nj.pseg.com, id.myaccount.pseg.com}` for a New Jersey entry. When signing in with a MyMeter email and password, requests are narrowed to `mysmartenergy.nj.pseg.com` only, preventing any credentials or tokens from being sent to Okta. A Long Island entry is restricted to `mysmartenergy.psegliny.com` only.
+- **Bounded cookie-only keepalive**: The integration runs a credential-free `GET /Dashboard` check after a random 4 to 5 minutes, under the 6 to 8 minute idle timeout measured on the real portal. If the session has lapsed, this timer performs a bounded cookie renewal (at most 2 attempts per cookie generation, spaced at least 15 minutes apart) and verifies access with a read-only meter check before saving cookies. Regular data polling can fall back to submitting the saved MyMeter email and password when the renewal policy permits it; the keepalive timer never submits them.
 - **Diagnostics redaction**: Diagnostic downloads automatically redact email addresses, passwords, session cookies, and meter serial numbers.
 - **Stable statistics with correction guards**: Uses Home Assistant External Statistics (`pseg:<meter_id>_energy_consumption` and `pseg:<meter_id>_energy_cost`) with strict cumulative sum preservation across rolling windows and backfills. Gaps are preserved and existing data is never wiped out.
 - **Hourly statistics**: Live since release 1.6.0. Promotes complete recent days to hourly resolution while safely falling back to daily rows when data is incomplete.
@@ -89,8 +89,11 @@ After installing and restarting, click the button above to start setup directly,
 
 1. In Home Assistant, go to **Settings** > **Devices & Services** > **Add Integration**.
 2. Search for **PSE&G Energy (New Jersey)**.
-3. Enter your MyMeter **Email** and **Password** (the login credentials from `https://mysmartenergy.nj.pseg.com`).
-4. Click **Submit**.
+3. Select your portal: **PSE&G New Jersey** (default) or **PSEG Long Island (experimental)**.
+4. Enter your MyMeter **Email** and **Password** (the login credentials from your MyMeter portal: `https://mysmartenergy.nj.pseg.com`, or `https://mysmartenergy.psegliny.com` for Long Island).
+5. Click **Submit**.
+
+**PSEG Long Island is experimental.** It has not been tested against the real Long Island portal. A Long Island entry supports MyMeter email/password sign-in and pasted portal cookies. It does not support Okta sign-in, and the CAPTCHA helper extension only works on the New Jersey portal, so if Long Island asks for a CAPTCHA, use a browser cookie instead.
 
 ### Getting a MyMeter email login
 
@@ -158,11 +161,11 @@ You can download the helper extension ZIP in either of two ways:
 ### How Background Renewal Works
 
 Once signed in, Home Assistant maintains the session in the background:
-1. **Keepalive probe**: Every 3 minutes, Home Assistant sends a credential-free `GET /Dashboard` request to check if the session is alive.
+1. **Keepalive probe**: After a random 4 to 5 minutes, Home Assistant sends a credential-free `GET /Dashboard` request to check if the session is alive.
 2. **Cookie renewal**: If the portal prompts for a renewed session and a `MM_RememberMe` cookie is present, Home Assistant requests a refreshed session cookie without re-sending your password. Renewals are bounded to at most 2 attempts per cookie generation, spaced at least 15 minutes apart, and verified with a read-only meter reading before being saved.
 3. **Re-authentication prompt**: If a session expires completely, or if PSE&G demands a new CAPTCHA or security question, automatic attempts stop safely. Home Assistant alerts you to re-authenticate rather than risking account lockout.
 
-The regular data poll has a separate saved-password fallback when the renewal policy permits it. A poll that encounters an expired session may submit your saved MyMeter email and password over HTTPS. CAPTCHA/security-step latches and an exhausted renewal generation block that fallback; the three-minute keepalive always remains cookie-only.
+The regular data poll has a separate saved-password fallback when the renewal policy permits it. A poll that encounters an expired session may submit your saved MyMeter email and password over HTTPS. CAPTCHA/security-step latches and an exhausted renewal generation block that fallback; the 4 to 5 minute keepalive always remains cookie-only.
 
 ### Older Authentication Methods
 
@@ -230,8 +233,8 @@ entity: sensor.pseg_electricity_consumption
 | `toggle_entity` | string | `input_boolean.pseg_display_dollars` | Optional helper entity to switch between kWh and dollar view |
 | `range_toggle_entity` | string | `input_boolean.pseg_chart_14d` | Optional helper entity to switch between 7-day and 14-day chart view |
 | `cost_per_kwh` | number | `0.247` | Override effective rate in card calculations |
-| `next_update_entity` | string | `sensor.pseg_next_update` | Entity holding the next scheduled fetch timestamp |
-| `connection_status_entity` | string | `sensor.pseg_connection_status` | Connection status entity; shows re-authentication banner when `auth_required` |
+| `next_update_entity` | string | same account as `entity` | Entity holding the next scheduled fetch timestamp. Defaults to the one from the same account as `entity`. |
+| `connection_status_entity` | string | same account as `entity` | Connection status entity; shows re-authentication banner when `auth_required`. Defaults to the one from the same account as `entity`, so with two accounts each card shows its own status. |
 | `show_next_update` | boolean | `false` | Display next scheduled fetch timestamp beside the meter label |
 | `popup_hash` | string | `null` | URL hash to open a custom popup card on tap. When omitted, tapping opens standard entity dialog. |
 

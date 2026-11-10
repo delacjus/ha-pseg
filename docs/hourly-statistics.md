@@ -120,7 +120,7 @@ hour, double-counting or corrupting the day. Use the supported stop instead.
 3. The entry reloads. Confirm the Connection Status sensor still reads **Connected**
    and its `statistics_imports_enabled` attribute is `false`.
 4. Automatic, startup-deferred and manual statistics imports now stop. Sign-in, the
-   credential-free 3-minute (portal) or 10-minute (Okta) keepalive probe, bounded
+   credential-free 4-5 minute (portal) or 10-minute (Okta) keepalive probe, bounded
    cookie renewal and polling continue.
 5. Leave the existing statistics untouched. They remain readable in the Energy
    Dashboard; they are simply no longer updated by this integration.
@@ -161,6 +161,11 @@ reason to clear history.
 | `Recorder did not commit ...` | The commit barrier timed out | The journal stays pending. Check recorder health; the next poll retries. If it repeats, disable imports. |
 | `Conflicting daily readings from the portal ...` | The portal returned two different totals for one meter and day | Nothing was written. Wait for the portal to settle; see "Conflicting daily readings" below. |
 | `hourly` shows 23 or 25 rows | A DST day | Expected: 23 hours in spring, 25 in fall, always at New York midnights. |
+
+### Date labels and fall-back DST
+
+- Date-only labels (`MM/DD/YYYY`) from the vendor portal may be unpadded (for example `11/1/2026`). These are accepted when the parsed calendar date matches the expected interval.
+- On the fall-back DST day (such as Nov 1, 2026), the vendor portal sends 24 wall-clock points (not 25) with both 1 AM hours merged into a single 01:00 point, so that day stays daily (`dst_ambiguous`) by design rather than guessing how to split the hour.
 
 ## Conflicting daily readings
 

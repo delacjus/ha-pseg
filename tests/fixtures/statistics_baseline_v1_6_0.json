@@ -407,7 +407,7 @@
       "path": "custom_components/pseg/statistics_hourly.py",
       "name": "_DATE_ONLY_LABEL_RE",
       "mutant": "p02-broaden-date-only",
-      "reason": "Explicit dependency exclusion from the existing selected-function byte guard. The regex is byte-equal to v1.6.0, but tests/test_stats_baseline.py independently fixes the manifest at 20 surfaces and is outside Gate C edit scope. Expanding or replacing those pins would require changing that frozen contract; tools/stats_baseline.py semantics must stay intact. The full-day label table and exact p02 parser mutant test enforce strict date-only acceptance, including both meter orders. No claim that parse_date_only_label pin covers its regex dependency.",
+      "reason": "Explicit dependency exclusion from the existing selected-function byte guard. The regex was modified from v1.6.0 to allow unpadded month and day (\\d{1,2}) per live vendor evidence 2026-11-03, but tests/test_stats_baseline.py independently fixes the manifest at 20 surfaces and is outside Gate C edit scope. Expanding or replacing those pins would require changing that frozen contract; tools/stats_baseline.py semantics must stay intact. The full-day label table and exact p02 parser mutant test enforce strict date-only acceptance, including both meter orders. No claim that parse_date_only_label pin covers its regex dependency.",
       "behavioral_guard": "tests/stats_suite/test_interval_table.py; tests/mutations/statistics_parser.py p02",
       "reviewer": "Codex master-coder Gate C scope/source audit 2026-10-26; subject to parent review"
     },

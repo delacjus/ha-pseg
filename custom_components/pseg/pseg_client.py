@@ -31,14 +31,14 @@ from .const import (
     AUTH_REASON_REMEMBER_ME_REJECTED,
     AUTH_REASON_SECURITY_STEP,
     DEFAULT_METER_NAME,
+    DEFAULT_PORTAL_URL,
     DEFAULT_PRICE_PER_KWH,
     OKTA_HOST,
-    PORTAL_BASE_URL,
-    PORTAL_HOST,
     REMEMBER_ME_COOKIE,
     STATISTICS_PRECISION,
     USAGE_INTERVAL_DAILY,
     USAGE_INTERVAL_HOURLY,
+    resolve_portal_url,
 )
 from .renewal_admission import RenewalAdmission
 from .statistics_hourly import (
@@ -302,10 +302,25 @@ class PsegClient:
         price_per_kwh: float = DEFAULT_PRICE_PER_KWH,
         email: str = "",
         password: str = "",
+        portal_url: str = DEFAULT_PORTAL_URL,
     ) -> None:
         """Initialize the client with domain-scoped cookies."""
         self._lock = threading.RLock()
+        # The entry's MyMeter portal, validated against the known PORTALS so a stored
+        # or hand-edited value can never redirect requests to an arbitrary host.
+        self.portal_base_url = resolve_portal_url(portal_url)
+        self.portal_host = urllib.parse.urlparse(self.portal_base_url).hostname or ""
+        # Okta is PSE&G New Jersey's sign-in. Every other MyMeter portal is reached
+        # with its own browser session only, so the Okta host is never allowlisted
+        # and the SSO/Okta path is refused below.
+        self._okta_supported = self.portal_base_url == DEFAULT_PORTAL_URL
+        self.allowed_hosts = (
+            frozenset({self.portal_host, OKTA_HOST})
+            if self._okta_supported
+            else frozenset({self.portal_host})
+        )
         self.session = AllowlistedSession(owner_check=self._check_active_owner)
+        self.session.allowed_hosts = self.allowed_hosts
         self.session.headers.update(
             {
                 "User-Agent": (
@@ -313,11 +328,11 @@ class PsegClient:
                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
                 ),
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Referer": f"{PORTAL_BASE_URL}/Dashboard",
+                "Referer": f"{self.portal_base_url}/Dashboard",
             }
         )
         self.price_per_kwh = price_per_kwh
-        # MyMeter local login. Never logged; only sent to PORTAL_HOST/Home/Login.
+        # MyMeter local login. Never logged; only sent to the portal host /Home/Login.
         self._email = email.strip()
         self._password = password
         # Local sign-in mode stays on the portal: a saved MyMeter email/password is
@@ -325,7 +340,7 @@ class PsegClient:
         # there (no silent SSO fallback, no Okta 2FA). Legacy cookie/SAML clients
         # keep both hosts for the explicit Okta path.
         if self.has_login:
-            self.session.allowed_hosts = frozenset({PORTAL_HOST})
+            self.session.allowed_hosts = frozenset({self.portal_host})
         # Antiforgery token for a human CAPTCHA proof, held in memory only.
         self._pending_login_token = ""
         # Set when MyMeter demands a CAPTCHA. No automatic /Home/Login POST may run
@@ -400,9 +415,12 @@ class PsegClient:
             self.import_cookies(cookie_list)
         else:
             if okta_cookies:
-                self.set_cookies_from_header(okta_cookies, OKTA_HOST)
+                if self._okta_supported:
+                    self.set_cookies_from_header(okta_cookies, OKTA_HOST)
+                else:
+                    _LOGGER.debug("Ignoring Okta cookies: this portal has no Okta sign-in")
             if portal_cookies:
-                self.set_cookies_from_header(portal_cookies, PORTAL_HOST)
+                self.set_cookies_from_header(portal_cookies, self.portal_host)
         # Values present at construction (pasted or restored). Only a host-only
         # copy still holding its seeded value can be stale; see _dedupe_domain_variants.
         self._seeded = {(c.name, c.domain, c.path): c.value for c in self.session.cookies}
@@ -538,7 +556,7 @@ class PsegClient:
         for c in cookie_list:
             name = c.get("name")
             val = c.get("value")
-            domain = c.get("domain", PORTAL_HOST)
+            domain = c.get("domain", self.portal_host)
             path = c.get("path", "/")
             if name and val:
                 self.session.cookies.set(
@@ -718,7 +736,7 @@ class PsegClient:
         malformed_redirect = False
         try:
             resp = self.session.get(
-                f"{PORTAL_BASE_URL}/Dashboard", allow_redirects=True, timeout=timeout
+                f"{self.portal_base_url}/Dashboard", allow_redirects=True, timeout=timeout
             )
         except PsegSecurityError:
             if self.has_login:
@@ -772,17 +790,20 @@ class PsegClient:
         """
         if self._lock.acquire(blocking=False):
             try:
-                return self._has_cookie(REMEMBER_ME_COOKIE, PORTAL_HOST)
+                return self._has_cookie(REMEMBER_ME_COOKIE, self.portal_host)
             finally:
                 self._lock.release()
         try:
-            return self._has_cookie(REMEMBER_ME_COOKIE, PORTAL_HOST)
+            return self._has_cookie(REMEMBER_ME_COOKIE, self.portal_host)
         except RuntimeError:
             return False
 
     @property
     def has_okta_session(self) -> bool:
         """An Okta session cookie is present (SAML SSO renewal is possible)."""
+        if not self._okta_supported:
+            # Okta is New Jersey only; another portal has no SSO session to renew.
+            return False
         return any(self._has_cookie(name, OKTA_HOST) for name in ("idx", "sid"))
 
     @property
@@ -808,7 +829,7 @@ class PsegClient:
             c.value
             for c in self.session.cookies
             if c.name == REMEMBER_ME_COOKIE
-            and (c.domain or "").lstrip(".") == PORTAL_HOST
+            and (c.domain or "").lstrip(".") == self.portal_host
             and c.value
         )
 
@@ -1058,7 +1079,7 @@ class PsegClient:
         authority, and such a client is narrowed to the portal host, so only a
         credential-free portal GET can keep it alive. A jar holding both an Okta
         session cookie and a saved local login (or MM_RememberMe) is therefore
-        local: it needs the 3-minute GET, not a 10-minute SSO round trip it cannot
+        local: it needs the 4-5 minute GET, not a 10-minute SSO round trip it cannot
         perform. Okta mode is only for a jar with no local renewal credential,
         including a pasted portal-only jar (no Okta session at all).
         """
@@ -1098,7 +1119,7 @@ class PsegClient:
         """GET the login page and return its antiforgery token ('' if absent)."""
         self._check_active_owner()
         try:
-            home = self.session.get(f"{PORTAL_BASE_URL}/", allow_redirects=True, timeout=20)
+            home = self.session.get(f"{self.portal_base_url}/", allow_redirects=True, timeout=20)
         except requests.RequestException as err:
             raise PsegTransientError(f"Network error loading MyMeter login page: {err}") from err
         if home.status_code >= 500:
@@ -1111,8 +1132,8 @@ class PsegClient:
     def _login_headers(self, token: str) -> dict[str, str]:
         headers = {
             "X-Requested-With": "XMLHttpRequest",
-            "Referer": f"{PORTAL_BASE_URL}/",
-            "Origin": PORTAL_BASE_URL,
+            "Referer": f"{self.portal_base_url}/",
+            "Origin": self.portal_base_url,
         }
         if token:
             headers["RequestVerificationToken"] = token
@@ -1258,7 +1279,11 @@ class PsegClient:
             port = None
         if parsed is None:
             raise PsegLoginRedirected("MyMeter login redirect target is invalid")
-        if parsed.scheme != "https" or parsed.hostname != PORTAL_HOST or port not in (None, 443):
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != self.portal_host
+            or port not in (None, 443)
+        ):
             raise PsegLoginRedirected(
                 "MyMeter redirected the email/password sign-in away from the portal"
             )
@@ -1270,7 +1295,7 @@ class PsegClient:
         malformed_redirect = False
         try:
             resp = self.session.post(
-                f"{PORTAL_BASE_URL}/Home/Login",
+                f"{self.portal_base_url}/Home/Login",
                 data=self._login_payload(token, captcha_response),
                 headers=self._login_headers(token),
                 timeout=25,
@@ -1492,7 +1517,7 @@ class PsegClient:
         if self._is_login_page(resp):
             # Some sites only honour the remember cookie on the landing page.
             try:
-                self.session.get(f"{PORTAL_BASE_URL}/", allow_redirects=True, timeout=20)
+                self.session.get(f"{self.portal_base_url}/", allow_redirects=True, timeout=20)
             except requests.RequestException as err:
                 raise PsegTransientError(
                     f"Network error during Remember Me sign-in: {err}"
@@ -1578,7 +1603,14 @@ class PsegClient:
         Only the Okta sign-in widget (or landing on an Okta sign-in path) means the Okta
         session is gone. Server errors, timeouts and unexpected pages are transient so a
         PSE&G outage never forces the user to re-paste cookies.
+
+        Okta is PSE&G New Jersey only, so a Long Island client refuses this path with
+        the typed auth error the coordinator already handles for a lapsed session.
         """
+        if not self._okta_supported:
+            raise PsegOktaSessionExpired(
+                "Okta SSO is available only on the PSE&G New Jersey portal"
+            )
         self._check_active_owner()
         baseline = self._snapshot_session_state()
         try:
@@ -1595,7 +1627,7 @@ class PsegClient:
         _LOGGER.debug("Attempting SSO renewal via Okta...")
         try:
             resp = self.session.get(
-                f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn",
+                f"{self.portal_base_url}/Saml/okta-prod/SignIn",
                 allow_redirects=True,
                 timeout=25,
             )
@@ -1633,7 +1665,7 @@ class PsegClient:
         parsed_action = urllib.parse.urlparse(action_url)
         # The assertion is for the portal's ACS endpoint; posting it anywhere else
         # (even the allowlisted Okta host) would hand the SAML assertion to the wrong party.
-        if parsed_action.hostname != PORTAL_HOST:
+        if parsed_action.hostname != self.portal_host:
             raise PsegSecurityError(
                 f"SAML form action points to untrusted host: {parsed_action.hostname}"
             )
@@ -1678,7 +1710,7 @@ class PsegClient:
         minutes, which resets Okta's idle timer and leaves a fresh portal session
         for the poll.
 
-        Local (portal-only) mode gets one GET /Dashboard every 3 minutes instead.
+        Local (portal-only) mode gets one GET /Dashboard after a random 4 to 5 minutes instead.
         That includes a mixed jar (Okta cookie plus a saved login or MM_RememberMe):
         its usable renewal path is the portal, and it is host-restricted to it, so
         an SSO keepalive could only fail.
@@ -1891,7 +1923,7 @@ class PsegClient:
         headers2 = {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-Requested-With": "XMLHttpRequest",
-            "Origin": PORTAL_BASE_URL,
+            "Origin": self.portal_base_url,
         }
 
         records_map: dict[str, dict[str, Any]] = {}
@@ -1929,7 +1961,7 @@ class PsegClient:
             try:
                 self._check_active_owner()
                 resp2 = self.session.post(
-                    f"{PORTAL_BASE_URL}/Dashboard/Chart",
+                    f"{self.portal_base_url}/Dashboard/Chart",
                     data=chart_setup_data,
                     headers=headers2,
                     timeout=25,
@@ -1944,7 +1976,7 @@ class PsegClient:
                 self._check_active_owner()
                 ts = int(time.time() * 1000)
                 resp3 = self.session.get(
-                    f"{PORTAL_BASE_URL}/Dashboard/ChartData",
+                    f"{self.portal_base_url}/Dashboard/ChartData",
                     params={"_": ts},
                     headers=headers2,
                     timeout=25,
@@ -2293,6 +2325,8 @@ class PsegClient:
                         authoritative_meters=auth_meters,
                         meter_placeholders=self._meter_placeholders,
                         paired_kwh_anchors=paired_anchors,
+                        portal_base_url=self.portal_base_url,
+                        portal_host=self.portal_host,
                     )
                     slot_key = (
                         "hourly"
@@ -2359,13 +2393,13 @@ class PsegClient:
         headers2 = {
             "Content-Type": "application/x-www-form-urlencoded",
             "X-Requested-With": "XMLHttpRequest",
-            "Origin": PORTAL_BASE_URL,
+            "Origin": self.portal_base_url,
         }
 
         leg_snapshot = self._snapshot_cookie_leg()
         try:
             resp2 = self.session.post(
-                f"{PORTAL_BASE_URL}/Dashboard/Chart",
+                f"{self.portal_base_url}/Dashboard/Chart",
                 data=chart_setup_data,
                 headers=headers2,
                 timeout=25,
@@ -2377,7 +2411,7 @@ class PsegClient:
 
             ts = int(time.time() * 1000)
             resp3 = self.session.get(
-                f"{PORTAL_BASE_URL}/Dashboard/ChartData",
+                f"{self.portal_base_url}/Dashboard/ChartData",
                 params={"_": ts},
                 headers=headers2,
                 timeout=25,

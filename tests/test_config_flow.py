@@ -25,6 +25,7 @@ from custom_components.pseg.const import (
     CONF_PORTAL_COOKIES,
     CONF_PRICE_PER_KWH,
     DEFAULT_METER_NAME,
+    DEFAULT_PORTAL_URL,
     DOMAIN,
 )
 from custom_components.pseg.pseg_client import (
@@ -213,8 +214,14 @@ async def test_user_flow_proves_okta_only_renewal(hass: HomeAssistant) -> None:
 
     assert result["type"] == FlowResultType.CREATE_ENTRY
     assert clients.call_args_list == [
-        call(okta_cookies="idx=example", portal_cookies="MM_SID=example", email="", password=""),
-        call(okta_cookies="idx=example"),
+        call(
+            okta_cookies="idx=example",
+            portal_cookies="MM_SID=example",
+            email="",
+            password="",
+            portal_url=DEFAULT_PORTAL_URL,
+        ),
+        call(okta_cookies="idx=example", portal_url=DEFAULT_PORTAL_URL),
     ]
     assert len(sessions) == 2
     assert sessions[0] is not sessions[1]

@@ -20,10 +20,20 @@ MUTATIONS = [
     (
         "p02-broaden-date-only",
         "statistics_hourly.py",
-        '_DATE_ONLY_LABEL_RE = re.compile(r"^\\s*(\\d{2})/(\\d{2})/(\\d{4})\\s*$")',
         '_DATE_ONLY_LABEL_RE = re.compile(r"^\\s*(\\d{1,2})/(\\d{1,2})/(\\d{4})\\s*$")',
+        '_DATE_ONLY_LABEL_RE = re.compile(r"^\\s*(\\d{1,2})/(\\d{1,2})/(\\d{2,4})\\s*$")',
         [
-            C + f"test_parser_label_proof_with_conserved_coverage[missing_zero_padding-{order}]"
+            C + f"test_parser_label_proof_with_conserved_coverage[two_digit_year-{order}]"
+            for order in ("forward", "reverse")
+        ],
+    ),
+    (
+        "p02b-require-zero-padding",
+        "statistics_hourly.py",
+        '_DATE_ONLY_LABEL_RE = re.compile(r"^\\s*(\\d{1,2})/(\\d{1,2})/(\\d{4})\\s*$")',
+        '_DATE_ONLY_LABEL_RE = re.compile(r"^\\s*(\\d{2})/(\\d{2})/(\\d{4})\\s*$")',
+        [
+            C + f"test_parser_positive_label_proof_with_conserved_coverage[unpadded_same_date-{order}]"
             for order in ("forward", "reverse")
         ],
     ),
@@ -93,10 +103,17 @@ COVERAGE = {
     ),
     "p02-broaden-date-only": (
         "parse_date_only_label",
-        "Both date-only endpoints require strict zero padding",
+        "Date-only endpoints require a four-digit year",
         "parser",
         "Parser interval reason is timestamp_semantics_unverified, not None",
-        T + "test_interval_table_single_meter_layer_assertions[missing_zero_padding]",
+        T + "test_interval_table_single_meter_layer_assertions[two_digit_year]",
+    ),
+    "p02b-require-zero-padding": (
+        "parse_date_only_label",
+        "Date-only endpoints accept unpadded month and day",
+        "parser",
+        "Parser interval reason is None and interval_ok is True for unpadded labels",
+        T + "test_interval_table_single_meter_layer_assertions[unpadded_same_date]",
     ),
     "p03-ignore-contradictory-end": (
         "PsegClient._parse_hourly_chart",

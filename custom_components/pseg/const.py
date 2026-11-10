@@ -52,10 +52,14 @@ DEFAULT_SCAN_INTERVAL_HOURS = 4
 # Okta mode: must stay below the observed Okta idle interval (~30 min, 2026-10-21).
 # The vendor's actual timeout is not documented.
 KEEPALIVE_INTERVAL_MINUTES = 10
-# Local (portal-only) mode: one observed session lapse happened after ~9 minutes
-# without an accepted request (2026-10-23), but the server's real rule is unknown.
-# A credential-free GET every 3 minutes is a probe, not a vendor TTL contract.
-LOCAL_KEEPALIVE_INTERVAL_MINUTES = 3
+# Local (portal-only) mode: a stepped idle test (2026-10-31) kept a session alive
+# after 5.7 minutes without a request and lost it after 7.7, so the portal's idle
+# timeout is about 6 to 8 minutes; the vendor documents no rule. The credential-free
+# GET runs after a random 4 to 5 minutes (as upstream sidprax/ha-pseg does since
+# v1.1.2): under that timeout, with fewer and less regular requests than a fixed
+# 3-minute timer.
+LOCAL_KEEPALIVE_MIN_SECONDS = 4 * 60
+LOCAL_KEEPALIVE_MAX_SECONDS = 5 * 60
 
 # Non-secret bookkeeping for bounded Remember Me renewals, stored in entry.data next
 # to the cookie jar so an options reload cannot reset the vendor-load budget. Never
@@ -87,11 +91,32 @@ AUTH_REASONS = frozenset(
     }
 )
 
+CONF_PORTAL_URL = "portal_url"
+# Every MyMeter portal the integration can sign in to. Entries created before
+# portal selection have no portal stored and stay on the New Jersey default.
+PORTAL_URL_NJ = "https://mysmartenergy.nj.pseg.com"
+PORTAL_URL_LI = "https://mysmartenergy.psegliny.com"
+DEFAULT_PORTAL_URL = PORTAL_URL_NJ
+PORTALS = {
+    PORTAL_URL_NJ: "PSE&G New Jersey",
+    PORTAL_URL_LI: "PSEG Long Island (experimental)",
+}
+
 PORTAL_HOST = "mysmartenergy.nj.pseg.com"
 OKTA_HOST = "id.myaccount.pseg.com"
 ALLOWED_HOSTS = {PORTAL_HOST, OKTA_HOST}
 
-PORTAL_BASE_URL = f"https://{PORTAL_HOST}"
+PORTAL_BASE_URL = PORTAL_URL_NJ
+
+
+def resolve_portal_url(value: object) -> str:
+    """Return a known portal base URL; unknown, empty or missing means New Jersey.
+
+    A stored value only ever names a key of PORTALS, so a hand-edited entry or a
+    malformed form submission can never point the client at an arbitrary URL.
+    """
+    return value if isinstance(value, str) and value in PORTALS else DEFAULT_PORTAL_URL
+
 
 ATTR_METER = "meter"
 ATTR_LATEST_DATE = "latest_date"

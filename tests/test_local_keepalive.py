@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import logging
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from freezegun import freeze_time
 from homeassistant.core import HomeAssistant
@@ -22,7 +22,8 @@ from custom_components.pseg.const import (
     CONF_MYMETER_PASSWORD,
     CONF_RENEWAL_ADMISSION,
     DOMAIN,
-    LOCAL_KEEPALIVE_INTERVAL_MINUTES,
+    LOCAL_KEEPALIVE_MAX_SECONDS,
+    LOCAL_KEEPALIVE_MIN_SECONDS,
     PORTAL_BASE_URL,
     PORTAL_HOST,
 )
@@ -112,9 +113,9 @@ def test_three_minute_get_keepalive_keeps_local_session_alive() -> None:
         login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)
         sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAML_AUTOPOST)
 
-        for _ in range(20):  # one hour at the coordinator's 3-minute cadence
-            frozen.tick(timedelta(minutes=3))
-            portal["now"] += 180
+        for _ in range(12):  # one hour at the slowest 5-minute keepalive gap
+            frozen.tick(timedelta(minutes=5))
+            portal["now"] += 300
             assert client.keepalive() is True
 
         # Stop touching the portal: the idle expiry the old 10-min timer hit.
@@ -129,8 +130,8 @@ def test_three_minute_get_keepalive_keeps_local_session_alive() -> None:
     assert client.idle_gap_seconds == 601.0
 
 
-def test_mixed_jar_uses_the_three_minute_get_keepalive() -> None:
-    """Okta cookie + saved MyMeter login is portal-only: 3-min GET, never SSO.
+def test_mixed_jar_uses_the_portal_get_keepalive() -> None:
+    """Okta cookie + saved MyMeter login is portal-only: 4-5 min GET, never SSO.
 
     The client is host-restricted to the portal, so the old 10-minute SSO cadence
     let MM_SID lapse and then reauthed instead of warming the portal session.
@@ -163,9 +164,9 @@ def test_mixed_jar_uses_the_three_minute_get_keepalive() -> None:
         login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)
         sso = m.get(f"{PORTAL_BASE_URL}/Saml/okta-prod/SignIn", text=SAML_AUTOPOST)
 
-        for _ in range(20):  # one hour at the coordinator's 3-minute cadence
-            frozen.tick(timedelta(minutes=3))
-            portal["now"] += 180
+        for _ in range(12):  # one hour at the slowest 5-minute keepalive gap
+            frozen.tick(timedelta(minutes=5))
+            portal["now"] += 300
             assert client.keepalive() is True
 
         # Stop touching the portal: the observed ~9-10 minute lapse the old timer hit.
@@ -181,13 +182,13 @@ def test_mixed_jar_uses_the_three_minute_get_keepalive() -> None:
 
 
 def test_keepalive_cadence_is_local_for_a_mixed_jar(hass: HomeAssistant) -> None:
-    """A mixed Okta+local jar is scheduled on the 3-minute local interval."""
+    """A mixed Okta+local jar is scheduled on the 4-5 minute local cadence."""
     mixed = PsegClient(okta_cookies="idx=x", email=EMAIL, password=PASSWORD)
     coord = PsegDataUpdateCoordinator(hass, mixed, {}, config_entry=None)
 
-    assert coord.keepalive_interval() == timedelta(
-        minutes=LOCAL_KEEPALIVE_INTERVAL_MINUTES
-    )
+    delay = coord.keepalive_interval()
+    assert timedelta(seconds=LOCAL_KEEPALIVE_MIN_SECONDS) <= delay
+    assert delay <= timedelta(seconds=LOCAL_KEEPALIVE_MAX_SECONDS)
 
 
 def test_local_keepalive_is_get_only() -> None:
@@ -848,3 +849,59 @@ async def test_retired_coordinator_does_not_write_stale_renewal_metadata(
     # The retired coordinator did not add its stale budget to the fresh entry.
     assert CONF_RENEWAL_ADMISSION not in entry.data
     assert entry.data["cookies"][0]["value"] == "NEW"
+
+
+def _scheduled_keepalive(hass: HomeAssistant):
+    """Start a local keepalive with async_call_later captured instead of run."""
+    coord = PsegDataUpdateCoordinator(
+        hass, PsegClient(portal_cookies="MM_SID=x"), {}, config_entry=None
+    )
+    scheduled: list = []
+    cancelled: list = []
+
+    def fake_later(_hass, delay, action):
+        scheduled.append((delay, action))
+        return lambda: cancelled.append(action)
+
+    return coord, scheduled, cancelled, fake_later
+
+
+async def test_each_keepalive_schedules_the_next_with_a_new_delay(
+    hass: HomeAssistant,
+) -> None:
+    """The local cadence is a chain of fresh 4-5 minute delays, even after an error."""
+    coord, scheduled, _cancelled, fake_later = _scheduled_keepalive(hass)
+    with patch("custom_components.pseg.coordinator.async_call_later", fake_later):
+        coord.start_keepalive()
+        coord.start_keepalive()  # a second start must not add a second chain
+        assert len(scheduled) == 1
+
+        coord._async_keepalive = AsyncMock(side_effect=RuntimeError("boom"))
+        with pytest.raises(RuntimeError):
+            await scheduled[0][1](datetime.now(UTC))
+        assert len(scheduled) == 2, "an error in one run must not end the keepalive"
+        for delay, _action in scheduled:
+            assert timedelta(seconds=LOCAL_KEEPALIVE_MIN_SECONDS) <= delay
+            assert delay <= timedelta(seconds=LOCAL_KEEPALIVE_MAX_SECONDS)
+
+
+async def test_stopping_the_keepalive_ends_the_chain(hass: HomeAssistant) -> None:
+    """Stop cancels the pending timer, and a run that stops it does not reschedule."""
+    coord, scheduled, cancelled, fake_later = _scheduled_keepalive(hass)
+    with patch("custom_components.pseg.coordinator.async_call_later", fake_later):
+        coord.start_keepalive()
+        coord._async_keepalive = AsyncMock(
+            side_effect=lambda _now: coord.stop_keepalive()
+        )
+        await scheduled[0][1](datetime.now(UTC))
+        assert len(scheduled) == 1
+        assert coord._unsub_keepalive is None
+    assert cancelled == []
+
+    coord2, scheduled2, cancelled2, fake_later2 = _scheduled_keepalive(hass)
+    with patch("custom_components.pseg.coordinator.async_call_later", fake_later2):
+        coord2.start_keepalive()
+        coord2.stop_keepalive()
+        assert cancelled2 == [scheduled2[0][1]]
+        coord2.start_keepalive()
+        assert len(scheduled2) == 1, "a stopped coordinator must not restart its keepalive"

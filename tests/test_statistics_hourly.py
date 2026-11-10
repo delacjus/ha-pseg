@@ -306,11 +306,140 @@ def test_parse_date_only_label() -> None:
     """parse_date_only_label strictly parses MM/DD/YYYY and rejects all other formats."""
     assert parse_date_only_label("10/15/2026") == date(2026, 10, 15)
     assert parse_date_only_label(" 10/15/2026 ") == date(2026, 10, 15)
+    assert parse_date_only_label("11/1/2026") == date(2026, 11, 1)
+    assert parse_date_only_label("1/5/2026") == date(2026, 1, 5)
+    assert parse_date_only_label("1/05/2026") == date(2026, 1, 5)
+    assert parse_date_only_label("11/01/2026") == date(2026, 11, 1)
     assert parse_date_only_label("2026-10-15") is None
     assert parse_date_only_label("10/15/2026 01:00") is None
     assert parse_date_only_label("20261015") is None
     assert parse_date_only_label("10/15/2026 12:00 AM") is None
     assert parse_date_only_label("10/15/26") is None
+    assert parse_date_only_label("11/1/26") is None
+    assert parse_date_only_label("0/1/2026") is None
+    assert parse_date_only_label("13/1/2026") is None
     assert parse_date_only_label("13/40/2026") is None
+    assert parse_date_only_label("2/30/2026") is None
+    assert parse_date_only_label("111/1/2026") is None
     assert parse_date_only_label("") is None
     assert parse_date_only_label(None) is None
+
+
+def test_hourly_unpadded_labels_month_edge_complete() -> None:
+    """Month-edge day (Oct 31 2026) with last hour end 11/1/2026 validates complete."""
+    from custom_components.pseg.pseg_client import PsegClient
+    from tests.support.stats_model import ny_wall_hour_to_x_ms
+
+    client = object.__new__(PsegClient)
+    day = date(2026, 10, 31)
+    points = []
+    for h in range(24):
+        start_lbl = "10/31/2026"
+        end_lbl = "11/1/2026" if h == 23 else "10/31/2026"
+        points.append({
+            "x": ny_wall_hour_to_x_ms(day, h),
+            "y": 1.0,
+            "hs": {"start": start_lbl, "end": end_lbl},
+        })
+    payload = {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    parsed = client._parse_hourly_chart(payload)
+    checks = validate_hourly_days(
+        parsed["hourly_records"],
+        {day: 24.0},
+        datetime(2028, 1, 1, tzinfo=UTC),
+        granularity=parsed["hourly_granularity"],
+        days={day: 24.0},
+    )
+    assert checks[day].complete is True
+    assert checks[day].reason is None
+
+
+def test_hourly_unpadded_labels_single_digit_day_complete() -> None:
+    """Single-digit day (Nov 2 2026) with 11/2/2026 labels validates complete (EST midnight 05:00Z)."""
+    from custom_components.pseg.pseg_client import PsegClient
+    from tests.support.stats_model import ny_wall_hour_to_x_ms
+
+    client = object.__new__(PsegClient)
+    day = date(2026, 11, 2)
+    points = []
+    for h in range(24):
+        start_lbl = "11/2/2026"
+        end_lbl = "11/3/2026" if h == 23 else "11/2/2026"
+        points.append({
+            "x": ny_wall_hour_to_x_ms(day, h),
+            "y": 1.0,
+            "hs": {"start": start_lbl, "end": end_lbl},
+        })
+    payload = {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    parsed = client._parse_hourly_chart(payload)
+    records = parsed["hourly_records"]
+    assert records[0]["start"] == datetime(2026, 11, 2, 5, 0, tzinfo=UTC)
+    checks = validate_hourly_days(
+        records,
+        {day: 24.0},
+        datetime(2028, 1, 1, tzinfo=UTC),
+        granularity=parsed["hourly_granularity"],
+        days={day: 24.0},
+    )
+    assert checks[day].complete is True
+    assert checks[day].reason is None
+
+
+def test_hourly_unpadded_labels_year_edge_complete() -> None:
+    """Year-edge day (Dec 31 2026) with last hour end 1/1/2027 validates complete."""
+    from custom_components.pseg.pseg_client import PsegClient
+    from tests.support.stats_model import ny_wall_hour_to_x_ms
+
+    client = object.__new__(PsegClient)
+    day = date(2026, 12, 31)
+    points = []
+    for h in range(24):
+        start_lbl = "12/31/2026"
+        end_lbl = "1/1/2027" if h == 23 else "12/31/2026"
+        points.append({
+            "x": ny_wall_hour_to_x_ms(day, h),
+            "y": 1.0,
+            "hs": {"start": start_lbl, "end": end_lbl},
+        })
+    payload = {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    parsed = client._parse_hourly_chart(payload)
+    checks = validate_hourly_days(
+        parsed["hourly_records"],
+        {day: 24.0},
+        datetime(2028, 1, 1, tzinfo=UTC),
+        granularity=parsed["hourly_granularity"],
+        days={day: 24.0},
+    )
+    assert checks[day].complete is True
+    assert checks[day].reason is None
+
+
+def test_hourly_unpadded_labels_fall_back_merged_hours_dst_ambiguous() -> None:
+    """Fall-back day (Nov 1 2026) with 24 wall-clock points merged at 01:00 remains dst_ambiguous."""
+    from custom_components.pseg.pseg_client import PsegClient
+    from tests.support.stats_model import ny_wall_hour_to_x_ms
+
+    client = object.__new__(PsegClient)
+    day = date(2026, 11, 1)
+    points = []
+    for h in range(24):
+        kwh = 2.0 if h == 1 else 1.0
+        start_lbl = "11/1/2026"
+        end_lbl = "11/2/2026" if h == 23 else "11/1/2026"
+        points.append({
+            "x": ny_wall_hour_to_x_ms(day, h),
+            "y": kwh,
+            "hs": {"start": start_lbl, "end": end_lbl},
+        })
+    payload = {"Data": {"series": [{"name": "Meter #1", "data": points}]}}
+    parsed = client._parse_hourly_chart(payload)
+    checks = validate_hourly_days(
+        parsed["hourly_records"],
+        {day: 25.0},
+        datetime(2028, 1, 1, tzinfo=UTC),
+        granularity=parsed["hourly_granularity"],
+        days={day: 25.0},
+    )
+    assert checks[day].complete is False
+    assert checks[day].reason == "dst_ambiguous"
+

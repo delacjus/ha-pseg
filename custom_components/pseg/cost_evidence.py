@@ -1631,16 +1631,19 @@ def execute_cost_sampler(
     authoritative_meters: set[str] | list[str],
     meter_placeholders: dict[str, str],
     paired_kwh_anchors: dict[str, Any] | None = None,
+    portal_base_url: str = PORTAL_BASE_URL,
+    portal_host: str = PORTAL_HOST,
 ) -> tuple[CostEvidenceStatus, dict[str, Any], bool]:
     """Execute bounded, isolated cost sampling inside caller thread with watchdog deadline.
 
     Zero detached workers. Two-dispatch sequence: POST /Dashboard/Chart then
-    GET /Dashboard/ChartData. Rejects response cookies and redirects.
+    GET /Dashboard/ChartData. Rejects response cookies and redirects. The portal
+    comes from the caller's client, so a Long Island entry samples its own host.
     """
     deadline = time.monotonic() + COST_PAIR_DEADLINE_SECONDS
 
     cost_session = AllowlistedSession(owner_check=owner_check)
-    cost_session.allowed_hosts = frozenset({PORTAL_HOST})
+    cost_session.allowed_hosts = frozenset({portal_host})
     # The cost sampler must never traverse a proxy: environment proxies are
     # ignored and every request also passes proxies={} explicitly, so no
     # ProxyManager path can exist for this temporary session.
@@ -1662,8 +1665,8 @@ def execute_cost_sampler(
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "X-Requested-With": "XMLHttpRequest",
-        "Origin": PORTAL_BASE_URL,
-        "Referer": f"{PORTAL_BASE_URL}/Dashboard",
+        "Origin": portal_base_url,
+        "Referer": f"{portal_base_url}/Dashboard",
         "Accept-Encoding": "identity",
     }
 
@@ -1751,7 +1754,7 @@ def execute_cost_sampler(
         # 1. POST /Dashboard/Chart
         req_timeout = (max(0.001, remaining), min(max(0.001, remaining), 1.0))
         resp_post = cost_session.post(
-            f"{PORTAL_BASE_URL}/Dashboard/Chart",
+            f"{portal_base_url}/Dashboard/Chart",
             data=post_data,
             headers=headers,
             allow_redirects=False,
@@ -1839,7 +1842,7 @@ def execute_cost_sampler(
         ts = int(time.time() * 1000)
         req_timeout_get = (max(0.001, remaining), min(max(0.001, remaining), 1.0))
         resp_get = cost_session.get(
-            f"{PORTAL_BASE_URL}/Dashboard/ChartData",
+            f"{portal_base_url}/Dashboard/ChartData",
             params={"_": ts},
             headers=headers,
             allow_redirects=False,

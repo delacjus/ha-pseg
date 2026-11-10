@@ -178,9 +178,9 @@ async def test_clock_advance_causes_scheduled_dashboard_dispatch(
         assert await driver.setup() is True
         dispatches_before = len([d for d in portal.dispatches if "/Dashboard" in d.url])
 
-        # Advance by 3 minutes (local mode keepalive period)
+        # Advance by 5 minutes (the longest local keepalive delay)
         # This spikes the clock and fires EVENT_TIME_CHANGED, triggering scheduled keepalive
-        await driver.advance(timedelta(minutes=3))
+        await driver.advance(timedelta(minutes=5))
 
         dispatches_after = len([d for d in portal.dispatches if "/Dashboard" in d.url])
         assert dispatches_after > dispatches_before
@@ -192,7 +192,7 @@ async def test_clock_advance_keepalive_boundary_and_consistency(
     hass: HomeAssistant,
     freezer: Any,
 ) -> None:
-    """Prove 2-minute advance does NOT fire keepalive, but 3-minute DOES; clock stays consistent."""
+    """Prove the local keepalive waits at least 4 min, fires by 5, and reschedules itself."""
     portal = ScriptedPortal()
     script_healthy_portal(portal)
     factory = ClientFactory(portal, registry=ClientRegistry())
@@ -204,11 +204,11 @@ async def test_clock_advance_keepalive_boundary_and_consistency(
         assert await driver.setup() is True
         dispatches_before = len([d for d in portal.dispatches if "/Dashboard" in d.url])
 
-        # 1. Advance by 2 minutes: local keepalive is 3 minutes, so 2 min must NOT fire
-        await driver.advance(timedelta(minutes=2))
+        # 1. Advance by 3 minutes: the local keepalive waits 4 to 5 minutes, so no fire
+        await driver.advance(timedelta(minutes=3))
         dispatches_mid = len([d for d in portal.dispatches if "/Dashboard" in d.url])
         assert dispatches_mid == dispatches_before, (
-            "2-minute advance unexpectedly fired 3-minute keepalive"
+            "3-minute advance unexpectedly fired the 4-5 minute keepalive"
         )
 
         # Check clock consistency: clock.now(), dt_util.utcnow(), client time agree within 1s
@@ -216,12 +216,17 @@ async def test_clock_advance_keepalive_boundary_and_consistency(
         assert abs((clock.now() - dt_util.utcnow()).total_seconds()) < 1.0
         assert abs((clock.now() - client_time).total_seconds()) < 1.0
 
-        # 2. Advance 1 more minute (total 3 minutes): must fire keepalive
-        await driver.advance(timedelta(minutes=1))
+        # 2. Advance 2 more minutes (total 5 minutes): must fire keepalive
+        await driver.advance(timedelta(minutes=2))
         dispatches_after = len([d for d in portal.dispatches if "/Dashboard" in d.url])
         assert dispatches_after > dispatches_before, (
-            "3-minute advance failed to fire 3-minute keepalive"
+            "5-minute advance failed to fire the 4-5 minute keepalive"
         )
+
+        # 3. Each run schedules the next one: another 5 minutes fires again
+        await driver.advance(timedelta(minutes=5))
+        dispatches_again = len([d for d in portal.dispatches if "/Dashboard" in d.url])
+        assert dispatches_again > dispatches_after, "the keepalive did not reschedule itself"
 
 
 async def test_executor_gate_plus_clock_advance_completes_without_sleep(
@@ -683,7 +688,7 @@ async def test_negative_proof_keepalive_noop_mutant_fails(
     with factory:
         assert await driver.setup() is True
         dispatches_before = len([d for d in portal.dispatches if "/Dashboard" in d.url])
-        await driver.advance(timedelta(minutes=3))
+        await driver.advance(timedelta(minutes=5))
         dispatches_after = len([d for d in portal.dispatches if "/Dashboard" in d.url])
         with pytest.raises(AssertionError):
             assert dispatches_after > dispatches_before

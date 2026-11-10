@@ -221,8 +221,8 @@ def test_r1_unsafe_acceptance_rejected(
             {"end": "from 10/15/2026 through"},
             "timestamp_semantics_unverified",
         ),
-        ("end_missing_zero", {"end": "1/15/2026"}, "timestamp_semantics_unverified"),
-        ("start_missing_zero", {"start": "1/15/2026"}, "timestamp_semantics_unverified"),
+        ("end_missing_zero", {"end": "1/15/2026"}, "interval_end_mismatch"),
+        ("start_missing_zero", {"start": "1/15/2026"}, "label_mismatch"),
         ("previous_start_same_end", {"start": "10/14/2026", "end": "10/15/2026"}, "label_mismatch"),
         ("missing_both_labels", {"start": None, "end": None}, "timestamp_semantics_unverified"),
         ("end_basic_naive_datetime", {"end": "20261015T230000"}, "timestamp_semantics_unverified"),
@@ -270,12 +270,12 @@ def test_r2_adversarial_label(
 
 
 @pytest.mark.parametrize("field", ["start", "end"])
-def test_r2_single_digit_month(
+def test_r2_single_digit_month_accepted(
     uninitialized_client: PsegClient,
     point_factory: Callable[..., dict[str, Any]],
     field: str,
 ) -> None:
-    """Verify single-digit month (1/05/2026) in start or end is rejected."""
+    """Verify single-digit month (1/05/2026) in start or end is accepted."""
     short_day = date(2026, 1, 5)
     pts = [point_factory(short_day, h, 1.0) for h in range(24)]
     for p in pts:
@@ -293,8 +293,8 @@ def test_r2_single_digit_month(
     )
 
     check = checks[short_day]
-    assert check.complete is False
-    assert check.reason == "timestamp_semantics_unverified"
+    assert check.complete is True
+    assert check.reason is None
 
 
 @pytest.mark.parametrize(

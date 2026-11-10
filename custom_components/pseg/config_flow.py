@@ -23,6 +23,9 @@ from homeassistant.core import CALLBACK_TYPE, callback
 from homeassistant.data_entry_flow import UnknownFlow
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.selector import (
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -41,16 +44,20 @@ from .const import (
     CONF_MYMETER_PASSWORD,
     CONF_OKTA_COOKIES,
     CONF_PORTAL_COOKIES,
+    CONF_PORTAL_URL,
     CONF_PRICE_PER_KWH,
     CONF_RENEWAL_ADMISSION,
     CONF_STATISTICS_IMPORT_ENABLED,
     DEFAULT_METER_NAME,
+    DEFAULT_PORTAL_URL,
     DEFAULT_PRICE_PER_KWH,
     DEFAULT_STATISTICS_IMPORT_ENABLED,
     DOMAIN,
     PORTAL_BASE_URL,
+    PORTALS,
     REMEMBER_ME_COOKIE,
     parse_price_per_kwh,
+    resolve_portal_url,
     sanitized_price_per_kwh,
 )
 from .pseg_client import (
@@ -122,18 +129,38 @@ def _known_meter_ids(entry: ConfigEntry) -> set[str]:
     return known
 
 
-def _credentials_schema() -> vol.Schema:
-    """Credentials/cookies form shared by setup, reauth and reconfigure."""
-    return vol.Schema(
-        {
-            vol.Optional(CONF_MYMETER_EMAIL, default=""): str,
-            vol.Optional(CONF_MYMETER_PASSWORD, default=""): TextSelector(
-                TextSelectorConfig(type=TextSelectorType.PASSWORD)
-            ),
-            vol.Optional(CONF_OKTA_COOKIES, default=""): str,
-            vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
-        }
+def _portal_selector() -> SelectSelector:
+    """Portal choice for the first setup step; only known MyMeter portals."""
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[
+                {"value": portal_url, "label": label} for portal_url, label in PORTALS.items()
+            ],
+            mode=SelectSelectorMode.DROPDOWN,
+        )
     )
+
+
+def _credentials_schema(portal_url: str | None = None) -> vol.Schema:
+    """Credentials/cookies form shared by setup, reauth and reconfigure.
+
+    Only the first setup step offers the portal choice: reauth and reconfigure
+    keep the entry's stored portal.
+    """
+    fields: dict[Any, Any] = {
+        vol.Optional(CONF_MYMETER_EMAIL, default=""): str,
+        vol.Optional(CONF_MYMETER_PASSWORD, default=""): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        ),
+        vol.Optional(CONF_OKTA_COOKIES, default=""): str,
+        vol.Optional(CONF_PORTAL_COOKIES, default=""): str,
+    }
+    if portal_url is not None:
+        fields = {
+            vol.Optional(CONF_PORTAL_URL, default=portal_url): _portal_selector(),
+            **fields,
+        }
+    return vol.Schema(fields)
 
 
 class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -144,6 +171,9 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self) -> None:
         """Initialize the flow."""
         self._reauth_entry: ConfigEntry | None = None
+        # MyMeter portal for this flow. The first setup step chooses it; reauth and
+        # reconfigure read the entry's stored portal (old entries have none = NJ).
+        self._portal_url = DEFAULT_PORTAL_URL
         # Assisted CAPTCHA state: the same client/jar/antiforgery token, in memory
         # only, so the human proof posts to the session that issued the challenge.
         self._captcha_pending: dict[str, Any] | None = None
@@ -162,6 +192,22 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Drop the pending sign-in when HA removes this flow (cancel/abort/finish)."""
         self._flow_removed = True
         self._clear_captcha_pending()
+
+    @property
+    def _okta_supported(self) -> bool:
+        """Okta sign-in exists only on the PSE&G New Jersey portal."""
+        return self._portal_url == DEFAULT_PORTAL_URL
+
+    def _sign_in_error(
+        self, okta_cookies: str, portal_cookies: str, email: str, password: str
+    ) -> str | None:
+        """Return the form error for these sign-in fields, or None when they can run."""
+        if okta_cookies and not self._okta_supported:
+            # Okta is PSE&G New Jersey only; this portal never starts that flow.
+            return "okta_nj_only"
+        if not okta_cookies and not portal_cookies and not (email and password):
+            return "missing_credentials"
+        return None
 
     async def _async_fetch_meter(
         self, client: PsegClient
@@ -199,7 +245,11 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> tuple[dict[str, str], PsegClient | None, str | None, list[str]]:
         """Validate credentials; return the active meter id and every meter id on the account."""
         client = PsegClient(
-            okta_cookies=okta_cookies, portal_cookies=portal_cookies, email=email, password=password
+            okta_cookies=okta_cookies,
+            portal_cookies=portal_cookies,
+            email=email,
+            password=password,
+            portal_url=self._portal_url,
         )
         # A human sign-in may name the account's meter from the authenticated
         # payload's `Meter #N` labels when this window's usage is not published yet
@@ -270,7 +320,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 renew = renewal_client.renew_remember_me
                 no_session_error = "remember_me_failed"
             else:
-                renewal_client = PsegClient(okta_cookies=okta_cookies)
+                renewal_client = PsegClient(okta_cookies=okta_cookies, portal_url=self._portal_url)
                 renew = renewal_client.ensure_session
                 no_session_error = "okta_no_session"
             try:
@@ -486,9 +536,12 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def _async_show_credentials_form(
         self, step_id: str, error: str
     ) -> ConfigFlowResult:
+        # The first setup step keeps showing the chosen portal on an error retry;
+        # reauth and reconfigure never offer it.
+        portal_url = self._portal_url if step_id == "user" else None
         return self.async_show_form(
             step_id=step_id,
-            data_schema=_credentials_schema(),
+            data_schema=_credentials_schema(portal_url=portal_url),
             errors={"base": error},
         )
 
@@ -716,7 +769,12 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return self.async_abort(reason="already_configured")
         return self.async_create_entry(
             title=f"PSE&G ({meter_id})",
-            data={**fields, CONF_METER_ID: meter_id, CONF_KNOWN_METER_IDS: meter_ids},
+            data={
+                **fields,
+                CONF_PORTAL_URL: self._portal_url,
+                CONF_METER_ID: meter_id,
+                CONF_KNOWN_METER_IDS: meter_ids,
+            },
         )
 
     async def _async_finish_captcha(
@@ -787,15 +845,20 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return stopped
 
             if client is not None and errors.get("base") == _CAPTCHA_REQUIRED:
-                captcha_error = await self._async_begin_captcha(
-                    step_id, client, entry, okta_cookies, portal_cookies, email, password
-                )
-                stopped = self._async_sign_in_stopped(operation)
-                if stopped is not None:
-                    return stopped
-                if captcha_error is None:
-                    return await self.async_step_captcha()
-                errors["base"] = captcha_error
+                if not self._okta_supported:
+                    # The CAPTCHA helper only injects a proof on the New Jersey
+                    # origin, so another portal is asked for a browser cookie.
+                    errors = {"base": "captcha_nj_only"}
+                else:
+                    captcha_error = await self._async_begin_captcha(
+                        step_id, client, entry, okta_cookies, portal_cookies, email, password
+                    )
+                    stopped = self._async_sign_in_stopped(operation)
+                    if stopped is not None:
+                        return stopped
+                    if captcha_error is None:
+                        return await self.async_step_captcha()
+                    errors["base"] = captcha_error
 
             if not errors and client and meter_id:
                 fields = {
@@ -818,24 +881,34 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id=step_id,
-            data_schema=_credentials_schema(),
+            data_schema=_credentials_schema(
+                portal_url=self._portal_url if step_id == "user" else None
+            ),
             errors=errors,
         )
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 1: Enter Okta and optional portal cookies."""
+        """Step 1: Choose the MyMeter portal and enter its sign-in."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
+            # A form without the portal field (an error retry) keeps the portal
+            # already chosen; unknown or empty values fall back to New Jersey.
+            # A sign-in still in flight reads the portal across awaits and saves
+            # it, so a second submit must not change it underneath (it is then
+            # refused as busy).
+            if CONF_PORTAL_URL in user_input and self._sign_in_operation is None:
+                self._portal_url = resolve_portal_url(user_input[CONF_PORTAL_URL])
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
             portal_cookies = _normalize_portal_cookies(user_input.get(CONF_PORTAL_COOKIES, ""))
             email = user_input.get(CONF_MYMETER_EMAIL, "").strip()
             password = user_input.get(CONF_MYMETER_PASSWORD, "")
 
-            if not okta_cookies and not portal_cookies and not (email and password):
-                errors["base"] = "missing_credentials"
+            error = self._sign_in_error(okta_cookies, portal_cookies, email, password)
+            if error is not None:
+                errors["base"] = error
             else:
                 return await self._async_guarded_sign_in(
                     "user", None, okta_cookies, portal_cookies, email, password
@@ -843,7 +916,7 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="user",
-            data_schema=_credentials_schema(),
+            data_schema=_credentials_schema(portal_url=self._portal_url),
             errors=errors,
         )
 
@@ -853,6 +926,9 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle re-authentication triggered by HA."""
         self._reauth_entry = self.hass.config_entries.async_get_entry(
             self.context["entry_id"]
+        )
+        self._portal_url = resolve_portal_url(
+            (self._reauth_entry.data if self._reauth_entry else {}).get(CONF_PORTAL_URL)
         )
         return await self.async_step_reauth_confirm()
 
@@ -873,8 +949,9 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._reauth_entry, email, password
                 )
 
-            if not okta_cookies and not portal_cookies and not (email and password):
-                errors["base"] = "missing_credentials"
+            error = self._sign_in_error(okta_cookies, portal_cookies, email, password)
+            if error is not None:
+                errors["base"] = error
             else:
                 return await self._async_guarded_sign_in(
                     "reauth_confirm",
@@ -896,9 +973,9 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle manual reconfiguration from device/service settings."""
         errors: dict[str, str] = {}
-        reconfigure_entry = self.hass.config_entries.async_get_entry(
-            self.context["entry_id"]
-        )
+        reconfigure_entry = self.hass.config_entries.async_get_entry(self.context["entry_id"])
+        if reconfigure_entry:
+            self._portal_url = resolve_portal_url(reconfigure_entry.data.get(CONF_PORTAL_URL))
 
         if user_input is not None and reconfigure_entry:
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
@@ -911,8 +988,9 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     reconfigure_entry, email, password
                 )
 
-            if not okta_cookies and not portal_cookies and not (email and password):
-                errors["base"] = "missing_credentials"
+            error = self._sign_in_error(okta_cookies, portal_cookies, email, password)
+            if error is not None:
+                errors["base"] = error
             else:
                 return await self._async_guarded_sign_in(
                     "reconfigure",

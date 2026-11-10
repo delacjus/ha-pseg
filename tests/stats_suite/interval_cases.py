@@ -51,7 +51,7 @@ class IntervalCase:
         day = arg1 if isinstance(arg1, date) else EDT_REFERENCE_DAY
         hour = arg2 if arg2 is not None else (arg1 if isinstance(arg1, int) else 0)
 
-        if self.case_id in ("strict_same_date", "strict_next_date", "surrounding_whitespace"):
+        if self.case_id in ("strict_same_date", "strict_next_date", "surrounding_whitespace", "unpadded_same_date"):
             return day
         if self.case_id == "wrong_start_date":
             return day + timedelta(days=1)
@@ -63,7 +63,7 @@ class IntervalCase:
 
     def get_expected_end_date_only(self, day: date = EDT_REFERENCE_DAY, hour: int = 0) -> date | None:
         """Return expected end date_only result for this day and hour."""
-        if self.case_id in ("strict_same_date", "surrounding_whitespace"):
+        if self.case_id in ("strict_same_date", "surrounding_whitespace", "unpadded_same_date"):
             return day
         if self.case_id == "strict_next_date":
             return day + timedelta(days=1)
@@ -108,7 +108,7 @@ class IntervalCase:
                 return False
             return None
 
-        if self.case_id in ("strict_same_date", "strict_next_date", "surrounding_whitespace", "exact_both_aware_valid"):
+        if self.case_id in ("strict_same_date", "strict_next_date", "surrounding_whitespace", "exact_both_aware_valid", "unpadded_same_date"):
             return True
         if self.case_id in ("wrong_start_date", "both_aware_wrong_start"):
             return False
@@ -319,11 +319,25 @@ INTERVAL_CASES: tuple[IntervalCase, ...] = (
         is_malformed=True,
     ),
     IntervalCase(
-        case_id="missing_zero_padding",
-        family="missing_zero_padding",
+        case_id="unpadded_same_date",
+        family="unpadded_same_date",
         description="Date label missing leading zeros on same calendar date",
         start_label_fn=lambda d, _h, _st: f"{d.month}/{d.day}/{d.year}",
         end_label_fn=lambda d, _h, _st: f"{d.month}/{d.day}/{d.year}",
+        expected_helper_date_only=EDT_REFERENCE_DAY,
+        expected_helper_label_match=None,
+        expected_invalid_points=0,
+        expected_complete=True,
+        expected_reason=None,
+        nearest_valid_family="valid_label",
+        is_malformed=False,
+    ),
+    IntervalCase(
+        case_id="two_digit_year",
+        family="two_digit_year",
+        description="Date label with two-digit year (e.g. 10/15/26)",
+        start_label_fn=lambda d, _h, _st: d.strftime("%m/%d/%y"),
+        end_label_fn=lambda d, _h, _st: d.strftime("%m/%d/%y"),
         expected_helper_date_only=None,
         expected_helper_label_match=None,
         expected_invalid_points=0,
