@@ -77,6 +77,21 @@ _LOGGER = logging.getLogger(__name__)
 _CAPTCHA_REQUIRED = "captcha_required"
 _CAPTCHA_STEP_ID = "captcha"
 
+# Initial setup steps: portal first, then a menu that routes to one sign-in method.
+_AUTH_METHOD_STEP = "auth_method"
+_MYMETER_LOGIN_STEP = "mymeter_login"
+_MYMETER_COOKIE_STEP = "mymeter_cookie"
+_OKTA_COOKIES_STEP = "okta_cookies"
+
+# Any of these means the submit is the pre-menu one-shot form that carries its own
+# sign-in fields; a submit with none of them only chooses the portal.
+_SIGN_IN_FIELDS = (
+    CONF_MYMETER_EMAIL,
+    CONF_MYMETER_PASSWORD,
+    CONF_OKTA_COOKIES,
+    CONF_PORTAL_COOKIES,
+)
+
 # Reload only an enabled entry Home Assistant already tried to set up. Reloading an
 # enabled NOT_LOADED entry would start it; reloading a disabled entry is needless
 # work and can abort a reauth flow even though setup is skipped.
@@ -161,6 +176,47 @@ def _credentials_schema(portal_url: str | None = None) -> vol.Schema:
             **fields,
         }
     return vol.Schema(fields)
+
+
+def _portal_schema(portal_url: str) -> vol.Schema:
+    """First setup step: only the portal choice.
+
+    Extra keys are allowed so a caller that still submits the pre-menu one-shot
+    form (portal plus sign-in fields) reaches the legacy path in async_step_user
+    instead of failing schema validation. The rendered form itself shows only the
+    portal.
+    """
+    return vol.Schema(
+        {vol.Optional(CONF_PORTAL_URL, default=portal_url): _portal_selector()},
+        extra=vol.ALLOW_EXTRA,
+    )
+
+
+def _mymeter_login_schema() -> vol.Schema:
+    """MyMeter email/password method: only its own two fields."""
+    return vol.Schema(
+        {
+            vol.Optional(CONF_MYMETER_EMAIL, default=""): str,
+            vol.Optional(CONF_MYMETER_PASSWORD, default=""): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.PASSWORD)
+            ),
+        }
+    )
+
+
+def _mymeter_cookie_schema() -> vol.Schema:
+    """MyMeter cookie method: only the pasted cookie field."""
+    return vol.Schema({vol.Optional(CONF_PORTAL_COOKIES, default=""): str})
+
+
+def _okta_cookies_schema() -> vol.Schema:
+    """Okta cookie method: only the pasted cookie field."""
+    return vol.Schema({vol.Optional(CONF_OKTA_COOKIES, default=""): str})
+
+
+def _has_sign_in_fields(user_input: dict[str, Any]) -> bool:
+    """True when this submit carries any sign-in field (the legacy one-shot form)."""
+    return any(key in user_input for key in _SIGN_IN_FIELDS)
 
 
 class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -536,14 +592,34 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def _async_show_credentials_form(
         self, step_id: str, error: str
     ) -> ConfigFlowResult:
-        # The first setup step keeps showing the chosen portal on an error retry;
-        # reauth and reconfigure never offer it.
-        portal_url = self._portal_url if step_id == "user" else None
+        # Every step re-renders only its own fields; step "user" keeps the portal
+        # choice, and the shared reauth/reconfigure form keeps all four fields.
         return self.async_show_form(
             step_id=step_id,
-            data_schema=_credentials_schema(portal_url=portal_url),
+            data_schema=self._async_step_schema(step_id),
             errors={"base": error},
         )
+
+    def _async_step_schema(self, step_id: str) -> vol.Schema:
+        """Return the form schema for a credential step."""
+        if step_id == "user":
+            # Legacy one-shot path and its error retry: the portal plus every
+            # field, exactly as before the sign-in method menu existed.
+            return _credentials_schema(portal_url=self._portal_url)
+        if step_id == _MYMETER_LOGIN_STEP:
+            return _mymeter_login_schema()
+        if step_id == _MYMETER_COOKIE_STEP:
+            return _mymeter_cookie_schema()
+        if step_id == _OKTA_COOKIES_STEP:
+            return _okta_cookies_schema()
+        return _credentials_schema()
+
+    def _auth_method_options(self) -> list[str]:
+        """Sign-in methods for this flow's portal; Okta exists only in New Jersey."""
+        options = [_MYMETER_LOGIN_STEP, _MYMETER_COOKIE_STEP]
+        if self._okta_supported:
+            options.append(_OKTA_COOKIES_STEP)
+        return options
 
     async def _async_refresh_captcha_challenge(self, pending: dict[str, Any]) -> bool:
         """Fetch a fresh antiforgery token for another attempt on the same jar."""
@@ -881,18 +957,14 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id=step_id,
-            data_schema=_credentials_schema(
-                portal_url=self._portal_url if step_id == "user" else None
-            ),
+            data_schema=self._async_step_schema(step_id),
             errors=errors,
         )
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Step 1: Choose the MyMeter portal and enter its sign-in."""
-        errors: dict[str, str] = {}
-
+        """Step 1: choose the MyMeter portal, or take the legacy one-shot form."""
         if user_input is not None:
             # A form without the portal field (an error retry) keeps the portal
             # already chosen; unknown or empty values fall back to New Jersey.
@@ -901,6 +973,9 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # refused as busy).
             if CONF_PORTAL_URL in user_input and self._sign_in_operation is None:
                 self._portal_url = resolve_portal_url(user_input[CONF_PORTAL_URL])
+            if not _has_sign_in_fields(user_input):
+                # Portal-only submit: the sign-in method menu picks how to continue.
+                return await self.async_step_auth_method()
             okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
             portal_cookies = _normalize_portal_cookies(user_input.get(CONF_PORTAL_COOKIES, ""))
             email = user_input.get(CONF_MYMETER_EMAIL, "").strip()
@@ -908,15 +983,101 @@ class PsegConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             error = self._sign_in_error(okta_cookies, portal_cookies, email, password)
             if error is not None:
-                errors["base"] = error
-            else:
-                return await self._async_guarded_sign_in(
-                    "user", None, okta_cookies, portal_cookies, email, password
+                # The one-shot caller sent its own fields, so its retry form keeps
+                # them, exactly as before the menu existed.
+                return self.async_show_form(
+                    step_id="user",
+                    data_schema=_credentials_schema(portal_url=self._portal_url),
+                    errors={"base": error},
                 )
+            return await self._async_guarded_sign_in(
+                "user", None, okta_cookies, portal_cookies, email, password
+            )
 
         return self.async_show_form(
             step_id="user",
-            data_schema=_credentials_schema(portal_url=self._portal_url),
+            data_schema=_portal_schema(self._portal_url),
+            errors={},
+        )
+
+    async def async_step_auth_method(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 2: pick a sign-in method for the portal chosen in step 1.
+
+        Home Assistant routes a menu choice to the chosen step before calling any
+        handler, so this method only renders the menu (or re-renders it when the
+        dialog is reopened without a choice).
+        """
+        return self.async_show_menu(
+            step_id=_AUTH_METHOD_STEP,
+            menu_options=self._auth_method_options(),
+        )
+
+    async def async_step_mymeter_login(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 3a: sign in with the MyMeter email and password only."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            email = user_input.get(CONF_MYMETER_EMAIL, "").strip()
+            password = user_input.get(CONF_MYMETER_PASSWORD, "")
+            error = self._sign_in_error("", "", email, password)
+            if error is not None:
+                errors["base"] = error
+            else:
+                return await self._async_guarded_sign_in(
+                    _MYMETER_LOGIN_STEP, None, "", "", email, password
+                )
+
+        return self.async_show_form(
+            step_id=_MYMETER_LOGIN_STEP,
+            data_schema=_mymeter_login_schema(),
+            errors=errors,
+        )
+
+    async def async_step_mymeter_cookie(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 3b: sign in with a pasted MyMeter cookie only."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            portal_cookies = _normalize_portal_cookies(user_input.get(CONF_PORTAL_COOKIES, ""))
+            error = self._sign_in_error("", portal_cookies, "", "")
+            if error is not None:
+                errors["base"] = error
+            else:
+                return await self._async_guarded_sign_in(
+                    _MYMETER_COOKIE_STEP, None, "", portal_cookies, "", ""
+                )
+
+        return self.async_show_form(
+            step_id=_MYMETER_COOKIE_STEP,
+            data_schema=_mymeter_cookie_schema(),
+            errors=errors,
+        )
+
+    async def async_step_okta_cookies(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Step 3c: sign in with Okta cookies (New Jersey only)."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            okta_cookies = user_input.get(CONF_OKTA_COOKIES, "").strip()
+            error = self._sign_in_error(okta_cookies, "", "", "")
+            if error is not None:
+                errors["base"] = error
+            else:
+                return await self._async_guarded_sign_in(
+                    _OKTA_COOKIES_STEP, None, okta_cookies, "", "", ""
+                )
+
+        return self.async_show_form(
+            step_id=_OKTA_COOKIES_STEP,
+            data_schema=_okta_cookies_schema(),
             errors=errors,
         )
 

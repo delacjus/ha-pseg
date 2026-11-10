@@ -89,11 +89,16 @@ After installing and restarting, click the button above to start setup directly,
 
 1. In Home Assistant, go to **Settings** > **Devices & Services** > **Add Integration**.
 2. Search for **PSE&G Energy (New Jersey)**.
-3. Select your portal: **PSE&G New Jersey** (default) or **PSEG Long Island (experimental)**.
-4. Enter your MyMeter **Email** and **Password** (the login credentials from your MyMeter portal: `https://mysmartenergy.nj.pseg.com`, or `https://mysmartenergy.psegliny.com` for Long Island).
-5. Click **Submit**.
+3. Choose your portal: **PSE&G New Jersey** (default) or **PSEG Long Island (experimental)**.
+4. Choose how to sign in:
+   - **MyMeter email and password** (recommended): the Email/Password boxes on your MyMeter portal.
+   - **Paste a MyMeter cookie**: the `MM_RememberMe` value, or the full Cookie header, from a signed-in Dashboard request.
+   - **Paste Okta cookies** (New Jersey only): cookies from the "Sign in Via My Account" flow.
+5. Fill in only that method's fields and click **Submit**.
 
-**PSEG Long Island is experimental.** It has not been tested against the real Long Island portal. A Long Island entry supports MyMeter email/password sign-in and pasted portal cookies. It does not support Okta sign-in, and the CAPTCHA helper extension only works on the New Jersey portal, so if Long Island asks for a CAPTCHA, use a browser cookie instead.
+The next screen asks only for the fields of the method you picked, so you never have to fill in a method you are not using. The methods that paste cookies are the older manual options and are described below.
+
+**PSEG Long Island is experimental.** It has not been tested against the real Long Island portal. A Long Island entry supports MyMeter email/password sign-in and pasted portal cookies. It does not support Okta sign-in, so its menu has no Okta option, and the CAPTCHA helper extension only works on the New Jersey portal, so if Long Island asks for a CAPTCHA, use a browser cookie instead.
 
 ### Getting a MyMeter email login
 
@@ -105,7 +110,7 @@ Most PSE&G customers only have the "Sign in Via My Account" (Okta) login, which 
 4. Select your electric meter, choose access with **No end date**, and send the invitation.
 5. Open the invitation email, follow the link, and choose a password and security question.
 
-Use that invited email and password in step 3 above. Signing in this way never asks for an SMS or email code.
+Use that invited email and password with the **MyMeter email and password** method in steps 4 and 5 above. Signing in this way never asks for an SMS or email code.
 
 Home Assistant stores your credentials and session cookies in the integration config entry and uses them to authenticate directly with MyMeter over HTTPS. The integration does not encrypt these stored values itself; protect access to your Home Assistant configuration and backups.
 
@@ -169,9 +174,9 @@ The regular data poll has a separate saved-password fallback when the renewal po
 
 ### Older Authentication Methods
 
-The integration retains backward-compatible support for legacy login methods:
-- **Okta cookies**: Paste cookies obtained after signing in via "Sign in Via My Account". These sessions expire after approximately one hour and require periodic manual pasting.
-- **MyMeter cookie paste (`MM_RememberMe`)**: Setup accepts a pasted cookie only if `MM_RememberMe` can renew the session by itself. Home Assistant drops the session cookie (`MM_SID`) and requires one successful renewal before it creates the entry, so a cookie that cannot renew is rejected even while your browser is still signed in. This differs from the upstream test above, where a pasted `MM_SID` stayed signed in because requests kept it busy. In the October 2026 test, `MM_RememberMe` did not restore the expired session. If the cookie is rejected or the session later expires, Home Assistant prompts for your MyMeter email and password.
+The sign-in method menu also offers the two legacy paste methods, each with its own short form:
+- **Okta cookies** (New Jersey only): Paste cookies obtained after signing in via "Sign in Via My Account". These sessions expire after approximately one hour and require periodic manual pasting.
+- **MyMeter cookie paste (`MM_RememberMe`)**: Paste the `MM_RememberMe` value, or the full Cookie header, from a signed-in Dashboard request. Setup accepts a pasted cookie only if `MM_RememberMe` can renew the session by itself. Home Assistant drops the session cookie (`MM_SID`) and requires one successful renewal before it creates the entry, so a cookie that cannot renew is rejected even while your browser is still signed in. This differs from the upstream test above, where a pasted `MM_SID` stayed signed in because requests kept it busy. In the October 2026 test, `MM_RememberMe` did not restore the expired session. If the cookie is rejected or the session later expires, Home Assistant prompts for your MyMeter email and password.
 
 ## Hourly and Daily Statistics
 
