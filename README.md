@@ -70,7 +70,7 @@ Install `delacjus/ha-pseg` as a custom repository in HACS:
    ```
 4. Set the **Category** to **Integration** and click **Add**.
 5. Find **PSE&G Energy (NJ and Long Island)** in the integrations list.
-6. Click **Download**, select the latest release (**1.7.2** or newer), and click **Download**.
+6. Click **Download**, select the latest release (**1.7.3** or newer), and click **Download**.
 7. Restart Home Assistant.
 
 > **Note**: Do not search for or install the default upstream listing (`sidprax/ha-pseg`). This fork must be added as a custom repository using the URL above.
