@@ -350,6 +350,7 @@ def _mock_renewal(m, dashboard_responses) -> dict:
         f"{PORTAL_BASE_URL}/Dashboard", dashboard_responses
     )
     calls["home"] = m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+    m.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
     calls["chart"] = m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
     calls["chart_data"] = m.get(
         f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=DAILY_CHART
@@ -602,6 +603,7 @@ def test_verified_cookie_rotation_rearms_but_keeps_the_global_gap() -> None:
             ],
         )
         m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+        m.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
         chart_data_mock = m.get(
             f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data
@@ -645,6 +647,7 @@ def test_poll_shares_the_cookie_renewal_budget_with_the_keepalive() -> None:
             ],
         )
         m.get(f"{PORTAL_BASE_URL}/", text=PORTAL_HOME)
+        m.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
         m.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=DAILY_CHART)
         login = m.post(f"{PORTAL_BASE_URL}/Home/Login", json=LOGIN_OK)

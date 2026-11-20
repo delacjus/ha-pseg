@@ -175,6 +175,7 @@ FLOW_PLANS: Mapping[str, Mapping[str, tuple[Leg, ...]]] = MappingProxyType(
                     DASH,
                     LANDING_HOP,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     DASH,

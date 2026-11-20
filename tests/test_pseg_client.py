@@ -785,6 +785,7 @@ REMEMBER_PORTAL = "MM_SID=dead; MM_RememberMe=remember_token"
 def _renewal_identity_fixture(client, mocker):
     """Give admitted renewal tests a real DAILY proof for their known entry."""
     client.set_expected_meter_ids({"12345"})
+    mocker.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
     mocker.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
     mocker.get(
         f"{PORTAL_BASE_URL}/Dashboard/ChartData",
@@ -1511,6 +1512,7 @@ def test_fetch_energy_data_requests_hourly_and_keeps_daily_authority() -> None:
         def chart_data(request, context):
             return hourly if intervals[-1] == "5" else daily
 
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
         parsed = client.fetch_energy_data(14)
@@ -1553,6 +1555,7 @@ def test_hourly_chart_failure_keeps_daily_statistics(status) -> None:
                 return {"error": "unavailable"}
             return daily
 
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
         parsed = client.fetch_energy_data(14)
@@ -1588,6 +1591,7 @@ def test_hourly_chart_redirect_is_an_auth_failure() -> None:
                 return {"AjaxResults": [{"Action": "Redirect"}]}
             return daily
 
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
         with pytest.raises(PsegOktaSessionExpired):
@@ -1702,6 +1706,7 @@ def test_history_range_still_requests_the_daily_interval() -> None:
             intervals.append(urllib.parse.parse_qs(request.text)["UsageInterval"][0])
             return "ok"
 
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=_daily_chart(day, 17.5))
         records = client.fetch_history_range("2026-10-18", "2026-10-18")
@@ -1757,6 +1762,7 @@ def test_mixed_granularity_when_one_closed_day_is_incomplete() -> None:
         def chart_data(request, context):
             return hourly if intervals[-1] == "5" else daily
 
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
         parsed = client.fetch_energy_data(14)

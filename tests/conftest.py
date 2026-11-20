@@ -473,6 +473,9 @@ def _real_pseg_statistics_writes(tmp_path, hass_storage, monkeypatch):
 # including the systemic lifecycle harness, runs it for real.
 _SERVICE_TYPE_LEGACY_FAKES = frozenset(
     {
+        "independent/auth_r1/test_independent_auth_r1.py",
+        "independent/auth_r2/test_independent_auth_r2.py",
+        "independent/auth_r3/test_independent_auth_r3.py",
         "independent/auth_r4/test_independent_auth_r4.py",
         "independent/auth_r5/test_independent_auth_r5.py",
         "independent/auth_r6/test_independent_auth_r6.py",
@@ -483,6 +486,7 @@ _SERVICE_TYPE_LEGACY_FAKES = frozenset(
         "independent/auth_r8/test_independent_auth_r8.py",
         "independent/auth_r9/test_independent_auth_r9.py",
         "independent/hourly_r5/test_independent_hourly_r5.py",
+        "test_auth_review_r2_regressions.py",
         "test_auth_review_r3_regressions.py",
         "test_auth_review_r4_regressions.py",
         "test_auth_review_r5_regressions.py",

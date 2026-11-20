@@ -1580,6 +1580,8 @@ class PsegClient:
         end_str = end_dt.strftime("%Y-%m-%d")
         proof_leg = self._snapshot_cookie_leg()
         try:
+            # A session left on gas would otherwise fail the electric meter check.
+            self._select_service_type()
             payload = self._fetch_chart_json(token, USAGE_INTERVAL_DAILY, start_str, end_str)
             parsed = self._parse_chart_data(payload)
             if not self._has_valid_meter_read(
@@ -1931,39 +1933,46 @@ class PsegClient:
             self._restore_cookie_leg(leg)
             raise
 
-        if resp.status_code >= 400:
-            self._restore_cookie_leg(leg)
-            _LOGGER.warning(
-                "MyMeter did not accept service type %s (HTTP %s)",
-                self.service_type,
-                resp.status_code,
+        status = resp.status_code
+        where = ""
+        if 200 <= status < 300:
+            accepted = True
+        elif 300 <= status < 400:
+            # Only a same-origin redirect back to /Dashboard confirms the selection;
+            # a sign-in, maintenance or other page does not.
+            target = urllib.parse.urlparse(
+                urllib.parse.urljoin(
+                    f"{self.portal_base_url}{SERVICE_TYPE_PATH}",
+                    resp.headers.get("Location") or "",
+                )
             )
+            where = f" to {target.hostname or ''}{target.path}"
+            accepted = (
+                target.hostname == self.portal_host
+                and target.path.rstrip("/").lower() == "/dashboard"
+            )
+        else:
+            accepted = False
+
+        if accepted:
+            _LOGGER.debug("Selected MyMeter service type %s (HTTP %s)", self.service_type, status)
             return
 
-        if 300 <= resp.status_code < 400:
-            location = resp.headers.get("Location") or ""
-            loc_parsed = urllib.parse.urlparse(location)
-            loc_path = loc_parsed.path.lower()
-            is_sign_in = (
-                not loc_path.rstrip("/").endswith("/dashboard")
-                and (
-                    loc_parsed.hostname == OKTA_HOST
-                    or loc_path.strip("/") in ("", "home", "home/index")
-                    or any(marker in loc_path for marker in _LOGIN_PATH_MARKERS)
-                )
+        # Never keep cookies from a response that did not confirm the selection.
+        self._restore_cookie_leg(leg)
+        if not self._expected_meter_ids:
+            # No known electric meter yet (first setup): the chart could still show
+            # gas and nothing would tell the readings apart, so do not read it.
+            raise PsegTransientError(
+                f"MyMeter did not select the electric service (HTTP {status}{where})"
             )
-            if is_sign_in:
-                self._restore_cookie_leg(leg)
-                _LOGGER.warning(
-                    "MyMeter redirected service type selection to sign-in (%s%s)",
-                    loc_parsed.hostname or "", loc_parsed.path,
-                )
-                return
-
-        _LOGGER.debug(
-            "Selected MyMeter service type %s (HTTP %s)",
+        # The known electric meter IDs reject any other meter's chart, so the
+        # fetch goes on, as upstream does.
+        _LOGGER.warning(
+            "MyMeter did not accept service type %s (HTTP %s%s)",
             self.service_type,
-            resp.status_code,
+            status,
+            where,
         )
 
     @_locked
