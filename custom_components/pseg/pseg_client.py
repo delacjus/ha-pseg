@@ -1955,8 +1955,8 @@ class PsegClient:
             if is_sign_in:
                 self._restore_cookie_leg(leg)
                 _LOGGER.warning(
-                    "MyMeter redirected service type selection to sign-in: %s",
-                    location,
+                    "MyMeter redirected service type selection to sign-in (%s%s)",
+                    loc_parsed.hostname or "", loc_parsed.path,
                 )
                 return
 
