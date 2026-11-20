@@ -1926,7 +1926,7 @@ class PsegClient:
         except (requests.Timeout, requests.ConnectionError) as err:
             self._restore_cookie_leg(leg)
             raise PsegTransientError(f"Network timeout/connection error: {err}") from err
-        except requests.RequestException as err:
+        except (requests.RequestException, ValueError) as err:
             self._restore_cookie_leg(leg)
             raise PsegTransientError(f"Request error selecting service type: {err}") from err
         except Exception:
@@ -1935,24 +1935,28 @@ class PsegClient:
 
         status = resp.status_code
         where = ""
-        if 200 <= status < 300:
-            accepted = True
-        elif 300 <= status < 400:
-            # Only a same-origin redirect back to /Dashboard confirms the selection;
-            # a sign-in, maintenance or other page does not.
-            target = urllib.parse.urlparse(
-                urllib.parse.urljoin(
-                    f"{self.portal_base_url}{SERVICE_TYPE_PATH}",
-                    resp.headers.get("Location") or "",
+        accepted = 200 <= status < 300
+        if status in (301, 302, 303, 307, 308):
+            # Only a redirect back to this portal's own https /Dashboard confirms the
+            # selection; a sign-in, maintenance, other-origin or malformed target does not.
+            try:
+                target = urllib.parse.urlsplit(
+                    urllib.parse.urljoin(
+                        f"{self.portal_base_url}{SERVICE_TYPE_PATH}",
+                        resp.headers.get("Location") or "",
+                    )
                 )
-            )
-            where = f" to {target.hostname or ''}{target.path}"
-            accepted = (
-                target.hostname == self.portal_host
-                and target.path.rstrip("/").lower() == "/dashboard"
-            )
-        else:
-            accepted = False
+                port = target.port
+            except ValueError:
+                where = " to a malformed location"
+            else:
+                where = f" to {target.hostname or ''}{target.path}"
+                accepted = (
+                    target.scheme == "https"
+                    and target.hostname == self.portal_host
+                    and port in (None, 443)
+                    and target.path.rstrip("/").lower() == "/dashboard"
+                )
 
         if accepted:
             _LOGGER.debug("Selected MyMeter service type %s (HTTP %s)", self.service_type, status)

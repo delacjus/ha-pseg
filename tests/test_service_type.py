@@ -140,6 +140,11 @@ UNCONFIRMED_REPLIES = [
     pytest.param(302, "/Maintenance", id="maintenance"),
     pytest.param(302, "Login", id="relative-login"),
     pytest.param(302, "https://evil.example/Dashboard", id="other-host"),
+    pytest.param(302, "http://mysmartenergy.nj.pseg.com/Dashboard", id="plain-http"),
+    pytest.param(302, "https://mysmartenergy.nj.pseg.com:8443/Dashboard", id="other-port"),
+    pytest.param(302, "https://mysmartenergy.nj.pseg.com:99999/Dashboard", id="bad-port"),
+    pytest.param(302, "https://[mysmartenergy/Dashboard", id="malformed"),
+    pytest.param(304, "/Dashboard", id="not-modified"),
 ]
 
 
@@ -174,7 +179,12 @@ def test_unconfirmed_selection_stops_before_chart(
 
 @pytest.mark.parametrize(
     "location",
-    ["https://mysmartenergy.nj.pseg.com/Dashboard", "/Dashboard", "/dashboard/"],
+    [
+        "https://mysmartenergy.nj.pseg.com/Dashboard",
+        "https://mysmartenergy.nj.pseg.com:443/Dashboard",
+        "/Dashboard",
+        "/dashboard/",
+    ],
 )
 def test_dashboard_redirect_confirms_selection_without_known_meter(location: str) -> None:
     client = PsegClient(portal_cookies="MM_SID=abc")
@@ -220,7 +230,7 @@ def test_renewal_identity_proof_selects_electric_before_its_chart() -> None:
     assert calls == [f"{PORTAL_URL_NJ}{SERVICE_TYPE_URL}", "chart"]
 
 
-@pytest.mark.parametrize("error_cls", [requests.ConnectionError, requests.Timeout])
+@pytest.mark.parametrize("error_cls", [requests.ConnectionError, requests.Timeout, ValueError])
 def test_network_error_raises_transient_error(error_cls: type[Exception]) -> None:
     client = PsegClient(portal_cookies="MM_SID=abc")
     client.session.cookies.set("initial", "valid", domain="mysmartenergy.nj.pseg.com", path="/")
