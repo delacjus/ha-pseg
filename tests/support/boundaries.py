@@ -997,9 +997,9 @@ def _expected_admission(
       is the signed-out bounce the renewal reacts to. The reservation is durable
       metadata even when the owner is retired before its proof completes, and the
       frozen declared clock fixes its timestamp.
-    * Retirement between the proof ``POST /Dashboard/Chart`` and its ``ChartData``
-      read leaves the declared proof transient, which earns the single allowed
-      retry. A completion that is later refused publication (every other boundary)
+    * Retirement after the proof's electric-service selection or between the proof
+      ``POST /Dashboard/Chart`` and its ``ChartData`` read leaves the declared
+      proof transient, which earns the single allowed retry. A completion that is later refused publication (every other boundary)
       settles without one.
     * A same-cookie human handoff starts a new generation: the sequence count
       returns to zero while the generated-at timestamp is retained, because the
@@ -1013,10 +1013,9 @@ def _expected_admission(
     ]
     if case.flow == "R" and case.operation == "auth_renewal" and len(dashboards) >= 2:
         admission.update(sequences=1, last_sequence_at=DECLARED_CLOCK)
-        if (case.boundary.method, case.boundary.path, case.boundary.leg) == (
-            "POST",
-            "/Dashboard/Chart",
-            1,
+        if (case.boundary.method, case.boundary.path, case.boundary.leg) in (
+            ("GET", "/Dashboard/SetServiceType", 1),
+            ("POST", "/Dashboard/Chart", 1),
         ):
             admission["retry_eligible"] = True
     if case.transition == "handoff":

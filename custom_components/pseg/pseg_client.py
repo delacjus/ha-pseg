@@ -1958,21 +1958,12 @@ class PsegClient:
             _LOGGER.debug("Selected MyMeter service type %s (HTTP %s)", self.service_type, status)
             return
 
-        # Never keep cookies from a response that did not confirm the selection.
+        # Never keep cookies from a response that did not confirm the selection, and
+        # never read a chart that may still show gas: a gas reading would be stored
+        # as kWh. The update fails as transient (no reauth) and retries later.
         self._restore_cookie_leg(leg)
-        if not self._expected_meter_ids:
-            # No known electric meter yet (first setup): the chart could still show
-            # gas and nothing would tell the readings apart, so do not read it.
-            raise PsegTransientError(
-                f"MyMeter did not select the electric service (HTTP {status}{where})"
-            )
-        # The known electric meter IDs reject any other meter's chart, so the
-        # fetch goes on, as upstream does.
-        _LOGGER.warning(
-            "MyMeter did not accept service type %s (HTTP %s%s)",
-            self.service_type,
-            status,
-            where,
+        raise PsegTransientError(
+            f"MyMeter did not select the electric service (HTTP {status}{where})"
         )
 
     @_locked

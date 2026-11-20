@@ -1,6 +1,5 @@
 """Tests for selecting the electric service before fetching usage."""
 
-import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -144,45 +143,31 @@ UNCONFIRMED_REPLIES = [
 ]
 
 
+@pytest.mark.parametrize("fetch_name", ["fetch_energy_data", "fetch_history_range"])
+@pytest.mark.parametrize("known_meter", [False, True], ids=["first-setup", "known-meter"])
 @pytest.mark.parametrize(("status", "location"), UNCONFIRMED_REPLIES)
-def test_unconfirmed_selection_with_known_meter_warns_and_fetch_continues(
-    caplog: pytest.LogCaptureFixture, status: int, location: str | None
+def test_unconfirmed_selection_stops_before_chart(
+    status: int, location: str | None, known_meter: bool, fetch_name: str
 ) -> None:
     client = PsegClient(portal_cookies="MM_SID=abc")
-    client.set_expected_meter_ids(["12345678"])
-    client.session.cookies.set("initial", "valid", domain="mysmartenergy.nj.pseg.com", path="/")
-
-    with (
-        patch.object(client, "_get_verification_token", return_value="mock_token"),
-        patch.object(client.session, "get", side_effect=_selection_reply(client, status, location)),
-        patch.object(client, "_fetch_chart_json", side_effect=StopFetch) as mock_chart,
-        caplog.at_level(logging.WARNING),
-    ):
-        with pytest.raises(StopFetch):
-            client.fetch_energy_data()
-
-    mock_chart.assert_called_once()
-    assert f"MyMeter did not accept service type 1 (HTTP {status}" in caplog.text
-    assert client.session.cookies.get("unwanted") is None
-    assert client.session.cookies.get("initial") == "valid"
-
-
-@pytest.mark.parametrize(("status", "location"), UNCONFIRMED_REPLIES)
-def test_unconfirmed_selection_without_known_meter_stops_before_chart(
-    status: int, location: str | None
-) -> None:
-    client = PsegClient(portal_cookies="MM_SID=abc")
+    if known_meter:
+        client.set_expected_meter_ids(["12345678"])
     client.session.cookies.set("initial", "valid", domain="mysmartenergy.nj.pseg.com", path="/")
 
     with (
         patch.object(client, "_get_verification_token", return_value="mock_token"),
         patch.object(client.session, "get", side_effect=_selection_reply(client, status, location)),
         patch.object(client, "_fetch_chart_json") as mock_chart,
+        patch.object(client.session, "post") as mock_post,
     ):
         with pytest.raises(PsegTransientError, match="did not select the electric service"):
-            client.fetch_energy_data()
+            if fetch_name == "fetch_history_range":
+                client.fetch_history_range("2026-10-01", "2026-10-31")
+            else:
+                client.fetch_energy_data()
 
     mock_chart.assert_not_called()
+    mock_post.assert_not_called()
     assert client.session.cookies.get("unwanted") is None
     assert client.session.cookies.get("initial") == "valid"
 

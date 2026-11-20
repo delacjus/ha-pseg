@@ -650,8 +650,8 @@ BASELINE_FAST = {
         "1ee83a54c2d4d9bf01243041f829576d36c1bb7f923dc64b26d59f36ebbc96a9",
     ),
     "tests/test_service_type.py": (
-        25,
-        "08afa45a05fcd0e93c79d344739dd5d5bbf9d4a05afb7989ed2a6cb020d33c6c",
+        37,
+        "c970c79790415e5774738849e29f2c88ebdd61f14e5040a47544dd951fae4493",
     ),
     "tests/test_session_lifecycle.py": (
         17,
