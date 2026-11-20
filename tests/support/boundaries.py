@@ -119,6 +119,7 @@ class Boundary:
 
 
 DASH = ("GET", "/Dashboard", False)
+SET_SERVICE_TYPE = ("GET", "/Dashboard/SetServiceType", False)
 CHART = ("POST", "/Dashboard/Chart", False)
 CHART_DATA = ("GET", "/Dashboard/ChartData", False)
 LANDING_HOP = ("GET", "/", True)
@@ -128,8 +129,15 @@ SSO_SIGNIN = ("GET", "/Saml/okta-prod/SignIn", False)
 SSO_ACS = ("POST", "/Saml/okta-prod/Acs", False)
 SSO_ACS_HOP = ("GET", "/Dashboard", True)
 
-HEALTHY_POLL: tuple[Leg, ...] = (DASH, CHART, CHART_DATA, CHART, CHART_DATA)
-BACKFILL_SLICE: tuple[Leg, ...] = (DASH, CHART, CHART_DATA)
+HEALTHY_POLL: tuple[Leg, ...] = (
+    DASH,
+    SET_SERVICE_TYPE,
+    CHART,
+    CHART_DATA,
+    CHART,
+    CHART_DATA,
+)
+BACKFILL_SLICE: tuple[Leg, ...] = (DASH, SET_SERVICE_TYPE, CHART, CHART_DATA)
 
 #: Declared per-flow, per-operation route plans. The dry run must reproduce exactly
 #: these legs (method, path, redirect hop) for the inventory test to pass.
@@ -146,6 +154,7 @@ FLOW_PLANS: Mapping[str, Mapping[str, tuple[Leg, ...]]] = MappingProxyType(
                     LOGIN_POST,
                     DASH,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     CHART,
@@ -166,9 +175,11 @@ FLOW_PLANS: Mapping[str, Mapping[str, tuple[Leg, ...]]] = MappingProxyType(
                     DASH,
                     LANDING_HOP,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     CHART,
@@ -179,11 +190,13 @@ FLOW_PLANS: Mapping[str, Mapping[str, tuple[Leg, ...]]] = MappingProxyType(
                 "reauth": (
                     DASH,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     CHART,
                     CHART_DATA,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     CHART,
@@ -205,6 +218,7 @@ FLOW_PLANS: Mapping[str, Mapping[str, tuple[Leg, ...]]] = MappingProxyType(
                     SSO_ACS_HOP,
                     DASH,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     CHART,
@@ -983,9 +997,9 @@ def _expected_admission(
       is the signed-out bounce the renewal reacts to. The reservation is durable
       metadata even when the owner is retired before its proof completes, and the
       frozen declared clock fixes its timestamp.
-    * Retirement between the proof ``POST /Dashboard/Chart`` and its ``ChartData``
-      read leaves the declared proof transient, which earns the single allowed
-      retry. A completion that is later refused publication (every other boundary)
+    * Retirement after the proof's electric-service selection or between the proof
+      ``POST /Dashboard/Chart`` and its ``ChartData`` read leaves the declared
+      proof transient, which earns the single allowed retry. A completion that is later refused publication (every other boundary)
       settles without one.
     * A same-cookie human handoff starts a new generation: the sequence count
       returns to zero while the generated-at timestamp is retained, because the
@@ -999,10 +1013,9 @@ def _expected_admission(
     ]
     if case.flow == "R" and case.operation == "auth_renewal" and len(dashboards) >= 2:
         admission.update(sequences=1, last_sequence_at=DECLARED_CLOCK)
-        if (case.boundary.method, case.boundary.path, case.boundary.leg) == (
-            "POST",
-            "/Dashboard/Chart",
-            1,
+        if (case.boundary.method, case.boundary.path, case.boundary.leg) in (
+            ("GET", "/Dashboard/SetServiceType", 1),
+            ("POST", "/Dashboard/Chart", 1),
         ):
             admission["retry_eligible"] = True
     if case.transition == "handoff":

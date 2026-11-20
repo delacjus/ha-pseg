@@ -142,7 +142,7 @@ async def test_completed_rotation_is_the_independent_latest_checkpoint(
     case = replace(
         next(c for c in FAST_CASES if c.case_id == "fast_first_poll_unload"),
         case_id="gateb-completed-rotation",
-        boundary=boundary_for("L", "poll", 3),
+        boundary=boundary_for("L", "poll", 4),
     )
     result = await bm.run_fence_case(hass, case)
     assert captured and result.oracle_codes == ()
@@ -277,7 +277,7 @@ def test_each_setup_boundary_has_a_real_sweep_case() -> None:
         expected = {b.boundary_id for b in bm.generated_boundaries(flow)["setup"]}
         cases = [c for c in SLOW_CASES if c.flow == flow and c.operation == "setup"]
         assert {c.boundary.boundary_id for c in cases} == expected
-        assert len(cases) == len(expected) == 5
+        assert len(cases) == len(expected) == 6
         assert all(c.tier == "slow" for c in cases)
         # The sweep must reach later setup requests, not only the first.
         assert {c.boundary.leg for c in cases} == {1, 2}

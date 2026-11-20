@@ -649,6 +649,10 @@ BASELINE_FAST = {
         4,
         "1ee83a54c2d4d9bf01243041f829576d36c1bb7f923dc64b26d59f36ebbc96a9",
     ),
+    "tests/test_service_type.py": (
+        59,
+        "0b28f6721e7bd64b67b6770e0ad5a6d69ab2a3b0dc95d1c2cf4d1cc47cfad0e5",
+    ),
     "tests/test_session_lifecycle.py": (
         17,
         "450e7184e7e4f4d6eef040cec966b578f85dbe5191dac0cecf240ac69bc9d831",
@@ -673,8 +677,8 @@ BASELINE_FAST = {
 
 GENERATED_INVENTORY = {
     "tests/systemic/test_dispatch_fence.py": (
-        118,
-        "9e220b347c525a3be33e68b32e1511df467dea7947125eec7ace4fa70461bcb6",
+        134,
+        "f51e594d31abbda568fdf9643591d5fd84a6de2b71fa953ee4958662c1f20a9a",
     ),
     "tests/systemic/test_exit_checkpoint.py": (
         180,
@@ -757,6 +761,7 @@ BASELINE_MODULE_MARKS = {
     "tests/test_release_snapshot.py": (),
     "tests/test_renewal_admission.py": (),
     "tests/test_security_guards.py": (),
+    "tests/test_service_type.py": (),
     "tests/test_session_lifecycle.py": (),
     "tests/test_statistics.py": (),
     "tests/test_statistics_hourly.py": (),

@@ -239,8 +239,15 @@ def slow_case_matrix() -> tuple[FenceCase, ...]:
     """Build the complete slow retirement sweep."""
     cases: list[FenceCase] = []
     for flow in FLOWS:
-        for index, (operation, boundary) in enumerate(sweepable_boundaries(flow)):
-            transition = "unload" if operation == "setup" else slow_transition(flow, index)
+        index = 0
+        for operation, boundary in sweepable_boundaries(flow):
+            if operation == "setup":
+                transition = "unload"
+            elif boundary.path == "/Dashboard/SetServiceType":
+                transition = "unload"
+            else:
+                transition = slow_transition(flow, index)
+                index += 1
             cases.append(
                 FenceCase(
                     case_id=f"slow_{flow}_{operation}_{boundary.method.lower()}"

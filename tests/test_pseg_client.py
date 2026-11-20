@@ -343,6 +343,11 @@ def test_expired_flag_cleared_after_successful_fetch() -> None:
     client.okta_session_expired_at = "2026-10-20T00:00:00+00:00"
     with requests_mock.Mocker(session=client.session) as m:
         m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
         m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="")
         m.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=CHART_JSON)
         data = client.fetch_energy_data(14)
@@ -667,6 +672,11 @@ def test_history_range_reads_every_meter_series() -> None:
     }
     with requests_mock.Mocker(session=client.session) as m:
         m.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        m.get(
+            f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
         m.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
         m.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart)
         records = client.fetch_history_range("2026-10-18", "2026-10-18")
@@ -719,6 +729,11 @@ def test_conflicting_daily_points_abort_poll_and_backfill(values: tuple[float, f
     client = PsegClient(portal_cookies="MM_SID=x")
     with requests_mock.Mocker(session=client.session) as mock:
         mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart)
         with pytest.raises(PsegTransientError, match="Conflicting daily readings from the portal"):
@@ -770,6 +785,7 @@ REMEMBER_PORTAL = "MM_SID=dead; MM_RememberMe=remember_token"
 def _renewal_identity_fixture(client, mocker):
     """Give admitted renewal tests a real DAILY proof for their known entry."""
     client.set_expected_meter_ids({"12345"})
+    mocker.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
     mocker.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
     mocker.get(
         f"{PORTAL_BASE_URL}/Dashboard/ChartData",
@@ -1482,6 +1498,11 @@ def test_fetch_energy_data_requests_hourly_and_keeps_daily_authority() -> None:
 
     with requests_mock.Mocker(session=client.session) as mock:
         mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
 
         def chart(request, context):
             interval = urllib.parse.parse_qs(request.text)["UsageInterval"][0]
@@ -1491,6 +1512,7 @@ def test_fetch_energy_data_requests_hourly_and_keeps_daily_authority() -> None:
         def chart_data(request, context):
             return hourly if intervals[-1] == "5" else daily
 
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
         parsed = client.fetch_energy_data(14)
@@ -1517,6 +1539,11 @@ def test_hourly_chart_failure_keeps_daily_statistics(status) -> None:
 
     with requests_mock.Mocker(session=client.session) as mock:
         mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
 
         def chart(request, context):
             intervals.append(urllib.parse.parse_qs(request.text)["UsageInterval"][0])
@@ -1528,6 +1555,7 @@ def test_hourly_chart_failure_keeps_daily_statistics(status) -> None:
                 return {"error": "unavailable"}
             return daily
 
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
         parsed = client.fetch_energy_data(14)
@@ -1548,6 +1576,11 @@ def test_hourly_chart_redirect_is_an_auth_failure() -> None:
 
     with requests_mock.Mocker(session=client.session) as mock:
         mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
 
         def chart(request, context):
             intervals.append(urllib.parse.parse_qs(request.text)["UsageInterval"][0])
@@ -1558,6 +1591,7 @@ def test_hourly_chart_redirect_is_an_auth_failure() -> None:
                 return {"AjaxResults": [{"Action": "Redirect"}]}
             return daily
 
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
         with pytest.raises(PsegOktaSessionExpired):
@@ -1662,11 +1696,17 @@ def test_history_range_still_requests_the_daily_interval() -> None:
 
     with requests_mock.Mocker(session=client.session) as mock:
         mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
 
         def chart(request, context):
             intervals.append(urllib.parse.parse_qs(request.text)["UsageInterval"][0])
             return "ok"
 
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=_daily_chart(day, 17.5))
         records = client.fetch_history_range("2026-10-18", "2026-10-18")
@@ -1709,6 +1749,11 @@ def test_mixed_granularity_when_one_closed_day_is_incomplete() -> None:
 
     with requests_mock.Mocker(session=client.session) as mock:
         mock.get(f"{PORTAL_BASE_URL}/Dashboard", text=DASHBOARD_WITH_TOKEN)
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
 
         def chart(request, context):
             intervals.append(urllib.parse.parse_qs(request.text)["UsageInterval"][0])
@@ -1717,6 +1762,7 @@ def test_mixed_granularity_when_one_closed_day_is_incomplete() -> None:
         def chart_data(request, context):
             return hourly if intervals[-1] == "5" else daily
 
+        mock.get(f"{PORTAL_BASE_URL}/Dashboard/SetServiceType", status_code=302, headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"})
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text=chart)
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", json=chart_data)
         parsed = client.fetch_energy_data(14)
@@ -1743,6 +1789,11 @@ def test_hourly_http401_raises_mode_specific_auth_expiry() -> None:
             requests_mock.Mocker() as mock,
             patch.object(client, "_get_verification_token", return_value="token"),
         ):
+            mock.get(
+                f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+                status_code=302,
+                headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+            )
             mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", status_code=200)
             mock.get(
                 f"{PORTAL_BASE_URL}/Dashboard/ChartData",
@@ -1897,6 +1948,11 @@ def test_hourly_login_redirect_is_typed_auth_loss(mode, leg) -> None:
         requests_mock.Mocker(session=client.session) as mock,
         patch.object(client, "_get_verification_token", return_value="token"),
     ):
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", posts)
         mock.get(f"{PORTAL_BASE_URL}/Dashboard/ChartData", gets)
         mock.get(login, text="<html>anonymous portal page</html>")
@@ -2185,6 +2241,11 @@ def test_hourly_contract_sample_capture_raising_does_not_fail_poll(caplog) -> No
         ),
         caplog.at_level(logging.DEBUG),
     ):
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
         mock.get(
             f"{PORTAL_BASE_URL}/Dashboard/ChartData",
@@ -2225,6 +2286,11 @@ def test_hourly_contract_sample_hourly_leg_calls_parser_with_identical_object() 
         patch.object(client, "_fetch_chart_json", side_effect=spy_fetch),
         patch.object(client, "_parse_hourly_chart", side_effect=spy_parse),
     ):
+        mock.get(
+            f"{PORTAL_BASE_URL}/Dashboard/SetServiceType",
+            status_code=302,
+            headers={"Location": f"{PORTAL_BASE_URL}/Dashboard"},
+        )
         mock.post(f"{PORTAL_BASE_URL}/Dashboard/Chart", text="ok")
         mock.get(
             f"{PORTAL_BASE_URL}/Dashboard/ChartData",
@@ -2815,6 +2881,7 @@ def test_cost_auth_rejected_never_marks_auth_failure() -> None:
 
     with (
         patch.object(client, "_get_verification_token", return_value="tok"),
+        patch.object(client, "_select_service_type"),
         patch.object(client, "_fetch_chart_json", side_effect=[daily, hourly]),
         patch(
             "custom_components.pseg.cost_evidence.execute_cost_sampler",

@@ -464,3 +464,54 @@ def _real_pseg_statistics_writes(tmp_path, hass_storage, monkeypatch):
         yield
     finally:
         storage.Store._async_write_data = original_write
+
+
+# Test modules whose hand-built fake portals predate the NJ electric-service
+# selection (GET /Dashboard/SetServiceType). They script or count every portal
+# request, so the extra leg would break their routes and counts without changing
+# what they test. The selection is switched off for them only; every other test,
+# including the systemic lifecycle harness, runs it for real.
+_SERVICE_TYPE_LEGACY_FAKES = frozenset(
+    {
+        "independent/auth_r1/test_independent_auth_r1.py",
+        "independent/auth_r2/test_independent_auth_r2.py",
+        "independent/auth_r3/test_independent_auth_r3.py",
+        "independent/auth_r4/test_independent_auth_r4.py",
+        "independent/auth_r5/test_independent_auth_r5.py",
+        "independent/auth_r6/test_independent_auth_r6.py",
+        "independent/auth_r6/test_independent_auth_r6_extra.py",
+        "independent/auth_r6/test_independent_auth_r6_flows.py",
+        "independent/auth_r6/test_independent_auth_r6_race.py",
+        "independent/auth_r7b/test_independent_auth_r7b.py",
+        "independent/auth_r8/test_independent_auth_r8.py",
+        "independent/auth_r9/test_independent_auth_r9.py",
+        "independent/hourly_r5/test_independent_hourly_r5.py",
+        "test_auth_review_r2_regressions.py",
+        "test_auth_review_r3_regressions.py",
+        "test_auth_review_r4_regressions.py",
+        "test_auth_review_r5_regressions.py",
+        "test_auth_review_regressions.py",
+        "test_captcha_flow.py",
+        "test_concurrency.py",
+        "test_cost_evidence.py",
+        "test_cost_evidence_review_r2.py",
+        "test_cost_evidence_review_r3.py",
+        "test_statistics_recorder.py",
+    }
+)
+
+
+@pytest.fixture(autouse=True)
+def _skip_service_type_for_legacy_fakes(request, monkeypatch):
+    """Turn off the electric-service selection for modules in _SERVICE_TYPE_LEGACY_FAKES."""
+    from pathlib import Path as _Path
+
+    try:
+        rel = _Path(request.node.path).relative_to(_Path(__file__).parent).as_posix()
+    except ValueError:
+        rel = ""
+    if rel in _SERVICE_TYPE_LEGACY_FAKES:
+        from custom_components.pseg.pseg_client import PsegClient
+
+        monkeypatch.setattr(PsegClient, "_select_service_type", lambda self: None)
+    yield
