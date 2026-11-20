@@ -166,6 +166,15 @@ def script_healthy_portal(
         ("GET", f"{base}/Dashboard"), Reply.ok(body=dashboard_html, reply_id="SYNTH_DASHBOARD_OK")
     )
     portal.script(
+        ("GET", f"{base}/Dashboard/SetServiceType"),
+        Reply.redirect(
+            location=f"{base}/Dashboard",
+            headers={"Location": f"{base}/Dashboard"},
+            status_code=302,
+            reply_id="SYNTH_SET_SERVICE_TYPE_OK",
+        ),
+    )
+    portal.script(
         ("POST", f"{base}/Dashboard/Chart"), Reply.ok(body="{}", reply_id="SYNTH_CHART_OK")
     )
     portal.script(

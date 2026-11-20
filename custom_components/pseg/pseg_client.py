@@ -34,6 +34,7 @@ from .const import (
     DEFAULT_PORTAL_URL,
     DEFAULT_PRICE_PER_KWH,
     OKTA_HOST,
+    PORTAL_SERVICE_TYPES,
     REMEMBER_ME_COOKIE,
     STATISTICS_PRECISION,
     USAGE_INTERVAL_DAILY,
@@ -62,6 +63,8 @@ _METER_SERIES = re.compile(r"^\s*Meter #(\d+)")
 # PSEG app daily totals exactly across 9/9 days (Oct 10-18, 2026).
 # Date-only proof requires both start and end labels to be strict MM/DD/YYYY.
 HOURLY_X_CONTRACT = "ny_wall_clock_hour_start"
+# Selects the service (electric or gas) whose usage the dashboard chart shows.
+SERVICE_TYPE_PATH = "/Dashboard/SetServiceType"
 
 
 def _parse_iso_day(value: Any) -> date | None:
@@ -309,6 +312,7 @@ class PsegClient:
         # The entry's MyMeter portal, validated against the known PORTALS so a stored
         # or hand-edited value can never redirect requests to an arbitrary host.
         self.portal_base_url = resolve_portal_url(portal_url)
+        self.service_type = PORTAL_SERVICE_TYPES.get(self.portal_base_url)
         self.portal_host = urllib.parse.urlparse(self.portal_base_url).hostname or ""
         # Okta is PSE&G New Jersey's sign-in. Every other MyMeter portal is reached
         # with its own browser session only, so the Okta host is never allowlisted
@@ -1900,6 +1904,68 @@ class PsegClient:
         self._note_confirmed_generation()
         return str(tag["value"])
 
+    def _select_service_type(self) -> None:
+        """Make the dashboard chart show the electric service on portals that also have gas.
+
+        MyMeter answers with a redirect back to the dashboard, which is not followed.
+        """
+        if self.service_type is None:
+            return
+
+        leg = self._snapshot_cookie_leg()
+        try:
+            self._check_active_owner()
+            resp = self.session.get(
+                f"{self.portal_base_url}{SERVICE_TYPE_PATH}",
+                params={"ServiceType": self.service_type},
+                allow_redirects=False,
+                timeout=25,
+            )
+        except (requests.Timeout, requests.ConnectionError) as err:
+            self._restore_cookie_leg(leg)
+            raise PsegTransientError(f"Network timeout/connection error: {err}") from err
+        except requests.RequestException as err:
+            self._restore_cookie_leg(leg)
+            raise PsegTransientError(f"Request error selecting service type: {err}") from err
+        except Exception:
+            self._restore_cookie_leg(leg)
+            raise
+
+        if resp.status_code >= 400:
+            self._restore_cookie_leg(leg)
+            _LOGGER.warning(
+                "MyMeter did not accept service type %s (HTTP %s)",
+                self.service_type,
+                resp.status_code,
+            )
+            return
+
+        if 300 <= resp.status_code < 400:
+            location = resp.headers.get("Location") or ""
+            loc_parsed = urllib.parse.urlparse(location)
+            loc_path = loc_parsed.path.lower()
+            is_sign_in = (
+                not loc_path.rstrip("/").endswith("/dashboard")
+                and (
+                    loc_parsed.hostname == OKTA_HOST
+                    or loc_path.strip("/") in ("", "home", "home/index")
+                    or any(marker in loc_path for marker in _LOGIN_PATH_MARKERS)
+                )
+            )
+            if is_sign_in:
+                self._restore_cookie_leg(leg)
+                _LOGGER.warning(
+                    "MyMeter redirected service type selection to sign-in: %s",
+                    location,
+                )
+                return
+
+        _LOGGER.debug(
+            "Selected MyMeter service type %s (HTTP %s)",
+            self.service_type,
+            resp.status_code,
+        )
+
     @_locked
     def fetch_history_range(
         self,
@@ -1910,6 +1976,7 @@ class PsegClient:
         """Fetch historical usage and cost data across a date range in polite chunks."""
         self._check_active_owner()
         token = self._get_verification_token()
+        self._select_service_type()
 
         try:
             start_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
@@ -2071,6 +2138,7 @@ class PsegClient:
         """
         self._check_active_owner()
         token = self._get_verification_token()
+        self._select_service_type()
 
         end_dt = datetime.now()
         start_dt = end_dt - timedelta(days=days_back)

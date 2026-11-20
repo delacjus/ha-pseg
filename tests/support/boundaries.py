@@ -119,6 +119,7 @@ class Boundary:
 
 
 DASH = ("GET", "/Dashboard", False)
+SET_SERVICE_TYPE = ("GET", "/Dashboard/SetServiceType", False)
 CHART = ("POST", "/Dashboard/Chart", False)
 CHART_DATA = ("GET", "/Dashboard/ChartData", False)
 LANDING_HOP = ("GET", "/", True)
@@ -128,8 +129,15 @@ SSO_SIGNIN = ("GET", "/Saml/okta-prod/SignIn", False)
 SSO_ACS = ("POST", "/Saml/okta-prod/Acs", False)
 SSO_ACS_HOP = ("GET", "/Dashboard", True)
 
-HEALTHY_POLL: tuple[Leg, ...] = (DASH, CHART, CHART_DATA, CHART, CHART_DATA)
-BACKFILL_SLICE: tuple[Leg, ...] = (DASH, CHART, CHART_DATA)
+HEALTHY_POLL: tuple[Leg, ...] = (
+    DASH,
+    SET_SERVICE_TYPE,
+    CHART,
+    CHART_DATA,
+    CHART,
+    CHART_DATA,
+)
+BACKFILL_SLICE: tuple[Leg, ...] = (DASH, SET_SERVICE_TYPE, CHART, CHART_DATA)
 
 #: Declared per-flow, per-operation route plans. The dry run must reproduce exactly
 #: these legs (method, path, redirect hop) for the inventory test to pass.
@@ -146,6 +154,7 @@ FLOW_PLANS: Mapping[str, Mapping[str, tuple[Leg, ...]]] = MappingProxyType(
                     LOGIN_POST,
                     DASH,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     CHART,
@@ -169,6 +178,7 @@ FLOW_PLANS: Mapping[str, Mapping[str, tuple[Leg, ...]]] = MappingProxyType(
                     CHART,
                     CHART_DATA,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     CHART,
@@ -179,11 +189,13 @@ FLOW_PLANS: Mapping[str, Mapping[str, tuple[Leg, ...]]] = MappingProxyType(
                 "reauth": (
                     DASH,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     CHART,
                     CHART_DATA,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     CHART,
@@ -205,6 +217,7 @@ FLOW_PLANS: Mapping[str, Mapping[str, tuple[Leg, ...]]] = MappingProxyType(
                     SSO_ACS_HOP,
                     DASH,
                     DASH,
+                    SET_SERVICE_TYPE,
                     CHART,
                     CHART_DATA,
                     CHART,

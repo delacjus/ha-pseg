@@ -133,7 +133,7 @@ def test_slow_matrix_covers_every_swept_boundary_once() -> None:
     assert SWEEP_EXCLUSIONS == {}
     assert "s_keepalive_sso" not in EXCLUSIONS
     assert "setup" not in EXCLUSIONS
-    assert sum(case.operation == "setup" for case in SLOW_CASES) == 20
+    assert sum(case.operation == "setup" for case in SLOW_CASES) == 24
     problems = sweep_coverage_problems()
     assert not problems, f"slow sweep coverage gaps: {problems}"
     tiers = case_tiers()

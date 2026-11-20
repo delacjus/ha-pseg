@@ -37,7 +37,7 @@ This fork deliberately does **not** adopt:
 
 ## Features
 
-- **Daily Smart Meter Readings**: Captures daily electricity usage in kWh (`sensor.pseg_electricity_consumption`).
+- **Daily Smart Meter Readings**: Captures daily electricity usage in kWh (`sensor.pseg_electricity_consumption`). On PSE&G NJ accounts that also have gas, the electric service is selected before each fetch, so viewing gas in the browser does not change what the integration reads.
 - **Hourly Statistics**: Live since release 1.6.0. Automatically promotes complete days to hourly External Statistics with strict validation guards.
 - **Cost Estimation**: Estimates daily electricity costs in USD (`sensor.pseg_electricity_cost`) using your configured $/kWh rate.
 - **Home Assistant Energy Dashboard**: Native External Long-Term Statistics (LTS) support for both consumption and cost.
